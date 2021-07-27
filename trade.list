@@ -1,12 +1,13 @@
 # > OANDA
-DOMAIN-SUFFIX,api-fxtrade.oanda.com
-DOMAIN-SUFFIX,fxtrade-rates.oanda.com
-DOMAIN-SUFFIX,fxserver01-cr.oanda.com
-DOMAIN-SUFFIX,experiments.oanda.com
+DOMAIN,api-fxtrade.oanda.com
+DOMAIN,,fxtrade-rates.oanda.com
+DOMAIN,,fxserver01-cr.oanda.com
+DOMAIN,,experiments.oanda.com
 DOMAIN-SUFFIX,oanda.com
 DOMAIN-SUFFIX,app-measurement.com
 DOMAIN-SUFFIX,content.mql5.com
 DOMAIN-SUFFIX,sentry.io
+IP-CIDR,198.105.26.0/24,no-resolve
 DOMAIN-KEYWORD,oanda
 DOMAIN-KEYWORD,fxTrade
 DOMAIN-KEYWORD,fxserver
