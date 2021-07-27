@@ -1,0 +1,22 @@
+# > OANDA
+DOMAIN,,api-fxtrade.oanda.com
+DOMAIN,,fxtrade-rates.oanda.com
+DOMAIN,,fxserver01-cr.oanda.com
+DOMAIN,,experiments.oanda.com
+DOMAIN-SUFFIX,oanda.com
+DOMAIN-SUFFIX,app-measurement.com
+DOMAIN-SUFFIX,content.mql5.com
+DOMAIN-SUFFIX,sentry.io
+DOMAIN-KEYWORD,OANDA
+DOMAIN-KEYWORD,oanda
+DOMAIN-KEYWORD,fxTrade
+DOMAIN-KEYWORD,fxserver
+USER-AGENT,OANDA*
+USER-AGENT,fxTrade*
+PROCESS-NAME,OANDA*
+PROCESS-NAME,fxTrade*
+# > TradingView
+DOMAIN-SUFFIX,tradingview.com
+DOMAIN-KEYWORD,tradingview
+USER-AGENT,TradingView*
+PROCESS-NAME,TradingView*
