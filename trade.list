@@ -1,9 +1,6 @@
 # > OANDA
-DOMAIN,api-fxtrade.oanda.com
-DOMAIN,fxtrade-rates.oanda.com
-DOMAIN,fxserver01-cr.oanda.com
-DOMAIN,experiments.oanda.com
 DOMAIN-SUFFIX,oanda.com
+DOMAIN-SUFFIX,mktomma.com
 DOMAIN-SUFFIX,app-measurement.com
 DOMAIN-SUFFIX,content.mql5.com
 DOMAIN-SUFFIX,sentry.io
