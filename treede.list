@@ -3,14 +3,18 @@ DOMAIN-SUFFIX,oanda.com
 DOMAIN-KEYWORD,oanda
 DOMAIN-KEYWORD,fxTrade
 DOMAIN-KEYWORD,fxserver
-IP-CIDR,188.26.198.0/24, no-resolve
-IP-CIDR,52.231.114.0/24, no-resolve
-PROCESS-NAME,OANDA*
-PROCESS-NAME,fxTrade*
+PROCESS-NAME,OANDA
+PROCESS-NAME,fxTrade
 USER-AGENT,OANDA*
 USER-AGENT,fxTrade*
 # > TradingView
 DOMAIN-SUFFIX,tradingview.com
 DOMAIN-KEYWORD,tradingview
-PROCESS-NAME,TradingView*
+PROCESS-NAME,TradingView
 USER-AGENT,TradingView*
+# > Others
+DOMAIN-SUFFIX,chasingreturns.com
+DOMAIN-SUFFIX,app-measurement.com
+DOMAIN-SUFFIX,content.mql5.com
+DOMAIN-SUFFIX,mktomma.com
+DOMAIN-SUFFIX,sentry.io
