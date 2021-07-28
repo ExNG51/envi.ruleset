@@ -1,12 +1,10 @@
 # > OANDA
 DOMAIN-SUFFIX,oanda.com
-DOMAIN-SUFFIX,mktomma.com
-DOMAIN-SUFFIX,app-measurement.com
-DOMAIN-SUFFIX,content.mql5.com
-DOMAIN-SUFFIX,sentry.io
 DOMAIN-KEYWORD,oanda
 DOMAIN-KEYWORD,fxTrade
 DOMAIN-KEYWORD,fxserver
+IP-CIDR,188.26.198.179, no-resolve
+IP-CIDR,52.231.114.183, no-resolve
 PROCESS-NAME,OANDA*
 PROCESS-NAME,fxTrade*
 USER-AGENT,OANDA*
