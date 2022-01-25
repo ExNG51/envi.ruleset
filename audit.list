@@ -30,3 +30,6 @@ IP-CIDR,34.120.208.123/24,no-resolve
 IP-CIDR,103.123.108.186/24,no-resolve
 IP-CIDR,104.26.5.19/24,no-resolve
 IP-CIDR,172.67.69.76/24,no-resolve
+IP-CIDR,130.211.7.151/24,no-resolve
+IP-CIDR,130.211.15.150/24,no-resolve
+IP-CIDR,164.100.77.113/24,no-resolve
