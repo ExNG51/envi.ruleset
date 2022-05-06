@@ -1,5 +1,5 @@
-#!name=Panels
-#!desc=4 in 1 Panel includes network info、flush dns、traffic statistics、stream unlock check
+#!name=4 in 1 Panel
+#!desc=4 in 1 Panel includes Network Info、Flush DNS、Traffic Statistics、Stream Unlock Check
 #!system=ios
 
 [Panel]
