@@ -1,0 +1,5 @@
+#!name=Enable Subnet Rule
+#!desc=Use SSID:value to match the Wi-Fi SSID
+
+[Rule]
+SUBNET,SSID:InternalPG,DIRECT
