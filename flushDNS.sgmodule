@@ -1,4 +1,4 @@
-#!name=Flush DNS
+#!name=Flush DNS with Symbol
 #!desc=Flush DNS, show the DNS delay and server.
 #!system=ios
 
