@@ -1,5 +1,5 @@
-  #!name=Subnet Rule
-  #!desc=Enable the subnet rule for SSID
-  
-  [Rule]
-  SUBNET,SSID:InternalPG,DIRECT
+#!name=Subnet Rule
+#!desc=Enable the subnet rule for SSID
+
+[Rule]
+SUBNET,SSID:InternalPG,DIRECT
