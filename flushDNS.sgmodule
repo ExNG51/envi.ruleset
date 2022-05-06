@@ -3,7 +3,7 @@
 #!system=ios
 
 [Script]
-flushDNS = type=generic,timeout=10,script-path=https://raw.githubusercontent.com/zZPiglet/Task/master/asset/flushDNS.js,argument=icon=network&color=#86abee
+flushDNS = type=generic,timeout=10,script-path=https://raw.githubusercontent.com/zZPiglet/Task/master/asset/flushDNS.js,argument=icon=personalhotspot.circle.fill&color=#28d35c
 
 [Panel]
 flushDNS = script-name=flushDNS,update-interval=600
