@@ -7,14 +7,8 @@ PROCESS-NAME,OANDA
 PROCESS-NAME,fxTrade
 USER-AGENT,OANDA*
 USER-AGENT,fxTrade*
-# > TradingView
-DOMAIN-SUFFIX,tradingview.com
-DOMAIN-KEYWORD,tradingview
-PROCESS-NAME,TradingView
-USER-AGENT,TradingView*
 # > Others
 DOMAIN-SUFFIX,chasingreturns.com
-DOMAIN-SUFFIX,app-measurement.com
 DOMAIN-SUFFIX,content.mql5.com
 DOMAIN-SUFFIX,mktomma.com
 DOMAIN-SUFFIX,sentry.io
