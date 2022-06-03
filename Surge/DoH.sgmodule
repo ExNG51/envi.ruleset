@@ -3,5 +3,5 @@
 
 [General]
 dns-server = 119.29.29.29, 223.5.5.5, 1.1.1.1
-doh-server = https://doh.pub/dns-query, https://dns.alidns.com/dns-query, https://1dot1dot1dot1.cloudflare-dns.com/, https://dns.google/dns-query, https://dns.twnic.tw/dns-query, https://public.dns.iij.jp/dns-query
+doh-server = https://doh.pub/dns-query, https://dns.alidns.com/dns-query, https://cloudflare-dns.com/dns-query, https://dns.google/dns-query, https://dns.twnic.tw/dns-query, https://public.dns.iij.jp/dns-query
 doh-follow-outbound-mode = true
