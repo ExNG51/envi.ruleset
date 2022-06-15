@@ -7,16 +7,30 @@ PROCESS-NAME,OANDA
 PROCESS-NAME,fxTrade
 USER-AGENT,OANDA*
 USER-AGENT,fxTrade*
+# > IBKR
+DOMAIN-SUFFIX,interactivebrokers.com
+DOMAIN-SUFFIX,ibkr.com
+DOMAIN-SUFFIX,ibllc.com
+DOMAIN-SUFFIX,ibllc.com.cn
+DOMAIN-SUFFIX,usfuture.nj
+DOMAIN-SUFFIX,usfarm.nj
+DOMAIN-SUFFIX,ushmds.nj
+PROCESS-NAME,IBKR*
+USER-AGENT,IBKR*
 # > Others
 DOMAIN-SUFFIX,chasingreturns.com
 DOMAIN-SUFFIX,content.mql5.com
+DOMAIN-SUFFIX,metatrader4.com
 DOMAIN-SUFFIX,mktomma.com
 DOMAIN-SUFFIX,sentry.io
 DOMAIN-SUFFIX,ig.com
-DOMAIN-SUFFIX,interactivebrokers.com
 DOMAIN-SUFFIX,cityindex.com.sg
 DOMAIN-SUFFIX,icmarkets.com
 DOMAIN-SUFFIX,fxcm.com
 DOMAIN-SUFFIX,home.saxo
 DOMAIN-SUFFIX,forex.com
 DOMAIN-SUFFIX,cmcmarkets.com
+DOMAIN-SUFFIX,robinhood.com
+DOMAIN-SUFFIX,refinitiv.com
+DOMAIN-SUFFIX,dowjones.io
+DOMAIN-SUFFIX,bloomberg.com
