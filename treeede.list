@@ -34,3 +34,9 @@ DOMAIN-SUFFIX,robinhood.com
 DOMAIN-SUFFIX,refinitiv.com
 DOMAIN-SUFFIX,dowjones.io
 DOMAIN-SUFFIX,bloomberg.com
+# > CN News
+DOMAIN-SUFFIX,finance.sina.com.cn
+DOMAIN-SUFFIX,wallstreetcn.com
+DOMAIN-SUFFIX,yuncaijing.com
+DOMAIN-SUFFIX,ushknews.com
+DOMAIN-SUFFIX,cls.cn
