@@ -22,3 +22,5 @@ DOMAIN-SUFFIX,wallstreetcn.com
 DOMAIN-SUFFIX,yuncaijing.com
 DOMAIN-SUFFIX,ushknews.com
 DOMAIN-SUFFIX,cls.cn
+## > WeChat
+IP-ASN,132203
