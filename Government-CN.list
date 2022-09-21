@@ -1,5 +1,7 @@
 ## > Government CN
 DOMAIN-SUFFIX,gov.cn
+## > WeChat
+IP-ASN,132203
 ## > 华医网
 DOMAIN-SUFFIX,91huayi.cn
 DOMAIN-SUFFIX,91huayi.com
@@ -16,5 +18,4 @@ DOMAIN-SUFFIX,shiyanma.org.cn
 DOMAIN-SUFFIX,sqpx.org
 DOMAIN-SUFFIX,wsglw.com
 DOMAIN-SUFFIX,wsglw.net
-## > WeChat
-IP-ASN,132203
+
