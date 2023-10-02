@@ -58,6 +58,10 @@ DOMAIN,agahk.odysseyplus.site
 DOMAIN,agasg.odysseyplus.site
 DOMAIN,ru.odysseyplus.site
 
+# > 流媒体Misaka
+DOMAIN,emby.misakaf.org 
+DOMAIN,cdn.misakaf.org 
+
 # > 流媒体Exflux服务器
 DOMAIN,line.emby.men
 
