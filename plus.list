@@ -59,7 +59,7 @@ DOMAIN,agasg.odysseyplus.site
 DOMAIN,ru.odysseyplus.site
 
 # > 流媒体Misaka
-DOMAIN,emby.misakaf.org 
+DOMAIN,emby.misakaf.org  
 DOMAIN,cdn.misakaf.org 
 
 # > 流媒体Exflux服务器
@@ -80,16 +80,15 @@ DOMAIN,servers.xeton.dev
 # > 流媒体WaveCloud服务器
 DOMAIN,embyserver.ga
 
+# > 流媒体SYN服务器
+DOMAIN,stream.synn.cc
+
 # > 流媒体Texon服务器
 DOMAIN,emby.texon.one
 
 # > 流媒体卷毛鼠服务器
-DOMAIN,jmsooo.com
-DOMAIN,cf.jmsooo.com
-DOMAIN,hk.jmsooo.com
-DOMAIN,sg.jmsooo.com
+DOMAIN-SUFFIX,jmsooo.com
 
 # > 流媒体青柠檬服务器
 DOMAIN-SUFFIX,xj123.tv
 DOMAIN-SUFFIX,vtime.cc
-DOMAIN-SUFFIX,xj12.tv
