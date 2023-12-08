@@ -47,7 +47,18 @@ DOMAIN,hinet.jmsooo.com
 DOMAIN,cf1.jmsooo.com
 
 # > 流媒体pornemby服务器
-DOMAIN,pornemby.club
+DOMAIN-SUFFIX,pornemby.club
+DOMAIN-SUFFIX,s.ii00.cc
+DOMAIN-SUFFIX,us.ii00.cc
+DOMAIN-SUFFIX,jp.ii00.cc
+DOMAIN-SUFFIX,vip.reddust.link
+DOMAIN-SUFFIX,cc.semby.ink
+DOMAIN-SUFFIX,bili.rip
+DOMAIN-SUFFIX,uuuoo.cc
+DOMAIN-SUFFIX,emby.date
+DOMAIN-SUFFIX,emby.bid
+DOMAIN-SUFFIX,emby.loan
+DOMAIN-SUFFIX,emby.trade
 
 # > 流媒体IMM服务器
 DOMAIN,emby.immtel.com
