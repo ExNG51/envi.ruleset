@@ -93,7 +93,7 @@ DOMAIN,misakaf.org
 DOMAIN,bili.rip
 
 # > 流媒体JH服务器
-DOMAIN,reddust.link
+DOMAIN-SUFFIX,film.reddust.link
 
 # > 流媒体Magpie服务器
 DOMAIN,magpie.cyou
