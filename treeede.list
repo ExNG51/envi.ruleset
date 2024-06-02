@@ -18,6 +18,7 @@ DOMAIN-SUFFIX,ushmds.nj
 PROCESS-NAME,IBKR*
 USER-AGENT,IBKR*
 # > Others
+DOMAIN-SUFFIX,topstepx.com
 DOMAIN-SUFFIX,chasingreturns.com
 DOMAIN-SUFFIX,content.mql5.com
 DOMAIN-SUFFIX,metatrader4.com
@@ -34,9 +35,4 @@ DOMAIN-SUFFIX,robinhood.com
 DOMAIN-SUFFIX,refinitiv.com
 DOMAIN-SUFFIX,dowjones.io
 DOMAIN-SUFFIX,bloomberg.com
-# > CN News
-DOMAIN-SUFFIX,finance.sina.com.cn
-DOMAIN-SUFFIX,wallstreetcn.com
-DOMAIN-SUFFIX,yuncaijing.com
-DOMAIN-SUFFIX,ushknews.com
-DOMAIN-SUFFIX,cls.cn
+DOMAIN-SUFFIX,railway.app
