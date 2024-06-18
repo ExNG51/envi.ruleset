@@ -2,6 +2,7 @@
 #!desc=Enable DNS over HTTPS (DoH)
 #!author=ExNG51
 #!category=ExNG51
+#!system=ios
 
 [General]
 auto-suspend = false
