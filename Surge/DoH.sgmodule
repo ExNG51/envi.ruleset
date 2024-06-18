@@ -1,6 +1,7 @@
 #!name=DNS over HTTPS
 #!desc=Enable DNS over HTTPS (DoH)
 #!author=ExNG51
+#!category=ExNG51
 
 [General]
 auto-suspend = false
