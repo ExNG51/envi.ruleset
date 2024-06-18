@@ -1,5 +1,6 @@
 #!name=Traffic Statistics
 #!desc=流量统计 
+#!author=ExNG51
 
 [Panel]
 #流量统计
