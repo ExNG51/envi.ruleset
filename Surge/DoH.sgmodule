@@ -1,6 +1,7 @@
 #!name=DNS over HTTPS
 #!desc=Enable DNS over HTTPS (DoH)
+#!author=ExNG51
 
 [General]
-dns-server = 119.29.29.29, 223.5.5.5
-doh-server = https://120.53.53.53/dns-query, https://dns.alidns.com/dns-query, https://dns.twnic.tw/dns-query, https://public.dns.iij.jp/dns-query
+dns-server = 119.29.29.29, 223.5.5.5, system
+encrypted-dns-server = https://120.53.53.53/dns-query, https://dns.alidns.com/dns-query, https://dns.twnic.tw/dns-query, https://public.dns.iij.jp/dns-query
