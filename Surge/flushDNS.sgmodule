@@ -1,6 +1,7 @@
 #!name=Flush DNS with Symbol
 #!desc=Flush DNS, show the DNS delay and server.
 #!author=ExNG51
+#!category=ExNG51
 #!system=ios
 
 [Script]
