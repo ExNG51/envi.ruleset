@@ -84,16 +84,17 @@ DOMAIN-SUFFIX,emby.loan
 DOMAIN-SUFFIX,emby.trade
 
 # > 流媒体emby-paoche服务器
-DOMAIN,emby.cjpc.cc
-
-# > 流媒体MisakaF服务器
-DOMAIN,misakaf.org  
-
-# > 流媒体HXD服务器
-DOMAIN,bili.rip
+DOMAIN-SUFFIX,,emby.cjpc.cc
 
 # > 流媒体JH服务器
 DOMAIN-SUFFIX,film.reddust.link
 
+# > 流媒体MisakaF服务器
+DOMAIN-SUFFIX,misakaf.org  
+DOMAIN-SUFFIX,2333.123456.al
+
+# > 流媒体HXD服务器
+DOMAIN-SUFFIX,bili.rip
+
 # > 流媒体Magpie服务器
-DOMAIN,magpie.cyou
+DOMAIN-SUFFIX,magpie.cyou
