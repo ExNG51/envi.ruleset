@@ -84,7 +84,7 @@ DOMAIN-SUFFIX,emby.loan
 DOMAIN-SUFFIX,emby.trade
 
 # > 流媒体emby-paoche服务器
-DOMAIN-SUFFIX,,emby.cjpc.cc
+DOMAIN-SUFFIX,emby.cjpc.cc
 
 # > 流媒体JH服务器
 DOMAIN-SUFFIX,film.reddust.link
