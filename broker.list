@@ -17,6 +17,8 @@ DOMAIN-SUFFIX,usfarm.nj
 DOMAIN-SUFFIX,ushmds.nj
 PROCESS-NAME,IBKR*
 USER-AGENT,IBKR*
+# > TradingView
+DOMAIN-SUFFIX,tradingview.com
 # > Others
 DOMAIN-SUFFIX,chasingreturns.com
 DOMAIN-SUFFIX,content.mql5.com
