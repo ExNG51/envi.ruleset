@@ -91,10 +91,14 @@ DOMAIN-SUFFIX,film.reddust.link
 
 # > 流媒体MisakaF服务器
 DOMAIN-SUFFIX,misakaf.org  
+DOMAIN-SUFFIX,embyvip.misakaf.org
 DOMAIN-SUFFIX,2333.123456.al
 
 # > 流媒体Magpie服务器
 DOMAIN-SUFFIX,magpie.cyou
+DOMAIN-SUFFIX,magpie.bond
 
 # > 流媒体HXD服务器
 DOMAIN-SUFFIX,bili.rip
+DOMAIN-SUFFIX,hxd.as174.com
+DOMAIN-SUFFIX,cf.bili.rip:8443
