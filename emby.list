@@ -93,6 +93,7 @@ DOMAIN-SUFFIX,film.reddust.link
 DOMAIN-SUFFIX,misakaf.org  
 DOMAIN-SUFFIX,embyvip.misakaf.org
 DOMAIN-SUFFIX,2333.123456.al
+DOMAIN-KEYWORD,misakaf
 
 # > 流媒体Magpie服务器
 DOMAIN-SUFFIX,magpiecdn.tech
@@ -104,3 +105,6 @@ DOMAIN-KEYWORD,magpie
 DOMAIN-SUFFIX,bili.rip
 DOMAIN-SUFFIX,hxd.as174.com
 DOMAIN-SUFFIX,cf.bili.rip:8443
+
+# > EMBY
+DOMAIN-KEYWORD,emby
