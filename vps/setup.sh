@@ -68,7 +68,7 @@ dpkg -i linux-image-*-egoist-cloud_*.deb
 
 # 修改 SSH 端口为 9929
 echo "修改 SSH 端口为 9929..."
-sed -i 's/#Port 22/Port 9399/' /etc/ssh/sshd_config
+sed -i 's/#Port 22/Port 9929/' /etc/ssh/sshd_config
 systemctl restart sshd
 
 # 安装 Node.js 19.x
