@@ -66,7 +66,7 @@ echo "安装内核包..."
 dpkg -i linux-headers-*-egoist-cloud_*.deb
 dpkg -i linux-image-*-egoist-cloud_*.deb
 
-# 修改 SSH 端口为 9399
+# 修改 SSH 端口为 9929
 echo "修改 SSH 端口为 9929..."
 sed -i 's/#Port 22/Port 9399/' /etc/ssh/sshd_config
 systemctl restart sshd
