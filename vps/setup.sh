@@ -31,13 +31,13 @@ sysctl --system
 
 # 内核调优
 echo "进行内核调优..."
-wget https://raw.githubusercontent.com/LucaLin233/Luca_Conf/main/Other/kernel_optimization.sh
+wget https://raw.githubusercontent.com/ExNG51/envi.ruleset/main/vps/kernel_optimization.sh
 chmod +x kernel_optimization.sh
 bash kernel_optimization.sh
 
 # 设置时区
-echo "设置时区为 Asia/Shanghai..."
-sudo timedatectl set-timezone Asia/Shanghai
+echo "设置时区为 Asia/Singapore..."
+sudo timedatectl set-timezone Asia/Singapore
 
 # 路由测试工具
 echo "安装路由测试工具 nexttrace..."
@@ -67,7 +67,7 @@ dpkg -i linux-headers-*-egoist-cloud_*.deb
 dpkg -i linux-image-*-egoist-cloud_*.deb
 
 # 修改 SSH 端口为 9399
-echo "修改 SSH 端口为 9399..."
+echo "修改 SSH 端口为 9929..."
 sed -i 's/#Port 22/Port 9399/' /etc/ssh/sshd_config
 systemctl restart sshd
 
