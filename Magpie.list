@@ -1,5 +1,2 @@
 # > 流媒体Magpie服务器
-DOMAIN-SUFFIX,magpiecdn.tech
-DOMAIN-SUFFIX,magpie.cyou
-DOMAIN-SUFFIX,magpie.bond
-DOMAIN-KEYWORD,magpie
+DOMAIN-WILDCARD,cdn*.magpie.bond
