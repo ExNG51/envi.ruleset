@@ -29,16 +29,6 @@ echo "3" > /proc/sys/net/ipv4/tcp_fastopen
 echo "net.ipv4.tcp_fastopen=3" > /etc/sysctl.d/30-tcp_fastopen.conf
 sysctl --system
 
-# 内核调优
-echo "进行内核调优..."
-wget https://raw.githubusercontent.com/ExNG51/envi.ruleset/main/vps/kernel_optimization.sh
-chmod +x kernel_optimization.sh
-bash kernel_optimization.sh
-
-# 设置时区
-echo "设置时区为 Asia/Singapore..."
-sudo timedatectl set-timezone Asia/Singapore
-
 # 路由测试工具
 echo "安装路由测试工具 nexttrace..."
 bash -c "$(wget -qO- https://github.com/sjlleo/nexttrace/raw/main/nt_install.sh)"
