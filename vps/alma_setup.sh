@@ -1,3 +1,4 @@
+
 #!/bin/bash
 
 # 更新软件包
@@ -17,19 +18,6 @@ swapon -a
 # 安装并启动 tuned
 dnf install -y tuned
 systemctl enable --now tuned
-
-# 安装 Docker 和 Docker Compose
-dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
-dnf install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
-systemctl enable --now docker
-
-# 安装 Node.js 和 npm
-curl -fsSL https://rpm.nodesource.com/setup_19.x | bash -
-dnf install -y nodejs
-
-# 安装 Python
-curl -sSL https://mise.run | sh
-mise use -g python@3.10
 
 # 修改时区为上海
 timedatectl set-timezone Asia/Shanghai
