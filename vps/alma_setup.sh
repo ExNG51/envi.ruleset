@@ -1,8 +1,5 @@
 #!/bin/bash
 
-# 更新软件包
-dnf update -y || { echo "dnf update failed"; exit 1; }
-
 # 创建并启用交换空间
 MEM_SIZE_MB=$(awk '/MemTotal:/ {print int($2/1024)}' /proc/meminfo)
 if [ "$MEM_SIZE_MB" -le 1024 ]; then
@@ -18,6 +15,9 @@ sed -i '/vm.swappiness/d' /etc/sysctl.conf
 echo "vm.swappiness = 25" >> /etc/sysctl.conf
 sysctl -w vm.swappiness=25
 swapon -a
+
+# 更新软件包
+dnf update -y || { echo "dnf update failed"; exit 1; }
 
 # 安装并启动 tuned
 dnf install -y tuned || { echo "tuned installation failed"; exit 1; }
