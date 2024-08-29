@@ -22,19 +22,6 @@ dnf update -y || { echo "dnf update failed"; exit 1; }
 # 安装 wget 及 unzip
 sudo dnf install wget unzip -y
 
-# 安装并启动 tuned
-dnf install -y tuned || { echo "tuned installation failed"; exit 1; }
-systemctl enable --now tuned || { echo "Failed to enable tuned"; exit 1; }
-
-# 安装 Docker 和 Docker Compose
-dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo || { echo "Failed to add Docker repo"; exit 1; }
-dnf install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin || { echo "Docker installation failed"; exit 1; }
-systemctl enable --now docker || { echo "Failed to start Docker"; exit 1; }
-
-# 安装 Node.js 和 npm
-curl -fsSL https://rpm.nodesource.com/setup_19.x | bash - || { echo "Node.js setup script failed"; exit 1; }
-dnf install -y nodejs || { echo "Node.js installation failed"; exit 1; }
-
 # 修改时区为上海
 timedatectl set-timezone Asia/Shanghai || { echo "Failed to set timezone"; exit 1; }
 
