@@ -19,6 +19,9 @@ swapon -a
 # 更新软件包
 dnf update -y || { echo "dnf update failed"; exit 1; }
 
+# 安装 wget 及 unzip
+sudo dnf install wget unzip -y
+
 # 安装并启动 tuned
 dnf install -y tuned || { echo "tuned installation failed"; exit 1; }
 systemctl enable --now tuned || { echo "Failed to enable tuned"; exit 1; }
