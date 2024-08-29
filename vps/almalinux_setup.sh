@@ -32,10 +32,6 @@ systemctl enable --now docker || { echo "Failed to start Docker"; exit 1; }
 curl -fsSL https://rpm.nodesource.com/setup_19.x | bash - || { echo "Node.js setup script failed"; exit 1; }
 dnf install -y nodejs || { echo "Node.js installation failed"; exit 1; }
 
-# 安装 Python
-curl -sSL https://mise.run | sh || { echo "Python installation failed"; exit 1; }
-mise use -g python@3.10 || { echo "Failed to set up Python"; exit 1; }
-
 # 修改时区为上海
 timedatectl set-timezone Asia/Shanghai || { echo "Failed to set timezone"; exit 1; }
 
