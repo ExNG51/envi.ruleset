@@ -103,6 +103,23 @@ check_and_install tuned
 systemctl enable tuned.service
 systemctl start tuned.service
 tuned-adm profile network-throughput
+# 验证 tuned 服务状态
+echo "检查 tuned 服务状态..."
+if systemctl status tuned.service | grep -q "active (running)"; then
+    echo "tuned 服务已成功启动。"
+else
+    echo "tuned 服务未启动，请检查日志进行排查。"
+    exit 1
+fi
+# 验证配置是否应用
+echo "验证 tuned 配置..."
+active_profile=$(tuned-adm active)
+if [[ "$active_profile" == *"network-throughput"* ]]; then
+    echo "网络吞吐量优化配置已成功应用。"
+else
+    echo "未能应用网络吞吐量优化配置。"
+    exit 1
+fi
 
 # 卸载 tcp-brutal 模块
 echo "卸载 tcp-brutal 模块..."
@@ -145,6 +162,5 @@ else
 fi
 
 echo "所有步骤完成！"
-
 echo "重启..."
 reboot
