@@ -32,6 +32,7 @@ fi
 check_and_install jq
 check_and_install wget
 check_and_install dnsutils
+check_and_install dkms
 
 # 修改时区为新加坡
 sudo timedatectl set-timezone Asia/Singapore
@@ -96,6 +97,10 @@ echo "安装 Node.js 19.x..."
 curl -fsSL https://deb.nodesource.com/setup_19.x | bash -
 apt-get install -y nodejs
 
+# 安装路由测试工具
+echo "安装路由测试工具 nexttrace..."
+bash -c "$(curl -Ls https://github.com/sjlleo/nexttrace/raw/main/nt_install.sh)"
+
 # 修改 SSH 端口为 9399
 echo "修改 SSH 端口为 9399..."
 sed -i 's/#Port 22/Port 9399/' /etc/ssh/sshd_config
@@ -105,8 +110,7 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-# 安装路由测试工具
-echo "安装路由测试工具 nexttrace..."
-bash -c "$(curl -Ls https://github.com/sjlleo/nexttrace/raw/main/nt_install.sh)"
+# 清理不需要的包
+apt-get autoremove -y
 
 echo "所有步骤完成！"
