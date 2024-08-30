@@ -20,6 +20,11 @@ check_and_install() {
     fi
 }
 
+# 修改时区为新加坡
+sudo timedatectl set-timezone Asia/Singapore
+current_timezone=$(timedatectl | grep "Time zone")
+echo "当前系统时区已设置为: $current_timezone"
+
 # 更新系统
 echo "更新系统..."
 apt-get update -o Acquire::ForceIPv4=true && apt-get full-upgrade -y
@@ -30,11 +35,6 @@ else
     echo "系统更新成功。"
 fi
 
-# 修改时区为新加坡
-sudo timedatectl set-timezone Asia/Singapore
-current_timezone=$(timedatectl | grep "Time zone")
-echo "当前系统时区已设置为: $current_timezone"
-
 # 安装必要的工具
 check_and_install jq
 check_and_install wget
@@ -42,16 +42,11 @@ check_and_install unzip
 check_and_install dnsutils
 check_and_install dkms
 
-# 安装 cloud 内核
+# 安装 Cloud 内核
+echo "安装 Cloud 内核..."
 apt-cache search linux-image-cloud
 sudo apt-get install linux-image-cloud-amd64 -y
 sudo update-grub
-uname -r
-sudo apt-get remove --purge linux-image-<旧内核版本号>
-sudo apt-get autoremove
-
-# 清理下载的deb包
-rm -f *.deb
 
 # 创建并启用交换空间
 MEM_SIZE_MB=$(awk '/MemTotal:/ {print int($2/1024)}' /proc/meminfo)
@@ -88,7 +83,8 @@ echo "3" > /proc/sys/net/ipv4/tcp_fastopen
 echo "net.ipv4.tcp_fastopen=3" > /etc/sysctl.d/30-tcp_fastopen.conf
 sysctl --system
 
-# 设置 bbrv3
+# 设置 BBRv3
+echo "设置 BBRv3..."
 echo 'net.ipv4.tcp_congestion_control=bbr' | sudo tee -a /etc/sysctl.conf
 sudo sysctl -p
 
@@ -103,6 +99,7 @@ systemctl start tuned.service
 tuned-adm profile network-throughput
 
 # 卸载 tcp-brutal 模块
+echo "卸载 tcp-brutal 模块..."
 dkms uninstall tcp-brutal/1.0.1 --all && dkms remove tcp-brutal/1.0.1 --all
 
 # 检查 dkms 状态
@@ -142,3 +139,6 @@ else
 fi
 
 echo "所有步骤完成！"
+
+echo "重启..."
+reboot
