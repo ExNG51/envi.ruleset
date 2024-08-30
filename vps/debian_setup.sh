@@ -26,10 +26,14 @@ apt-get update -o Acquire::ForceIPv4=true && apt-get full-upgrade -y
 if [ $? -ne 0 ]; then
     echo "系统更新失败。"
     exit 1
+else
+    echo "系统更新成功。"
 fi
 
 # 修改时区为新加坡
 sudo timedatectl set-timezone Asia/Singapore
+current_timezone=$(timedatectl | grep "Time zone")
+echo "当前系统时区已设置为: $current_timezone"
 
 # 安装必要的工具
 check_and_install jq
@@ -97,6 +101,8 @@ curl -fSL https://get.docker.com | bash -s docker
 echo "安装 Node.js 19.x..."
 curl -fsSL https://deb.nodesource.com/setup_19.x | bash -
 apt-get install -y nodejs
+node -v
+npm -v
 
 # 安装路由测试工具
 echo "安装路由测试工具 nexttrace..."
