@@ -172,3 +172,6 @@ else
 fi
 
 echo "所有任务完成！"
+
+echo "重启..."
+reboot
