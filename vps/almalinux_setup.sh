@@ -164,5 +164,11 @@ fi
 
 # 清理不需要的包
 sudo dnf autoremove -y
+if [ $? -eq 0 ]; then
+    echo "系统清理完成，不需要的包已移除。"
+else
+    echo "系统清理失败，请检查错误信息。"
+    exit 1
+fi
 
 echo "所有任务完成！"
