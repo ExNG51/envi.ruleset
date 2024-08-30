@@ -31,6 +31,7 @@ fi
 # 安装必要的工具
 check_and_install jq
 check_and_install wget
+check_and_install unzip
 check_and_install dnsutils
 check_and_install dkms
 
