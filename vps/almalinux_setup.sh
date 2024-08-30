@@ -52,11 +52,24 @@ fi
 dd if=/dev/zero of=/mnt/swap bs=1M count=$SWAP_SIZE_MB
 chmod 600 /mnt/swap
 mkswap /mnt/swap
-echo "/mnt/swap swap swap defaults 0 0" >> /etc/fstab
+swapon /mnt/swap
+if ! grep -q '/mnt/swap' /etc/fstab; then
+    echo "/mnt/swap swap swap defaults 0 0" >> /etc/fstab
+    echo "交换文件已添加到 /etc/fstab。"
+else
+    echo "交换文件已存在于 /etc/fstab。"
+fi
 sed -i '/vm.swappiness/d' /etc/sysctl.conf
 echo "vm.swappiness = 25" >> /etc/sysctl.conf
 sysctl -w vm.swappiness=25
 swapon -a
+swapon --show
+if [ $? -eq 0 ]; then
+    echo "交换空间已成功启用。"
+else
+    echo "交换空间启用失败。"
+    exit 1
+fi
 
 # 开启 TCP Fast Open (TFO)
 echo "开启 TCP Fast Open (TFO)..."
