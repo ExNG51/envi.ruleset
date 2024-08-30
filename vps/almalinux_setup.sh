@@ -20,6 +20,11 @@ check_and_install() {
     fi
 }
 
+# 修改时区为新加坡
+sudo timedatectl set-timezone Asia/Singapore
+current_timezone=$(timedatectl | grep "Time zone")
+echo "当前系统时区已设置为: $current_timezone"
+
 # 更新系统
 echo "更新系统..."
 dnf update -y
@@ -29,11 +34,6 @@ if [ $? -ne 0 ]; then
 else
     echo "系统更新成功。"
 fi
-
-# 修改时区为新加坡
-sudo timedatectl set-timezone Asia/Singapore
-current_timezone=$(timedatectl | grep "Time zone")
-echo "当前系统时区已设置为: $current_timezone"
 
 # 安装必要的工具
 check_and_install jq
