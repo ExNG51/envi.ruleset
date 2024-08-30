@@ -143,8 +143,12 @@ else
 fi
 
 # 卸载 tcp-brutal 模块
-echo "卸载 tcp-brutal 模块..."
-dkms uninstall tcp-brutal/1.0.1 --all && dkms remove tcp-brutal/1.0.1 --all
+if dkms status | grep -q "tcp-brutal"; then
+    echo "卸载 tcp-brutal 模块..."
+    dkms uninstall tcp-brutal/1.0.1 --all && dkms remove tcp-brutal/1.0.1 --all
+else
+    echo "tcp-brutal 模块未安装，跳过卸载。"
+fi
 
 # 检查 dkms 状态
 dkms status
