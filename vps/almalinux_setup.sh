@@ -25,6 +25,26 @@ sudo timedatectl set-timezone Asia/Singapore
 current_timezone=$(timedatectl | grep "Time zone")
 echo "当前系统时区已设置为: $current_timezone"
 
+# 更新核心包
+echo "更新系统核心包..."
+sudo dnf upgrade -y kernel
+if [ $? -ne 0 ]; then
+    echo "系统核心包更新失败。"
+    exit 1
+else
+    echo "系统核心包更新成功。"
+fi
+
+# 锁定核心包
+echo "锁定核心包以确保稳定性..."
+sudo dnf versionlock add kernel*
+if [ $? -ne 0 ]; then
+    echo "锁定核心包失败。"
+    exit 1
+else
+    echo "核心包已锁定。"
+fi
+
 # 更新系统
 echo "更新系统..."
 dnf update -y
