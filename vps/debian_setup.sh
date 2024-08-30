@@ -20,10 +20,45 @@ check_and_install() {
     fi
 }
 
+# 创建并启用交换空间
+MEM_SIZE_MB=$(awk '/MemTotal:/ {print int($2/1024)}' /proc/meminfo)
+if [ "$MEM_SIZE_MB" -le 1024 ]; then
+    SWAP_SIZE_MB=1024  # 设置为1GB
+else
+    SWAP_SIZE_MB=$((MEM_SIZE_MB))  # 否则设置为物理内存的数值
+fi
+sudo dd if=/dev/zero of=/mnt/swap bs=1M count=$SWAP_SIZE_MB
+sudo chmod 600 /mnt/swap
+sudo mkswap /mnt/swap
+sudo swapon /mnt/swap
+if ! grep -q '/mnt/swap' /etc/fstab; then
+    echo "/mnt/swap swap swap defaults 0 0" >> /etc/fstab
+    echo "交换文件已添加到 /etc/fstab。"
+else
+    echo "交换文件已存在于 /etc/fstab。"
+fi
+sudo sed -i '/vm.swappiness/d' /etc/sysctl.conf
+echo "vm.swappiness = 25" | sudo tee -a /etc/sysctl.conf
+sudo sysctl -w vm.swappiness=25
+swapon -a
+swapon --show
+if [ $? -eq 0 ]; then
+    echo "交换空间已成功启用。"
+else
+    echo "交换空间启用失败。"
+    exit 1
+fi
+
 # 修改时区为新加坡
 sudo timedatectl set-timezone Asia/Singapore
 current_timezone=$(timedatectl | grep "Time zone")
 echo "当前系统时区已设置为: $current_timezone"
+
+# 检查系统负载
+while [ $(uptime | awk -F 'load average: ' '{print $2}' | cut -d',' -f1 | xargs) -gt 1 ]; do
+    echo "系统负载过高，等待中..."
+    sleep 5
+done
 
 # 更新核心包
 echo "更新系统核心包..."
@@ -68,35 +103,6 @@ echo "安装 Cloud 内核..."
 apt-cache search linux-image-cloud
 sudo apt-get install linux-image-cloud-amd64 -y
 sudo update-grub
-
-# 创建并启用交换空间
-MEM_SIZE_MB=$(awk '/MemTotal:/ {print int($2/1024)}' /proc/meminfo)
-if [ "$MEM_SIZE_MB" -le 1024 ]; then
-    SWAP_SIZE_MB=1024  # 设置为1GB
-else
-    SWAP_SIZE_MB=$((MEM_SIZE_MB))  # 否则设置为物理内存的数值
-fi
-sudo dd if=/dev/zero of=/mnt/swap bs=1M count=$SWAP_SIZE_MB
-sudo chmod 600 /mnt/swap
-sudo mkswap /mnt/swap
-sudo swapon /mnt/swap
-if ! grep -q '/mnt/swap' /etc/fstab; then
-    echo "/mnt/swap swap swap defaults 0 0" >> /etc/fstab
-    echo "交换文件已添加到 /etc/fstab。"
-else
-    echo "交换文件已存在于 /etc/fstab。"
-fi
-sudo sed -i '/vm.swappiness/d' /etc/sysctl.conf
-echo "vm.swappiness = 25" | sudo tee -a /etc/sysctl.conf
-sudo sysctl -w vm.swappiness=25
-swapon -a
-swapon --show
-if [ $? -eq 0 ]; then
-    echo "交换空间已成功启用。"
-else
-    echo "交换空间启用失败。"
-    exit 1
-fi
 
 # 开启 TCP Fast Open (TFO)
 echo "开启 TCP Fast Open (TFO)..."
