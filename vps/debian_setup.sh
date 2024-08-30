@@ -42,27 +42,13 @@ check_and_install unzip
 check_and_install dnsutils
 check_and_install dkms
 
-# 创建 /root/kernel 目录并进入
-echo "创建 /root/kernel 目录并进入..."
-mkdir -p /root/kernel && cd /root/kernel
-
-# 下载和安装内核包
-echo "下载内核包..."
-KERNEL_URLS=$(wget -q -O - https://api.github.com/repos/love4taylor/linux-self-use-deb/releases/latest | \
-    jq -r '.assets[] | select(.name | contains ("deb")) | select(.name | contains ("cloud")) | .browser_download_url')
-if [ -z "$KERNEL_URLS" ]; then
-    echo "未找到内核包下载链接，退出。"
-    exit 1
-fi
-
-for url in $KERNEL_URLS; do
-    wget -q --show-progress $url
-done
-
-# 安装内核包
-echo "安装内核包..."
-dpkg -i linux-headers-*-egoist-cloud_*.deb
-dpkg -i linux-image-*-egoist-cloud_*.deb
+# 安装 cloud 内核
+apt-cache search linux-image-cloud
+sudo apt-get install linux-image-cloud-amd64 -y
+sudo update-grub
+uname -r
+sudo apt-get remove --purge linux-image-<旧内核版本号>
+sudo apt-get autoremove
 
 # 清理下载的deb包
 rm -f *.deb
