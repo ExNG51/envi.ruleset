@@ -20,28 +20,6 @@ check_and_install() {
     fi
 }
 
-# 修改时区为新加坡
-sudo timedatectl set-timezone Asia/Singapore
-current_timezone=$(timedatectl | grep "Time zone")
-echo "当前系统时区已设置为: $current_timezone"
-
-# 更新系统
-echo "更新系统..."
-dnf update -y
-if [ $? -ne 0 ]; then
-    echo "系统更新失败。"
-    exit 1
-else
-    echo "系统更新成功。"
-fi
-
-# 安装必要的工具
-check_and_install jq
-check_and_install wget
-check_and_install unzip
-check_and_install bind-utils
-check_and_install dkms
-
 # 创建并启用交换空间
 MEM_SIZE_MB=$(awk '/MemTotal:/ {print int($2/1024)}' /proc/meminfo)
 if [ "$MEM_SIZE_MB" -le 1024 ]; then
@@ -70,6 +48,34 @@ else
     echo "交换空间启用失败。"
     exit 1
 fi
+
+# 修改时区为新加坡
+sudo timedatectl set-timezone Asia/Singapore
+current_timezone=$(timedatectl | grep "Time zone")
+echo "当前系统时区已设置为: $current_timezone"
+
+# 检查系统负载
+while [ $(uptime | awk '{print $10}' | cut -d',' -f1) -gt 1 ]; do
+    echo "系统负载过高，等待中..."
+    sleep 5
+done
+
+# 更新系统
+echo "更新系统..."
+dnf update -y
+if [ $? -ne 0 ]; then
+    echo "系统更新失败。"
+    exit 1
+else
+    echo "系统更新成功。"
+fi
+
+# 安装必要的工具
+check_and_install jq
+check_and_install wget
+check_and_install unzip
+check_and_install bind-utils
+check_and_install dkms
 
 # 开启 TCP Fast Open (TFO)
 echo "开启 TCP Fast Open (TFO)..."
