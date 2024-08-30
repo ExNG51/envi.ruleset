@@ -89,7 +89,13 @@ echo 'net.ipv4.tcp_congestion_control=bbr' | sudo tee -a /etc/sysctl.conf
 sudo sysctl -p
 
 # 查看当前的TCP流控算法
-sysctl net.ipv4.tcp_congestion_control
+final_algo=$(sysctl net.ipv4.tcp_congestion_control | awk '{print $3}')
+if [ "$final_algo" == "bbr" ]; then
+    echo "BBR 已成功启用。"
+else
+    echo "BBR 启用失败，请检查配置。"
+    exit 1
+fi
 
 # 开启 tuned 并设置网络性能优化配置
 echo "开启 tuned 并设置网络性能优化配置..."
