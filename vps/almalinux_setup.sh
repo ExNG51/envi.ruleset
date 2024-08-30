@@ -22,8 +22,8 @@ dnf update -y || { echo "dnf update failed"; exit 1; }
 # 安装 wget 及 unzip
 sudo dnf install wget unzip -y
 
-# 修改时区为上海
-timedatectl set-timezone Asia/Shanghai || { echo "Failed to set timezone"; exit 1; }
+# 修改时区为新加坡
+timedatectl set-timezone Asia/Singapore || { echo "Failed to set timezone"; exit 1; }
 
 # 修改 SSH 端口
 sed -i 's/#Port 22/Port 9399/' /etc/ssh/sshd_config || { echo "Failed to modify SSH port"; exit 1; }
