@@ -74,7 +74,7 @@ MEM_SIZE_MB=$(awk '/MemTotal:/ {print int($2/1024)}' /proc/meminfo)
 if [ "$MEM_SIZE_MB" -le 1024 ]; then
     SWAP_SIZE_MB=1024  # 设置为1GB
 else
-    SWAP_SIZE_MB=$((MEM_SIZE_MB * 2))  # 否则设置为物理内存的两倍
+    SWAP_SIZE_MB=$((MEM_SIZE_MB))  # 否则设置为物理内存的数值
 fi
 sudo dd if=/dev/zero of=/mnt/swap bs=1M count=$SWAP_SIZE_MB
 sudo chmod 600 /mnt/swap
