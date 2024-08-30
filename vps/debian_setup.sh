@@ -6,6 +6,20 @@ if [[ $EUID -ne 0 ]]; then
    exit 1
 fi
 
+# 检测并安装所需的指令
+check_and_install() {
+    if ! command -v $1 &> /dev/null; then
+        echo "$1 未安装，正在安装..."
+        apt-get install -y $1
+        if [ $? -ne 0 ]; then
+            echo "$1 安装失败。"
+            exit 1
+        fi
+    else
+        echo "$1 已安装，跳过安装。"
+    fi
+}
+
 # 更新系统
 echo "更新系统..."
 apt-get update -o Acquire::ForceIPv4=true && apt-get full-upgrade -y
