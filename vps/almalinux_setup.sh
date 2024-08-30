@@ -29,6 +29,7 @@ if [ $? -ne 0 ]; then
 else
     echo "系统更新成功。"
 fi
+
 # 修改时区为新加坡
 sudo timedatectl set-timezone Asia/Singapore
 current_timezone=$(timedatectl | grep "Time zone")
