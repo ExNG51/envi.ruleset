@@ -67,6 +67,35 @@ dpkg -i linux-image-*-egoist-cloud_*.deb
 # 清理下载的deb包
 rm -f *.deb
 
+# 创建并启用交换空间
+MEM_SIZE_MB=$(awk '/MemTotal:/ {print int($2/1024)}' /proc/meminfo)
+if [ "$MEM_SIZE_MB" -le 1024 ]; then
+    SWAP_SIZE_MB=1024  # 设置为1GB
+else
+    SWAP_SIZE_MB=$((MEM_SIZE_MB * 2))  # 否则设置为物理内存的两倍
+fi
+sudo dd if=/dev/zero of=/mnt/swap bs=1M count=$SWAP_SIZE_MB
+sudo chmod 600 /mnt/swap
+sudo mkswap /mnt/swap
+sudo swapon /mnt/swap
+if ! grep -q '/mnt/swap' /etc/fstab; then
+    echo "/mnt/swap swap swap defaults 0 0" >> /etc/fstab
+    echo "交换文件已添加到 /etc/fstab。"
+else
+    echo "交换文件已存在于 /etc/fstab。"
+fi
+sudo sed -i '/vm.swappiness/d' /etc/sysctl.conf
+echo "vm.swappiness = 25" | sudo tee -a /etc/sysctl.conf
+sudo sysctl -w vm.swappiness=25
+swapon -a
+swapon --show
+if [ $? -eq 0 ]; then
+    echo "交换空间已成功启用。"
+else
+    echo "交换空间启用失败。"
+    exit 1
+fi
+
 # 开启 TCP Fast Open (TFO)
 echo "开启 TCP Fast Open (TFO)..."
 echo "3" > /proc/sys/net/ipv4/tcp_fastopen
