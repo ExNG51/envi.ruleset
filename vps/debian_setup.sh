@@ -28,15 +28,15 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
+# 修改时区为新加坡
+sudo timedatectl set-timezone Asia/Singapore
+
 # 安装必要的工具
 check_and_install jq
 check_and_install wget
 check_and_install unzip
 check_and_install dnsutils
 check_and_install dkms
-
-# 修改时区为新加坡
-sudo timedatectl set-timezone Asia/Singapore
 
 # 创建 /root/kernel 目录并进入
 echo "创建 /root/kernel 目录并进入..."
