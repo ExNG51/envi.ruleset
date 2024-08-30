@@ -76,9 +76,29 @@ else
     echo "系统更新成功。"
 fi
 
+# 检查 EPEL 仓库是否已启用
+if dnf repolist enabled | grep -q "epel"; then
+    echo "EPEL 仓库已经启用。"
+else
+    echo "EPEL 仓库未启用，正在安装并启用..."
+    sudo dnf install -y epel-release
+    if [ $? -eq 0 ]; then
+        echo "EPEL 仓库已成功启用。"
+    else
+        echo "EPEL 仓库启用失败，请手动检查问题。"
+        exit 1
+    fi
+fi
+
+# 检查是否安装成功并启用
+if dnf repolist enabled | grep -q "epel"; then
+    echo "EPEL 仓库确认已启用。"
+else
+    echo "EPEL 仓库仍未启用，请检查网络或仓库配置。"
+    exit 1
+fi
+
 # 安装必要的工具
-echo "启用 EPEL（Extra Packages for Enterprise Linux）仓库"
-sudo dnf install -y epel-release
 check_and_install jq
 check_and_install wget
 check_and_install unzip
