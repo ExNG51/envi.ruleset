@@ -27,7 +27,7 @@ echo "当前系统时区已设置为: $current_timezone"
 
 # 更新核心包
 echo "更新系统核心包..."
-sudo dnf upgrade -y kernel
+sudo apt update && sudo apt upgrade -y linux-image-$(uname -r)
 if [ $? -ne 0 ]; then
     echo "系统核心包更新失败。"
     exit 1
@@ -37,7 +37,8 @@ fi
 
 # 锁定核心包
 echo "锁定核心包以确保稳定性..."
-sudo dnf versionlock add kernel*
+current_kernel=$(uname -r | sed 's/-[^-]*$//')
+sudo apt-mark hold linux-image-$current_kernel linux-headers-$current_kernel
 if [ $? -ne 0 ]; then
     echo "锁定核心包失败。"
     exit 1
@@ -182,5 +183,6 @@ else
 fi
 
 echo "所有步骤完成！"
+
 echo "重启..."
 reboot
