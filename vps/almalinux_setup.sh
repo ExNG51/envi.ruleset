@@ -50,9 +50,15 @@ else
 fi
 
 # 修改时区为新加坡
-sudo timedatectl set-timezone Asia/Singapore
-current_timezone=$(timedatectl | grep "Time zone")
-echo "当前系统时区已设置为: $current_timezone"
+current_timezone=$(timedatectl | grep "Time zone" | awk '{print $3}')
+if [ "$current_timezone" == "Asia/Singapore" ]; then
+    echo "当前系统时区已经是 Asia/Singapore，跳过时区设置。"
+else
+    echo "设置系统时区为 Asia/Singapore..."
+    sudo timedatectl set-timezone Asia/Singapore
+    new_timezone=$(timedatectl | grep "Time zone" | awk '{print $3}')
+    echo "当前系统时区已设置为: $new_timezone"
+fi
 
 # 检查系统负载
 while [ $(uptime | awk '{print $10}' | cut -d',' -f1) -gt 1 ]; do
@@ -71,6 +77,8 @@ else
 fi
 
 # 安装必要的工具
+echo "启用 EPEL（Extra Packages for Enterprise Linux）仓库"
+sudo dnf install -y epel-release
 check_and_install jq
 check_and_install wget
 check_and_install unzip
