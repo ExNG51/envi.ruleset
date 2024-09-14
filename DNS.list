@@ -1,4 +1,3 @@
-## 🥥 DNS
 ## > DNS
 DOMAIN,1dot1dot1dot1.cloudflare-dns.com
 DOMAIN,chrome.cloudflare-dns.com
@@ -8,9 +7,6 @@ DOMAIN,family.cloudflare-dns.com
 DOMAIN,mozilla.cloudflare-dns.com
 DOMAIN,one.one.one.one
 DOMAIN,security.cloudflare-dns.com
-DOMAIN,8888.google
-DOMAIN,dns.google
-DOMAIN,dns.google.com
 DOMAIN,adblock.mydns.network
 DOMAIN,applied-privacy.net
 DOMAIN,cdn-doh.ssnm.xyz
@@ -109,6 +105,4 @@ IP-CIDR,223.6.6.6/32,no-resolve
 IP-CIDR,47.96.179.163/32,no-resolve
 IP-CIDR,58.20.127.170/32,no-resolve
 IP-CIDR,58.20.127.238/32,no-resolve
-IP-CIDR,8.8.4.4/32,no-resolve
-IP-CIDR,8.8.8.8/32,no-resolve
 IP-CIDR,9.9.9.9/32,no-resolve
