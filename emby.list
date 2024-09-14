@@ -96,6 +96,7 @@ DOMAIN-SUFFIX,2333.123456.al
 DOMAIN-KEYWORD,misakaf
 
 # > 流媒体Magpie服务器
+DOMAIN-SUFFIX,023168.xyz
 DOMAIN-SUFFIX,magpiecdn.tech
 DOMAIN-SUFFIX,magpie.cyou
 DOMAIN-SUFFIX,magpie.bond
