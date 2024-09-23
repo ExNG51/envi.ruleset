@@ -11,19 +11,9 @@ Info="${GREEN}[信息]${NC}"
 Error="${RED}[错误]${NC}"
 Tip="${YELLOW}[提示]${NC}"
 
-cop_info(){
-clear
-echo -e "${GREEN}######################################
-#      ${RED}Debian DDNS 一键脚本 v1.0     ${GREEN}#
-#             作者: ${YELLOW}末晨             ${GREEN}#
-#       ${GREEN}https://blog.mochen.one      ${GREEN}#
-######################################${NC}"
-echo
-}
-
-# 检查系统是否为 Debian 或 Ubuntu
-if ! grep -qiE "debian|ubuntu" /etc/os-release; then
-    echo -e "${RED}本脚本仅支持 Debian 或 Ubuntu 系统，请在 Debian 或 Ubuntu 系统上运行。${NC}"
+# 检查系统是否为 AlmaLinux
+if ! grep -qiE "almalinux" /etc/os-release; then
+    echo -e "${RED}本脚本仅支持 AlmaLinux 系统，请在 AlmaLinux 系统上运行。${NC}"
     exit 1
 fi
 
@@ -39,8 +29,7 @@ check_root(){
 check_curl() {
     if ! command -v curl &>/dev/null; then
         echo -e "${YELLOW}未检测到 curl，正在安装 curl...${NC}"
-        apt update
-        apt install -y curl
+        dnf install -y curl
         if [ $? -ne 0 ]; then
             echo -e "${RED}安装 curl 失败，请手动安装后重新运行脚本。${NC}"
             exit 1
@@ -51,7 +40,7 @@ check_curl() {
 # 开始安装DDNS
 install_ddns(){
     if [ ! -f "/usr/bin/ddns" ]; then
-        curl -o /usr/bin/ddns https://raw.githubusercontent.com/mocchen/cssmeihua/mochen/shell/ddns.sh && chmod +x /usr/bin/ddns
+        curl -o /usr/bin/ddns https://raw.githubusercontent.com/ExNG51/envi.ruleset/refs/heads/main/vps/almalinux_ddns.sh && chmod +x /usr/bin/ddns
     fi
     mkdir -p /etc/DDNS
     cat <<'EOF' > /etc/DDNS/DDNS
