@@ -450,7 +450,6 @@ stop_ddns(){
 # 检查是否安装DDNS
 check_ddns_install(){
     if [ ! -f "/etc/DDNS/.config" ]; then
-        cop_info
         echo -e "${Tip}DDNS 未安装，现在开始安装..."
         echo
         install_ddns
