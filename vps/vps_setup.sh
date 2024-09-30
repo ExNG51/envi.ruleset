@@ -389,31 +389,89 @@ install_nexttrace() {
 
 # 修改 SSH 端口
 change_ssh_port() {
-    print_info "修改 SSH 端口为 9399..."
-    sed -i 's/#Port 22/Port 9399/' /etc/ssh/sshd_config
-    
-    # 检查 firewalld 是否正在运行
-    if systemctl is-active --quiet firewalld; then
-        firewall-cmd --permanent --add-port=9399/tcp
-        firewall-cmd --reload
+    local new_port=9399
+    print_info "修改 SSH 端口为 ${new_port}..."
+
+    # 检测 Linux 发行版类型
+    if [ -f /etc/debian_version ]; then
+        distro_family="debian"
+    elif [ -f /etc/almalinux-release ] || [ -f /etc/redhat-release ]; then
+        distro_family="redhat"
     else
-        print_warning "FirewallD 未运行，使用 iptables 添加规则。"
-        iptables -A INPUT -p tcp --dport 9399 -j ACCEPT
+        print_error "未知的 Linux 发行版，脚本可能无法正常工作。"
+        exit 1
+    fi
+
+    # 备份原始 sshd_config 文件
+    cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak
+
+    # 修改 SSH 端口
+    sed -i "s/^#*Port .*/Port ${new_port}/" /etc/ssh/sshd_config
+
+    # 验证配置文件修改
+    if ! grep -q "^Port ${new_port}" /etc/ssh/sshd_config; then
+        print_error "SSH 配置文件修改失败。"
+        mv /etc/ssh/sshd_config.bak /etc/ssh/sshd_config
+        exit 1
+    fi
+
+    # 配置防火墙规则
+    if command -v firewall-cmd &> /dev/null && systemctl is-active --quiet firewalld; then
+        print_info "使用 FirewallD 添加新端口..."
+        firewall-cmd --permanent --add-port=${new_port}/tcp
+        firewall-cmd --reload
+    elif command -v ufw &> /dev/null && ufw status | grep -q "active"; then
+        print_info "使用 UFW 添加新端口..."
+        ufw allow ${new_port}/tcp
+    else
+        print_warning "未检测到活跃的防火墙，使用 iptables 添加规则。"
+        if [ "$distro_family" = "debian" ]; then
+            apt-get update
+            apt-get install -y iptables
+        elif [ "$distro_family" = "redhat" ]; then
+            dnf install -y iptables
+        fi
+        iptables -A INPUT -p tcp --dport ${new_port} -j ACCEPT
         # 保存 iptables 规则
-        if [ -f /etc/debian_version ]; then
-            apt install -y iptables-persistent
+        if [ "$distro_family" = "debian" ]; then
+            apt-get install -y iptables-persistent
             netfilter-persistent save
-        elif [ -f /etc/redhat-release ]; then
+        elif [ "$distro_family" = "redhat" ]; then
             service iptables save
         fi
     fi
 
-    systemctl restart sshd
-    if [ $? -ne 0 ]; then
-        print_error "SSH 服务重启失败，请检查配置。"
+    # SELinux 配置（仅适用于 Red Hat 系统）
+    if [ "$distro_family" = "redhat" ] && command -v semanage &> /dev/null; then
+        print_info "配置 SELinux 允许新的 SSH 端口..."
+        semanage port -a -t ssh_port_t -p tcp ${new_port}
+    fi
+
+    # 测试 sshd 配置
+    if ! sshd -t; then
+        print_error "SSH 配置测试失败，正在回滚更改..."
+        mv /etc/ssh/sshd_config.bak /etc/ssh/sshd_config
         exit 1
     fi
-    print_success "SSH 端口已更改为 9399。请确保使用新端口进行连接。"
+
+    # 重启 SSH 服务
+    if [ "$distro_family" = "debian" ]; then
+        service_command="service ssh restart"
+    elif [ "$distro_family" = "redhat" ]; then
+        service_command="systemctl restart sshd"
+    fi
+
+    if $service_command; then
+        print_success "SSH 服务已重启，新端口 ${new_port} 已生效。"
+    else
+        print_error "SSH 服务重启失败，正在回滚更改..."
+        mv /etc/ssh/sshd_config.bak /etc/ssh/sshd_config
+        $service_command
+        exit 1
+    fi
+
+    print_warning "请确保使用新端口 ${new_port} 进行连接。不要关闭当前会话，直到您确认可以使用新端口成功连接。"
+    print_info "如果无法连接，请使用 'ssh -p ${new_port} user@host' 尝试连接。"
 }
 
 # 清理不需要的包
