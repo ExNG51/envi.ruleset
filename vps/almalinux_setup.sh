@@ -326,26 +326,13 @@ install_docker() {
 
     # 安装 Docker
     if [ "$PKG_MANAGER" == "dnf" ]; then
-        sudo dnf remove -y docker docker-client docker-client-latest docker-common docker-latest docker-latest-logrotate docker-logrotate docker-engine
-        sudo dnf -y install dnf-plugins-core
         sudo dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
         sudo dnf install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
     elif [ "$PKG_MANAGER" == "apt-get" ]; then
-        sudo apt-get remove -y docker docker-engine docker.io containerd runc
-        sudo apt-get update
-        sudo apt-get install -y apt-transport-https ca-certificates curl gnupg lsb-release
-        curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
-        echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-        sudo apt-get update
-        sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+        curl -fsSL https://get.docker.com -o get-docker.sh
+        sudo sh get-docker.sh
     else
         print_error "不支持的包管理器: $PKG_MANAGER"
-        return 1
-    fi
-
-    # 检查 Docker 是否成功安装
-    if ! command -v docker &> /dev/null; then
-        print_error "Docker 安装失败。"
         return 1
     fi
 
