@@ -31,7 +31,7 @@ if [[ $EUID -ne 0 ]]; then
    print_error "请以 root 身份或使用 sudo 执行此脚本。"
    exit 1
 fi
-echo "sudo 权限检查通过"
+print_success "sudo 权限检查通过"
 
 # 检测系统类型和包管理器
 echo "检测系统类型和包管理器"
@@ -39,7 +39,7 @@ if [ -f /etc/os-release ]; then
     . /etc/os-release
     OS=$NAME
     VER=$VERSION_ID
-    echo "系统类型: $OS, 版本: $VER"
+    print_success "系统类型: $OS, 版本: $VER"
 else
     print_error "无法检测操作系统类型。"
     exit 1
@@ -57,7 +57,6 @@ case $OS in
         exit 1
         ;;
 esac
-echo "包管理器: $PKG_MANAGER"
 print_success "包管理器: $PKG_MANAGER"
 
 # 检测并安装所需的指令
