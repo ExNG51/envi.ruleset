@@ -392,10 +392,18 @@ change_ssh_port() {
     print_info "修改 SSH 端口为 9399..."
     sed -i 's/#Port 22/Port 9399/' /etc/ssh/sshd_config
     
-    # 配置防火墙（假设使用 firewalld）
-    if command -v firewall-cmd &> /dev/null; then
+    # 检查 firewalld 是否正在运行
+    if systemctl is-active --quiet firewalld; then
         firewall-cmd --permanent --add-port=9399/tcp
         firewall-cmd --reload
+    else
+        print_warning "FirewallD 未运行，使用 iptables 添加规则。"
+        iptables -A INPUT -p tcp --dport 9399 -j ACCEPT
+        if command -v netfilter-persistent &> /dev/null; then
+            netfilter-persistent save
+        elif command -v service &> /dev/null; then
+            service iptables save
+        fi
     fi
 
     systemctl restart sshd
