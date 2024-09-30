@@ -185,10 +185,64 @@ install_epel() {
 
 # 安装必要的工具
 install_tools() {
-    tools=("jq" "wget" "unzip" "bind-utils" "dkms")
-    for tool in "${tools[@]}"; do
-        check_and_install $tool
+    # 检测系统类型
+    if [ -f /etc/debian_version ]; then
+        # Debian/Ubuntu 系列
+        PKG_MANAGER="apt-get"
+        INSTALL_CMD="$PKG_MANAGER install -y"
+        UPDATE_CMD="$PKG_MANAGER update"
+        BIND_UTILS="dnsutils"  # Debian/Ubuntu 使用 dnsutils 代替 bind-utils
+    elif [ -f /etc/redhat-release ]; then
+        # Red Hat 系列
+        PKG_MANAGER="dnf"
+        INSTALL_CMD="$PKG_MANAGER install -y"
+        UPDATE_CMD="$PKG_MANAGER check-update"
+        BIND_UTILS="bind-utils"
+    else
+        echo "Unsupported distribution"
+        return 1
+    fi
+
+    # 更新包列表
+    $UPDATE_CMD
+
+    # 定义工具列表，使用关联数组来处理不同发行版的包名差异
+    declare -A tools
+    tools=(
+        ["jq"]="jq"
+        ["wget"]="wget"
+        ["unzip"]="unzip"
+        ["bind-utils"]="$BIND_UTILS"
+        ["dkms"]="dkms"
+    )
+
+    # 检查并安装工具
+    for tool in "${!tools[@]}"; do
+        package_name=${tools[$tool]}
+        if ! command -v $tool &> /dev/null && [ "$tool" != "bind-utils" ]; then
+            echo "$tool is not installed. Installing $package_name..."
+            $INSTALL_CMD $package_name
+        elif [ "$tool" == "bind-utils" ]; then
+            # 特殊处理 bind-utils/dnsutils
+            if ! command -v nslookup &> /dev/null; then
+                echo "$tool is not installed. Installing $package_name..."
+                $INSTALL_CMD $package_name
+            fi
+        else
+            echo "$tool is already installed."
+        fi
     done
+}
+
+# 检查并安装单个工具的函数（如果需要的话）
+check_and_install() {
+    tool=$1
+    if ! command -v $tool &> /dev/null; then
+        echo "$tool is not installed. Installing..."
+        $INSTALL_CMD $tool
+    else
+        echo "$tool is already installed."
+    fi
 }
 
 # 开启 TCP Fast Open (TFO)
