@@ -430,6 +430,14 @@ install_debian_cloud_kernel() {
         $PKG_MANAGER install -y linux-image-cloud-amd64
         if [ $? -eq 0 ]; then
             print_success "Debian Cloud 内核安装成功。"
+            print_info "更新 GRUB 配置..."
+            update-grub
+            if [ $? -eq 0 ]; then
+                print_success "GRUB 配置更新成功。"
+            else
+                print_error "GRUB 配置更新失败。"
+                exit 1
+            fi
         else
             print_error "Debian Cloud 内核安装失败。"
             exit 1
