@@ -283,10 +283,28 @@ install_docker() {
 # 安装 Node.js LTS 版本
 install_nodejs() {
     print_info "安装 Node.js LTS 版本..."
-    curl -fsSL https://deb.nodesource.com/setup_lts.x | bash -
-    $PKG_MANAGER install -y nodejs
-    node -v
-    npm -v
+    case $OS in
+        "Ubuntu"|"Debian GNU/Linux")
+            curl -fsSL https://deb.nodesource.com/setup_lts.x | bash -
+            $PKG_MANAGER install -y nodejs
+            ;;
+        "CentOS Linux"|"AlmaLinux")
+            curl -fsSL https://rpm.nodesource.com/setup_lts.x | bash -
+            $PKG_MANAGER install -y nodejs
+            ;;
+        *)
+            print_error "不支持的操作系统: $OS"
+            return 1
+            ;;
+    esac
+    if command -v node &> /dev/null; then
+        print_success "Node.js 安装成功"
+        node -v
+        npm -v
+    else
+        print_error "Node.js 安装失败"
+        return 1
+    fi
 }
 
 # 安装路由测试工具
