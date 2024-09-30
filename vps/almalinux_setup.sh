@@ -134,9 +134,19 @@ set_timezone() {
 
 # 检查系统负载
 check_system_load() {
-    while [ $(awk '{print $1}' /proc/loadavg) > 1 ]; do
+    max_wait_time=60  # 最大等待时间（秒）
+    wait_interval=5    # 每次等待间隔（秒）
+    waited_time=0
+
+    while [ $(awk '{print $1}' /proc/loadavg | cut -d. -f1) -gt 1 ]; do
         print_warning "系统负载过高，等待中..."
-        sleep 5
+        sleep $wait_interval
+        waited_time=$((waited_time + wait_interval))
+
+        if [ $waited_time -ge $max_wait_time ]; then
+            print_error "系统负载持续过高，超出最大等待时间。"
+            exit 1
+        fi
     done
 }
 
