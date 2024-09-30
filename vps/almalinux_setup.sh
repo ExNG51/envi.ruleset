@@ -314,24 +314,56 @@ setup_network_performance() {
     fi
 }
 
-# 安装 Docker
 install_docker() {
     print_info "安装 Docker..."
-    if [ "$PKG_MANAGER" == "dnf" ]; then
-        dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
-        dnf install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-    elif [ "$PKG_MANAGER" == "apt" ]; then
-        apt-get update
-        apt-get install -y apt-transport-https ca-certificates curl software-properties-common
-        curl -fsSL https://download.docker.com/linux/ubuntu/gpg | apt-key add -
-        add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
-        apt-get update
-        apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    
+    # 检查是否已安装 Docker
+    if command -v docker &> /dev/null; then
+        print_info "Docker 已经安装。版本信息:"
+        docker --version
+        return 0
     fi
 
-    systemctl start docker
-    systemctl enable docker
-    docker --version
+    # 安装 Docker
+    if [ "$PKG_MANAGER" == "dnf" ]; then
+        sudo dnf remove -y docker docker-client docker-client-latest docker-common docker-latest docker-latest-logrotate docker-logrotate docker-engine
+        sudo dnf -y install dnf-plugins-core
+        sudo dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+        sudo dnf install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    elif [ "$PKG_MANAGER" == "apt-get" ]; then
+        sudo apt-get remove -y docker docker-engine docker.io containerd runc
+        sudo apt-get update
+        sudo apt-get install -y apt-transport-https ca-certificates curl gnupg lsb-release
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+        sudo apt-get update
+        sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    else
+        print_error "不支持的包管理器: $PKG_MANAGER"
+        return 1
+    fi
+
+    # 检查 Docker 是否成功安装
+    if ! command -v docker &> /dev/null; then
+        print_error "Docker 安装失败。"
+        return 1
+    fi
+
+    # 启动并启用 Docker 服务
+    sudo systemctl start docker || print_error "无法启动 Docker 服务"
+    sudo systemctl enable docker || print_error "无法启用 Docker 服务"
+
+    # 验证 Docker 安装
+    if docker --version; then
+        print_info "Docker 安装成功。版本信息:"
+        docker --version
+    else
+        print_error "Docker 安装可能不完整。请检查安装日志。"
+    fi
+
+    # 将当前用户添加到 docker 组（可选，需要重新登录生效）
+    sudo usermod -aG docker $USER
+    print_info "已将当前用户添加到 docker 组。请注销并重新登录以应用更改。"
 }
 
 # 安装 Node.js LTS 版本
