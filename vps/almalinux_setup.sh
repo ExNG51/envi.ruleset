@@ -36,7 +36,7 @@ check_and_install() {
     if ! command -v $1 &> /dev/null; then
         print_info "$1 未安装，正在安装..."
         dnf install -y $1
-        if [ $? -ne 0 ]; then
+        if [ $? -ne 0 ];then
             print_error "$1 安装失败。"
             exit 1
         fi
@@ -92,8 +92,11 @@ while [ $(uptime | awk '{print $10}' | cut -d',' -f1) -gt 1 ]; do
 done
 
 # 更新系统
+print_info "终止可能阻塞的进程..."
+dnf ps -q | awk '{print $1}' | xargs -r kill -9
+
 print_info "更新系统..."
-dnf update -y
+dnf update --refresh -y
 if [ $? -ne 0 ]; then
     print_error "系统更新失败。"
     exit 1
