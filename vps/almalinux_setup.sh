@@ -42,7 +42,7 @@ else
 fi
 
 case $OS in
-    "CentOS Linux")
+    "CentOS Linux"|"AlmaLinux")
         PKG_MANAGER="dnf"
         ;;
     "Ubuntu"|"Debian GNU/Linux")
