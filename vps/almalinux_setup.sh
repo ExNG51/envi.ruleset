@@ -59,6 +59,44 @@ case $OS in
 esac
 print_success "包管理器: $PKG_MANAGER"
 
+# 检查是否安装 curl，如果没有安装，则安装 curl
+check_curl() {
+    if ! command -v curl &>/dev/null; then
+        echo -e "${YELLOW}未检测到 curl，正在安装 curl...${NC}"
+        
+        # 检测包管理器
+        if command -v apt-get &> /dev/null; then
+            # Debian/Ubuntu 系统
+            sudo apt-get update
+            sudo apt-get install -y curl
+        elif command -v dnf &> /dev/null; then
+            # 较新的 RHEL/CentOS/Fedora 系统
+            sudo dnf check-update
+            sudo dnf install -y curl
+        elif command -v yum &> /dev/null; then
+            # 较旧的 RHEL/CentOS 系统
+            sudo yum check-update
+            sudo yum install -y curl
+        else
+            echo -e "${RED}无法确定系统的包管理器，请手动安装 curl 后重新运行脚本。${NC}"
+            exit 1
+        fi
+
+        if [ $? -ne 0 ]; then
+            echo -e "${RED}安装 curl 失败，请手动安装后重新运行脚本。${NC}"
+            exit 1
+        fi
+    fi
+
+    # 验证 curl 是否成功安装
+    if command -v curl &>/dev/null; then
+        echo -e "${GREEN}curl 已成功安装。${NC}"
+    else
+        echo -e "${RED}curl 安装失败，请手动安装后重新运行脚本。${NC}"
+        exit 1
+    fi
+}
+
 # 检测并安装所需的指令
 check_and_install() {
     echo "检查 $1 是否已安装"
@@ -427,6 +465,7 @@ clean_system() {
 main() {
     print_info "开始系统优化和配置..."
 
+    check_curl
     setup_swap
     set_timezone
     check_system_load
