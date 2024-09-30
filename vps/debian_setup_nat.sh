@@ -148,21 +148,6 @@ fi
 # 检查 dkms 状态
 dkms status
 
-# 安装 Docker
-echo "安装 Docker..."
-curl -fSL https://get.docker.com | bash -s docker
-
-# 安装 Node.js 19.x
-echo "安装 Node.js 19.x..."
-curl -fsSL https://deb.nodesource.com/setup_19.x | bash -
-apt-get install -y nodejs
-node -v
-npm -v
-
-# 安装路由测试工具
-echo "安装路由测试工具 nexttrace..."
-bash -c "$(curl -Ls https://github.com/sjlleo/nexttrace/raw/main/nt_install.sh)"
-
 # 清理不需要的包
 sudo apt-get autoremove -y
 if [ $? -eq 0 ]; then
