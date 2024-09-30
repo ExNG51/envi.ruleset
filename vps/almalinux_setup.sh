@@ -36,7 +36,7 @@ check_and_install() {
     if ! command -v $1 &> /dev/null; then
         print_info "$1 未安装，正在安装..."
         dnf install -y $1
-        if [ $? -ne 0 ];then
+        if [ $? -ne 0 ]; then
             print_error "$1 安装失败。"
             exit 1
         fi
@@ -92,16 +92,27 @@ while [ $(uptime | awk '{print $10}' | cut -d',' -f1) -gt 1 ]; do
 done
 
 # 更新系统
-print_info "终止可能阻塞的进程..."
-dnf ps -q | awk '{print $1}' | xargs -r kill -9
+print_info "获取需要更新的软件包列表..."
+packages=$(dnf list updates -q | awk 'NR>2 {print $1}')
 
-print_info "更新系统..."
-dnf update --refresh -y
-if [ $? -ne 0 ]; then
-    print_error "系统更新失败。"
-    exit 1
+if [ -z "$packages" ]; then
+    print_success "没有需要更新的软件包。"
 else
-    print_success "系统更新成功。"
+    print_info "分批次更新软件包..."
+    batch_size=10
+    package_array=($packages)
+    total_packages=${#package_array[@]}
+    for ((i=0; i<$total_packages; i+=$batch_size)); do
+        batch=("${package_array[@]:i:batch_size}")
+        print_info "更新以下软件包：${batch[@]}"
+        ionice -c3 nice -n 19 dnf update -y "${batch[@]}"
+        if [ $? -ne 0 ]; then
+            print_error "系统更新失败。"
+            exit 1
+        else
+            print_success "批次更新成功。"
+        fi
+    done
 fi
 
 # 检查 EPEL 仓库是否已启用
@@ -110,7 +121,7 @@ if dnf repolist enabled | grep -q "epel"; then
 else
     print_info "EPEL 仓库未启用，正在安装并启用..."
     sudo dnf install -y epel-release
-    if [ $? -eq 0 ]; then
+    if [ $? -eq 0 ];then
         print_success "EPEL 仓库已成功启用。"
     else
         print_error "EPEL 仓库启用失败，请手动检查问题。"
