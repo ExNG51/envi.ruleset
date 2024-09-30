@@ -149,7 +149,7 @@ update_system() {
     fi
 }
 
-# 安装 EPEL 仓库（仅适用于 CentOS/RHEL）
+# 安装 EPEL 仓库（仅适用于 CentOS/RHEL/AlmaLinux）
 install_epel() {
     if [ "$PKG_MANAGER" == "dnf" ]; then
         if ! dnf repolist enabled | grep -q "epel"; then
