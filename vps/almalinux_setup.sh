@@ -1,22 +1,47 @@
 #!/bin/bash
 
+# 定义颜色和样式
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[1;34m'
+BOLD='\033[1m'
+NC='\033[0m' # No Color
+
+# 打印显著的提示信息函数
+print_info() {
+    echo -e "${BLUE}${BOLD}$1${NC}"
+}
+
+print_success() {
+    echo -e "${GREEN}${BOLD}$1${NC}"
+}
+
+print_warning() {
+    echo -e "${YELLOW}${BOLD}$1${NC}"
+}
+
+print_error() {
+    echo -e "${RED}${BOLD}$1${NC}"
+}
+
 # 检查是否具有sudo权限
 if [[ $EUID -ne 0 ]]; then
-   echo "请以 root 身份或使用 sudo 执行此脚本。" 
+   print_error "请以 root 身份或使用 sudo 执行此脚本。"
    exit 1
 fi
 
 # 检测并安装所需的指令
 check_and_install() {
     if ! command -v $1 &> /dev/null; then
-        echo "$1 未安装，正在安装..."
+        print_info "$1 未安装，正在安装..."
         dnf install -y $1
         if [ $? -ne 0 ]; then
-            echo "$1 安装失败。"
+            print_error "$1 安装失败。"
             exit 1
         fi
     else
-        echo "$1 已安装，跳过安装。"
+        print_success "$1 已安装，跳过安装。"
     fi
 }
 
@@ -33,9 +58,9 @@ mkswap /mnt/swap
 swapon /mnt/swap
 if ! grep -q '/mnt/swap' /etc/fstab; then
     echo "/mnt/swap swap swap defaults 0 0" >> /etc/fstab
-    echo "交换文件已添加到 /etc/fstab。"
+    print_success "交换文件已添加到 /etc/fstab。"
 else
-    echo "交换文件已存在于 /etc/fstab。"
+    print_success "交换文件已存在于 /etc/fstab。"
 fi
 sed -i '/vm.swappiness/d' /etc/sysctl.conf
 echo "vm.swappiness = 25" >> /etc/sysctl.conf
@@ -43,58 +68,58 @@ sysctl -w vm.swappiness=25
 swapon -a
 swapon --show
 if [ $? -eq 0 ]; then
-    echo "交换空间已成功启用。"
+    print_success "交换空间已成功启用。"
 else
-    echo "交换空间启用失败。"
+    print_error "交换空间启用失败。"
     exit 1
 fi
 
 # 修改时区为新加坡
 current_timezone=$(timedatectl | grep "Time zone" | awk '{print $3}')
 if [ "$current_timezone" == "Asia/Singapore" ]; then
-    echo "当前系统时区已经是 Asia/Singapore，跳过时区设置。"
+    print_success "当前系统时区已经是 Asia/Singapore，跳过时区设置。"
 else
-    echo "设置系统时区为 Asia/Singapore..."
+    print_info "设置系统时区为 Asia/Singapore..."
     sudo timedatectl set-timezone Asia/Singapore
     new_timezone=$(timedatectl | grep "Time zone" | awk '{print $3}')
-    echo "当前系统时区已设置为: $new_timezone"
+    print_success "当前系统时区已设置为: $new_timezone"
 fi
 
 # 检查系统负载
 while [ $(uptime | awk '{print $10}' | cut -d',' -f1) -gt 1 ]; do
-    echo "系统负载过高，等待中..."
+    print_warning "系统负载过高，等待中..."
     sleep 5
 done
 
 # 更新系统
-echo "更新系统..."
+print_info "更新系统..."
 dnf update -y
 if [ $? -ne 0 ]; then
-    echo "系统更新失败。"
+    print_error "系统更新失败。"
     exit 1
 else
-    echo "系统更新成功。"
+    print_success "系统更新成功。"
 fi
 
 # 检查 EPEL 仓库是否已启用
 if dnf repolist enabled | grep -q "epel"; then
-    echo "EPEL 仓库已经启用。"
+    print_success "EPEL 仓库已经启用。"
 else
-    echo "EPEL 仓库未启用，正在安装并启用..."
+    print_info "EPEL 仓库未启用，正在安装并启用..."
     sudo dnf install -y epel-release
     if [ $? -eq 0 ]; then
-        echo "EPEL 仓库已成功启用。"
+        print_success "EPEL 仓库已成功启用。"
     else
-        echo "EPEL 仓库启用失败，请手动检查问题。"
+        print_error "EPEL 仓库启用失败，请手动检查问题。"
         exit 1
     fi
 fi
 
 # 检查是否安装成功并启用
 if dnf repolist enabled | grep -q "epel"; then
-    echo "EPEL 仓库确认已启用。"
+    print_success "EPEL 仓库确认已启用。"
 else
-    echo "EPEL 仓库仍未启用，请检查网络或仓库配置。"
+    print_error "EPEL 仓库仍未启用，请检查网络或仓库配置。"
     exit 1
 fi
 
@@ -106,7 +131,7 @@ check_and_install bind-utils
 check_and_install dkms
 
 # 开启 TCP Fast Open (TFO)
-echo "开启 TCP Fast Open (TFO)..."
+print_info "开启 TCP Fast Open (TFO)..."
 echo "3" > /proc/sys/net/ipv4/tcp_fastopen
 echo "net.ipv4.tcp_fastopen=3" > /etc/sysctl.d/30-tcp_fastopen.conf
 sysctl --system
@@ -117,25 +142,25 @@ sysctl --system
 current_algo=$(sysctl net.ipv4.tcp_congestion_control | awk '{print $3}')
 
 if [ "$current_algo" == "bbr" ]; then
-    echo "当前系统已使用 BBR 算法。"
+    print_success "当前系统已使用 BBR 算法。"
 else
-    echo "当前系统未使用 BBR 算法，正在设置 BBR..."
+    print_info "当前系统未使用 BBR 算法，正在设置 BBR..."
 
     # 检查是否加载了 BBR 模块
     if lsmod | grep -q "tcp_bbr"; then
-        echo "BBR 模块已加载。"
+        print_success "BBR 模块已加载。"
     else
-        echo "BBR 模块未加载，正在加载..."
+        print_info "BBR 模块未加载，正在加载..."
         modprobe tcp_bbr
         if [ $? -ne 0 ]; then
-            echo "加载 BBR 模块失败。"
+            print_error "加载 BBR 模块失败。"
             exit 1
         fi
-        echo "BBR 模块加载成功。"
+        print_success "BBR 模块加载成功。"
     fi
 
     # 将 BBR 添加到 TCP 拥塞控制列表
-    echo "设置 TCP 拥塞控制为 BBR..."
+    print_info "设置 TCP 拥塞控制为 BBR..."
     sysctl -w net.core.default_qdisc=fq
     sysctl -w net.ipv4.tcp_congestion_control=bbr
 
@@ -147,45 +172,45 @@ else
         echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
     fi
 
-    echo "BBR 设置完成。"
+    print_success "BBR 设置完成。"
 fi
 
 # 再次确认 BBR 是否已启用
 final_algo=$(sysctl net.ipv4.tcp_congestion_control | awk '{print $3}')
 
 if [ "$final_algo" == "bbr" ]; then
-    echo "BBR 已成功启用。"
+    print_success "BBR 已成功启用。"
 else
-    echo "BBR 启用失败，请检查配置。"
+    print_error "BBR 启用失败，请检查配置。"
     exit 1
 fi
 
 # 开启 tuned 并设置网络性能优化配置
-echo "开启 tuned 并设置网络性能优化配置..."
+print_info "开启 tuned 并设置网络性能优化配置..."
 check_and_install tuned
 systemctl enable tuned.service
 systemctl start tuned.service
 tuned-adm profile network-throughput
 # 验证 tuned 服务状态
-echo "检查 tuned 服务状态..."
+print_info "检查 tuned 服务状态..."
 if systemctl status tuned.service | grep -q "active (running)"; then
-    echo "tuned 服务已成功启动。"
+    print_success "tuned 服务已成功启动。"
 else
-    echo "tuned 服务未启动，请检查日志进行排查。"
+    print_error "tuned 服务未启动，请检查日志进行排查。"
     exit 1
 fi
 # 验证配置是否应用
-echo "验证 tuned 配置..."
+print_info "验证 tuned 配置..."
 active_profile=$(tuned-adm active)
 if [[ "$active_profile" == *"network-throughput"* ]]; then
-    echo "网络吞吐量优化配置已成功应用。"
+    print_success "网络吞吐量优化配置已成功应用。"
 else
-    echo "未能应用网络吞吐量优化配置。"
+    print_error "未能应用网络吞吐量优化配置。"
     exit 1
 fi
 
 # 安装 Docker
-echo "安装 Docker..."
+print_info "安装 Docker..."
 sudo dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
 sudo dnf install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 sudo systemctl start docker
@@ -193,7 +218,7 @@ sudo systemctl enable docker
 docker --version
 
 # 安装 Node.js 19.x
-echo "安装 Node.js 19.x..."
+print_info "安装 Node.js 19.x..."
 sudo dnf install -y epel-release
 curl -fsSL https://rpm.nodesource.com/setup_19.x | sudo bash -
 sudo dnf install -y nodejs
@@ -201,28 +226,28 @@ node -v
 npm -v
 
 # 安装路由测试工具
-echo "安装路由测试工具 nexttrace..."
+print_info "安装路由测试工具 nexttrace..."
 bash -c "$(curl -Ls https://github.com/sjlleo/nexttrace/raw/main/nt_install.sh)"
 
 # 修改 SSH 端口为 9399
-echo "修改 SSH 端口为 9399..."
+print_info "修改 SSH 端口为 9399..."
 sed -i 's/#Port 22/Port 9399/' /etc/ssh/sshd_config
 systemctl restart sshd
 if [ $? -ne 0 ]; then
-    echo "SSH 服务重启失败，请检查配置。"
+    print_error "SSH 服务重启失败，请检查配置。"
     exit 1
 fi
 
 # 清理不需要的包
 sudo dnf autoremove -y
 if [ $? -eq 0 ]; then
-    echo "系统清理完成，不需要的包已移除。"
+    print_success "系统清理完成，不需要的包已移除。"
 else
-    echo "系统清理失败，请检查错误信息。"
+    print_error "系统清理失败，请检查错误信息。"
     exit 1
 fi
 
-echo "所有任务完成！"
+print_success "所有任务完成！"
 
-echo "重启..."
+print_info "重启..."
 reboot
