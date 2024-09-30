@@ -362,8 +362,9 @@ install_nodejs() {
             $PKG_MANAGER install -y nodejs
             ;;
         "CentOS Linux"|"AlmaLinux")
+            sudo $PKG_MANAGER install -y epel-release
             curl -fsSL https://rpm.nodesource.com/setup_lts.x | bash -
-            $PKG_MANAGER install -y nodejs
+            sudo $PKG_MANAGER install -y nodejs
             ;;
         *)
             print_error "不支持的操作系统: $OS"
