@@ -399,9 +399,11 @@ change_ssh_port() {
     else
         print_warning "FirewallD 未运行，使用 iptables 添加规则。"
         iptables -A INPUT -p tcp --dport 9399 -j ACCEPT
-        if command -v netfilter-persistent &> /dev/null; then
+        # 保存 iptables 规则
+        if [ -f /etc/debian_version ]; then
+            apt install -y iptables-persistent
             netfilter-persistent save
-        elif command -v service &> /dev/null; then
+        elif [ -f /etc/redhat-release ]; then
             service iptables save
         fi
     fi
