@@ -82,7 +82,7 @@ setup_swap() {
     fi
 
     MEM_SIZE_MB=$(awk '/MemTotal:/ {print int($2/1024)}' /proc/meminfo)
-    SWAP_SIZE_MB=$((MEM_SIZE_MB < 1024 ? 1024 : MEM_SIZE_MB))
+    SWAP_SIZE_MB=$((MEM_SIZE_MB < 1024 ? MEM_SIZE_MB : 1024))
 
     if [ ! -d /mnt ]; then
         print_error "/mnt 目录不存在，请检查挂载点。"
@@ -209,6 +209,8 @@ install_tools() {
     # 定义工具列表，使用关联数组来处理不同发行版的包名差异
     declare -A tools
     tools=(
+        ["sudo"]="sudo"
+        ["curl"]="curl"
         ["jq"]="jq"
         ["wget"]="wget"
         ["unzip"]="unzip"
