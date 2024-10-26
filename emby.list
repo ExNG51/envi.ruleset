@@ -105,7 +105,7 @@ DOMAIN-KEYWORD,magpie
 # > 流媒体HXD服务器
 DOMAIN-SUFFIX,bili.rip
 DOMAIN-SUFFIX,hxd.as174.com
-DOMAIN-SUFFIX,cf.bili.rip:8443
+DOMAIN-SUFFIX,cf.bili.rip
 
 # > 流媒体AlphaTV服务器
 DOMAIN-SUFFIX,oversea.alphatvapp.top
