@@ -107,5 +107,8 @@ DOMAIN-SUFFIX,bili.rip
 DOMAIN-SUFFIX,hxd.as174.com
 DOMAIN-SUFFIX,cf.bili.rip:8443
 
+# > 流媒体AlphaTV服务器
+DOMAIN-SUFFIX,oversea.alphatvapp.top
+
 # > EMBY
 DOMAIN-KEYWORD,emby
