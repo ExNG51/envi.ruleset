@@ -500,6 +500,16 @@ install_debian_cloud_kernel() {
         $PKG_MANAGER install -y linux-image-cloud-amd64
         if [ $? -eq 0 ]; then
             print_success "Debian Cloud 内核安装成功。"
+            
+            # 设置 Cloud 内核为默认启动项
+            CLOUD_KERNEL_VERSION=$(ls -t /boot/vmlinuz-*-cloud-amd64 | head -n1 | sed 's/\/boot\/vmlinuz-//g')
+            if [ -n "$CLOUD_KERNEL_VERSION" ]; then
+                print_info "设置 Cloud 内核 $CLOUD_KERNEL_VERSION 为默认启动项..."
+                sed -i "s/GRUB_DEFAULT=.*/GRUB_DEFAULT=\"Advanced options for Debian GNU\/Linux>Debian GNU\/Linux, with Linux $CLOUD_KERNEL_VERSION\"/" /etc/default/grub
+            else
+                print_warning "无法找到 Cloud 内核版本,跳过设置默认启动项。"
+            fi
+            
             print_info "更新 GRUB 配置..."
             update-grub
             if [ $? -eq 0 ]; then
