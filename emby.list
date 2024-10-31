@@ -37,6 +37,9 @@ DOMAIN,emby.nyancat.net
 # > 流媒体Texon服务器
 DOMAIN,emby.texon.one
 
+# > 流媒体Makima服务器
+DOMAIN-SUFFIX,makima.online
+
 # > 流媒体普拉斯影业服务器
 DOMAIN,emby.plusmedia.site
 DOMAIN,emby-cf.plusmedia.site 
@@ -90,7 +93,6 @@ DOMAIN-SUFFIX,film.reddust.link
 DOMAIN-SUFFIX,misakaf.org  
 DOMAIN-SUFFIX,embyvip.misakaf.org
 DOMAIN-SUFFIX,2333.123456.al
-DOMAIN-KEYWORD,misakaf
 
 # > 流媒体Magpie服务器
 DOMAIN-SUFFIX,023168.xyz
@@ -100,11 +102,9 @@ DOMAIN-SUFFIX,magpie.bond
 
 # > 流媒体HXD服务器
 DOMAIN-SUFFIX,bili.rip
-DOMAIN-SUFFIX,hxd.as174.com
 DOMAIN-SUFFIX,cf.bili.rip
+DOMAIN-SUFFIX,hxd.as174.com
+DOMAIN-SUFFIX,emby.as174.com
 
 # > 流媒体AlphaTV服务器
 DOMAIN-SUFFIX,oversea.alphatvapp.top
-
-# > EMBY
-DOMAIN-KEYWORD,emby
