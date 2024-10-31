@@ -37,20 +37,6 @@ DOMAIN,emby.nyancat.net
 # > 流媒体Texon服务器
 DOMAIN,emby.texon.one
 
-# > 流媒体MKM服务器
-DOMAIN-SUFFIX,makima.online
-
-# > 流媒体SYN服务器
-DOMAIN-SUFFIX,stream.synn.cc
-DOMAIN-SUFFIX,clip.makima.online
-
-# > 流媒体FacMata服务器
-DOMAIN-SUFFIX,cinema.makima.online
-DOMAIN-SUFFIX,theater.makima.online
-DOMAIN-SUFFIX,anime.makima.online
-DOMAIN-SUFFIX,restrict.makima.online
-DOMAIN-SUFFIX,makima.online
-
 # > 流媒体普拉斯影业服务器
 DOMAIN,emby.plusmedia.site
 DOMAIN,emby-cf.plusmedia.site 
