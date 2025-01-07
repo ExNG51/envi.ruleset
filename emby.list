@@ -103,8 +103,10 @@ DOMAIN-SUFFIX,magpie.bond
 # > 流媒体HXD服务器
 DOMAIN-SUFFIX,bili.rip
 DOMAIN-SUFFIX,cf.bili.rip
+DOMAIN-SUFFIX,hxd.as174.de
 DOMAIN-SUFFIX,hxd.as174.com
 DOMAIN-SUFFIX,emby.as174.com
+DOMAIN-KEYWORD,as174
 
 # > 流媒体AlphaTV服务器
 DOMAIN-SUFFIX,oversea.alphatvapp.top
