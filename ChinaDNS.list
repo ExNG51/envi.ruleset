@@ -1,17 +1,7 @@
 ## > CHINA DNS DOMAIN
 DOMAIN,dns.alidns.com
-DOMAIN,dns.cfiec.net
-DOMAIN,dns.ipv6dns.com
-DOMAIN,dns.rubyfish.cn
-DOMAIN,rubyfish.cn
 DOMAIN,doh.pub
 DOMAIN,sm2.doh.pub
-DOMAIN,edns.233py.com
-DOMAIN,i.233py.com
-DOMAIN,sdns.233py.com
-DOMAIN,ipv4.apad.pro
-DOMAIN,hd.h2o.apad.pro
-DOMAIN,xn.h2o.apad.pro
 ## > CHINA DNS IP-CIDR
 IP-CIDR,114.114.114.114/32,no-resolve
 IP-CIDR,119.29.107.85/32,no-resolve
