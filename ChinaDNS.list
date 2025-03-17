@@ -1,7 +1,7 @@
 ## > CHINA DNS DOMAIN
-DOMAIN,dns.alidns.com
 DOMAIN,doh.pub
 DOMAIN,sm2.doh.pub
+DOMAIN,dns.alidns.com
 ## > CHINA DNS IP-CIDR
 IP-CIDR,114.114.114.114/32,no-resolve
 IP-CIDR,119.29.107.85/32,no-resolve
