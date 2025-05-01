@@ -22,47 +22,60 @@ is_alpine() {
 }
 
 check_package() {
-    # Define PKG_MANAGER locally within the function if not already global
-    local PKG_MANAGER
-    if command -v apk >/dev/null 2>&1; then PKG_MANAGER="apk"
-    elif command -v apt >/dev/null 2>&1; then PKG_MANAGER="apt"
-    elif command -v dnf >/dev/null 2>&1; then PKG_MANAGER="dnf"
-    elif command -v yum >/dev/null 2>&1; then PKG_MANAGER="yum"
+    # Determine package manager inside the function for robustness.
+    local PKG_MANAGER_LOCAL
+    if command -v apk >/dev/null 2>&1; then PKG_MANAGER_LOCAL="apk"
+    elif command -v apt >/dev/null 2>&1; then PKG_MANAGER_LOCAL="apt"
+    elif command -v dnf >/dev/null 2>&1; then PKG_MANAGER_LOCAL="dnf"
+    elif command -v yum >/dev/null 2>&1; then PKG_MANAGER_LOCAL="yum"
     else return 1 # Indicate no known package manager found
     fi
 
-    case "$PKG_MANAGER" in
+    case "$PKG_MANAGER_LOCAL" in
         apk) apk info -e "$1" >/dev/null 2>&1 ;;
         apt) dpkg -l "$1" 2>/dev/null | grep -q "^ii" ;;
         dnf|yum) rpm -q "$1" >/dev/null 2>&1 ;;
-        *) return 1 ;; # Should not happen due to check above, but good practice
+        *) return 1 ;;
     esac
 }
 
 install_packages() {
-    # Define PKG_MANAGER locally within the function if not already global
-    local PKG_MANAGER
-    if command -v apk >/dev/null 2>&1; then PKG_MANAGER="apk"
-    elif command -v apt >/dev/null 2>&1; then PKG_MANAGER="apt"
-    elif command -v dnf >/dev/null 2>&1; then PKG_MANAGER="dnf"
-    elif command -v yum >/dev/null 2>&1; then PKG_MANAGER="yum"
+    # Determine package manager inside this function as well.
+    local PKG_MANAGER_LOCAL
+    if command -v apk >/dev/null 2>&1; then PKG_MANAGER_LOCAL="apk"
+    elif command -v apt >/dev/null 2>&1; then PKG_MANAGER_LOCAL="apt"
+    elif command -v dnf >/dev/null 2>&1; then PKG_MANAGER_LOCAL="dnf"
+    elif command -v yum >/dev/null 2>&1; then PKG_MANAGER_LOCAL="yum"
     else
         echo "Error: No supported package manager found for installation (apk/apt/dnf/yum)."
         return 1
     fi
 
-    echo "Installing required packages: $*"
-    case "$PKG_MANAGER" in
-        apk) apk add --no-cache "$@" >/dev/null 2>&1 ;;
-        apt) apt update >/dev/null 2>&1 && apt install -y "$@" >/dev/null 2>&1 ;;
-        dnf) dnf install -y "$@" >/dev/null 2>&1 ;;
-        yum) yum install -y "$@" >/dev/null 2>&1 ;;
-        # *) This case is handled by the initial check
+    echo "Installing required packages using $PKG_MANAGER_LOCAL: $*"
+    # Redirect stdout only, keep stderr visible for errors during install
+    local install_cmd_output
+    local install_cmd_status
+    case "$PKG_MANAGER_LOCAL" in
+        apk) install_cmd_output=$(apk add --no-cache "$@" 2>&1) ; install_cmd_status=$? ;;
+        apt) install_cmd_output=$(apt update >/dev/null 2>&1 && apt install -y "$@" 2>&1) ; install_cmd_status=$? ;;
+        dnf) install_cmd_output=$(dnf install -y "$@" 2>&1) ; install_cmd_status=$? ;;
+        yum) install_cmd_output=$(yum install -y "$@" 2>&1) ; install_cmd_status=$? ;;
     esac
-    if [ $? -ne 0 ]; then
-        echo "Error: Failed to install required packages"
+
+    if [ $install_cmd_status -ne 0 ]; then
+        echo "Error: Failed to install required packages ($*)"
+        echo "Package manager output:"
+        echo "$install_cmd_output" # Show output on failure
         return 1
     fi
+
+    # Verify installation for coreutils specifically after attempt
+    if [[ " $@ " =~ " coreutils " ]]; then
+        if ! command -v shuf >/dev/null 2>&1; then
+             echo "Warning: coreutils installed but 'shuf' command still not found."
+        fi
+    fi
+
     return 0
 }
 
@@ -168,14 +181,19 @@ update() {
 
         if [ -n "$shadow_tls_binary" ]; then
             echo "Downloading Shadow-TLS binary ($shadow_tls_binary)..."
-            if curl -fSL "https://github.com/ihciah/shadow-tls/releases/download/$SHADOW_TLS_VERSION/$shadow_tls_binary" -o /usr/local/bin/shadow-tls.new; then
-                chmod a+x /usr/local/bin/shadow-tls.new
-                mv /usr/local/bin/shadow-tls.new /usr/local/bin/shadow-tls
-                echo "Restarting Shadow-TLS service..."
-                systemctl restart shadow-tls
+            local temp_stls_bin="/tmp/shadow-tls.$$" # Use temp file for download
+            if curl -fSL "https://github.com/ihciah/shadow-tls/releases/download/$SHADOW_TLS_VERSION/$shadow_tls_binary" -o "$temp_stls_bin"; then
+                chmod a+x "$temp_stls_bin"
+                if mv "$temp_stls_bin" /usr/local/bin/shadow-tls; then # Move after successful download and chmod
+                   echo "Restarting Shadow-TLS service..."
+                   systemctl restart shadow-tls
+                else
+                    echo "Error: Failed to move downloaded Shadow-TLS binary to /usr/local/bin/. Keeping existing version."
+                    rm -f "$temp_stls_bin" # Clean up temp file
+                fi
             else
                 echo "Error: Failed to download Shadow-TLS binary. Keeping existing version."
-                rm -f /usr/local/bin/shadow-tls.new
+                rm -f "$temp_stls_bin" # Clean up temp file if exists
             fi
         fi
     fi
@@ -209,24 +227,27 @@ install() {
 
     local required_packages=()
     # Define required packages based on the determined manager
+    # coreutils (for shuf) is added here to ensure it's checked/installed early if possible
     if [ "$PKG_MANAGER" = "apk" ] || [ "$PKG_MANAGER" = "yum" ] || [ "$PKG_MANAGER" = "dnf" ]; then
-        required_packages=(wget tar openssl curl net-tools xz)
+        required_packages=(wget tar openssl curl net-tools xz coreutils) # Add coreutils
     else # apt
-        required_packages=(wget tar openssl curl net-tools xz-utils)
+        required_packages=(wget tar openssl curl net-tools xz-utils coreutils) # Add coreutils
     fi
 
     local missing_packages=()
     for package in "${required_packages[@]}"; do
-        # Pass the identified PKG_MANAGER to check_package
+        # check_package determines manager internally now
         if ! check_package "$package"; then
             missing_packages+=("$package")
         fi
     done
 
     if [ ${#missing_packages[@]} -ne 0 ]; then
-        # Pass the identified PKG_MANAGER to install_packages
+        # install_packages determines manager internally now
+        echo "Attempting to install missing dependencies: ${missing_packages[*]}"
         if ! install_packages "${missing_packages[@]}"; then
-            exit 1
+            # If coreutils was missing and failed to install, we might hit issues later
+             echo "Warning: Failed to install some dependencies. Proceeding, but errors may occur."
         fi
     else
         echo "All dependencies seem to be installed."
@@ -275,49 +296,116 @@ install() {
     local ss_password=""
     local user_port_input=""
     local user_pw_input=""
+    local use_shuf_for_port=true # Flag to indicate if we should try using shuf
 
     # Ask for Port
     echo ""
     read -p "Enter Shadowsocks port (leave empty for random port between 10000-65535): " user_port_input
     if [[ -n "$user_port_input" ]]; then
         if [[ "$user_port_input" =~ ^[0-9]+$ ]] && [ "$user_port_input" -ge 1 ] && [ "$user_port_input" -le 65535 ]; then
-            # Check port availability using net-tools (ss)
-            if command -v ss > /dev/null && ! ss -tuln | awk '{print $5}' | grep -q ":${user_port_input}$"; then
+            # Check port availability using net-tools (ss or netstat)
+             local port_in_use=false
+             if command -v ss > /dev/null; then
+                 if ss -tuln | awk '{print $5}' | grep -q ":${user_port_input}$"; then
+                     port_in_use=true
+                 fi
+             elif command -v netstat > /dev/null; then
+                  if netstat -tuln | awk '{print $4}' | grep -q ":${user_port_input}$"; then
+                      port_in_use=true
+                  fi
+             else
+                  echo "Warning: Cannot check port availability (ss or netstat not found)."
+             fi
+
+            if [ "$port_in_use" = true ]; then
+                echo "Error: Port $user_port_input is already in use. Exiting."
+                exit 1
+            else
                 ss_port="$user_port_input"
                 echo "Using user-provided Shadowsocks port: $ss_port"
-            elif ! command -v ss > /dev/null && command -v netstat > /dev/null && ! netstat -tuln | awk '{print $4}' | grep -q ":${user_port_input}$"; then
-                 ss_port="$user_port_input"
-                 echo "Using user-provided Shadowsocks port: $ss_port (checked with netstat)"
-            else
-                echo "Error: Port $user_port_input is already in use or cannot check. Exiting."
-                exit 1
             fi
         else
             echo "Error: Invalid port number '$user_port_input'. Exiting."
             exit 1
         fi
     fi
-    # Generate random port if not provided or invalid selection method was chosen before
+
+    # Generate random port if not provided
     if [ -z "$ss_port" ]; then
-        echo "Generating random port for Shadowsocks..."
+        echo "Attempting to generate random port..."
+        # Check if shuf command exists
+        if ! command -v shuf >/dev/null 2>&1; then
+             echo "Warning: 'shuf' command not found."
+             # Check if coreutils was potentially installed earlier by checking missing_packages again
+             local coreutils_was_missing=false
+             for pkg in "${missing_packages[@]}"; do
+                 if [ "$pkg" = "coreutils" ]; then
+                     coreutils_was_missing=true
+                     break
+                 fi
+             done
+
+             # Only try to install again if it was initially missing or if we didn't check before
+             if [ "$coreutils_was_missing" = true ] || ! [[ " ${required_packages[*]} " =~ " coreutils " ]]; then
+                 echo "Attempting to install 'coreutils'..."
+                 if ! install_packages coreutils; then
+                     echo "Warning: Failed to install 'coreutils'."
+                 else
+                     echo "'coreutils' installation attempted."
+                 fi
+             else
+                 echo "'coreutils' was checked/installed earlier. 'shuf' seems unavailable in the package."
+             fi
+
+             # Check again if shuf is now available
+             if ! command -v shuf >/dev/null 2>&1; then
+                  echo "Warning: 'shuf' is still not available after installation attempt."
+                  echo "Falling back to using \$RANDOM for port generation."
+                  echo "Note: \$RANDOM method can only generate ports up to 42767."
+                  use_shuf_for_port=false # Set flag to use fallback method
+             else
+                  echo "'shuf' is now available."
+             fi
+        fi
+
+        # Loop to find an available port using the chosen method
         while true; do
-            ss_port=$(( ( RANDOM % 55536 ) + 10000 ))
-            # Check port availability using ss or netstat
-            if command -v ss > /dev/null && ! ss -tuln | awk '{print $5}' | grep -q ":$ss_port$"; then
-                echo "Using randomly generated Shadowsocks port: $ss_port"
-                break
-            elif ! command -v ss > /dev/null && command -v netstat > /dev/null && ! netstat -tuln | awk '{print $4}' | grep -q ":$ss_port$"; then
-                 echo "Using randomly generated Shadowsocks port: $ss_port (checked with netstat)"
-                 break
-            elif ! command -v ss > /dev/null && ! command -v netstat > /dev/null; then
-                 echo "Warning: Cannot check port availability (ss or netstat not found). Using generated port $ss_port."
-                 break
+            if [ "$use_shuf_for_port" = true ]; then
+                # Use shuf (preferred method)
+                # echo "Generating random port using shuf..." # Reduce verbosity inside loop
+                ss_port=$(shuf -i 10000-65535 -n 1)
+            else
+                # Use $RANDOM (fallback method)
+                # echo "Generating random port using \$RANDOM (Range: 10000-42767)..." # Reduce verbosity inside loop
+                ss_port=$(( ( RANDOM % 32768 ) + 10000 )) # Range 10000-42767
             fi
-            sleep 0.1 # Prevent tight loop if checking fails consistently
+
+            # Check port availability using ss or netstat
+            local port_available=false
+            if command -v ss > /dev/null; then
+                if ! ss -tuln | awk '{print $5}' | grep -q ":$ss_port$"; then
+                    port_available=true
+                fi
+            elif command -v netstat > /dev/null; then
+                 if ! netstat -tuln | awk '{print $4}' | grep -q ":$ss_port$"; then
+                    port_available=true
+                 fi
+            else
+                 # echo "Warning: Cannot check port availability (ss or netstat not found). Using generated port $ss_port."
+                 port_available=true # Assume available if we can't check
+            fi
+
+            if [ "$port_available" = true ]; then
+                 echo "Using randomly generated Shadowsocks port: $ss_port"
+                 break
+            else
+                 # echo "Port $ss_port is in use, trying another..." # Reduce verbosity inside loop
+                 sleep 0.1 # Prevent tight loop
+            fi
         done
     fi
 
-    # Ask for Password
+    # --- Ask for Password & Create Config ---
     echo ""
     read -p "Enter Shadowsocks password (leave empty for random password): " user_pw_input
     if [[ -n "$user_pw_input" ]]; then
@@ -457,39 +545,46 @@ EOF
             # Proceed only if a password was successfully set (either random or fixed)
             if [ -n "$stls_password" ]; then
                 # Check if port 443 is available
-                if command -v ss > /dev/null && ss -tuln | awk '{print $5}' | grep -q ":443$"; then
-                    echo "Error: Port 443 is already in use. Cannot install Shadow-TLS. Exiting."
-                    exit 1
-                elif ! command -v ss > /dev/null && command -v netstat > /dev/null && netstat -tuln | awk '{print $4}' | grep -q ":443$"; then
-                     echo "Error: Port 443 is already in use (checked with netstat). Cannot install Shadow-TLS. Exiting."
-                     exit 1
-                elif ! command -v ss > /dev/null && ! command -v netstat > /dev/null; then
+                local port_443_in_use=false
+                 if command -v ss > /dev/null; then
+                     if ss -tuln | awk '{print $5}' | grep -q ":443$"; then
+                         port_443_in_use=true
+                     fi
+                 elif command -v netstat > /dev/null; then
+                     if netstat -tuln | awk '{print $4}' | grep -q ":443$"; then
+                         port_443_in_use=true
+                     fi
+                 else
                      echo "Warning: Cannot check if port 443 is in use (ss or netstat not found). Proceeding anyway."
-                fi
+                 fi
 
-                # Install Shadow-TLS binary
-                local shadow_tls_binary=""
-                local shadow_tls_url_base="https://github.com/ihciah/shadow-tls/releases/download/$SHADOW_TLS_VERSION"
-                # Reuse arch variable from SS install part
-                case $arch in
-                    x86_64) shadow_tls_binary="shadow-tls-x86_64-unknown-linux-musl" ;;
-                    aarch64|arm*) shadow_tls_binary="shadow-tls-arm-unknown-linux-musleabi" ;; # Use arm* glob
-                    *) echo "Warning: Unsupported architecture for Shadow-TLS: $arch. Skipping Shadow-TLS setup.";;
-                esac
+                if [ "$port_443_in_use" = true ]; then
+                     echo "Error: Port 443 is already in use. Cannot install Shadow-TLS. Skipping Shadow-TLS setup."
+                     stls_password="" # Clear password as we are skipping
+                else
+                    # Install Shadow-TLS binary
+                    local shadow_tls_binary=""
+                    local shadow_tls_url_base="https://github.com/ihciah/shadow-tls/releases/download/$SHADOW_TLS_VERSION"
+                    # Reuse arch variable from SS install part
+                    case $arch in
+                        x86_64) shadow_tls_binary="shadow-tls-x86_64-unknown-linux-musl" ;;
+                        aarch64|arm*) shadow_tls_binary="shadow-tls-arm-unknown-linux-musleabi" ;; # Use arm* glob
+                        *) echo "Warning: Unsupported architecture for Shadow-TLS: $arch. Skipping Shadow-TLS setup.";;
+                    esac
 
-                if [ -n "$shadow_tls_binary" ]; then
-                    echo "Downloading Shadow-TLS binary ($shadow_tls_binary)..."
-                    # Use /tmp for download to avoid permission issues before moving
-                    local temp_stls_bin="/tmp/shadow-tls.$$"
-                    if curl -fSL "$shadow_tls_url_base/$shadow_tls_binary" -o "$temp_stls_bin"; then
-                        chmod a+x "$temp_stls_bin"
-                        # Move to final destination
-                        if mv "$temp_stls_bin" /usr/local/bin/shadow-tls; then
-                            echo "Shadow-TLS binary installed to /usr/local/bin/shadow-tls"
+                    if [ -n "$shadow_tls_binary" ]; then
+                        echo "Downloading Shadow-TLS binary ($shadow_tls_binary)..."
+                        # Use /tmp for download to avoid permission issues before moving
+                        local temp_stls_bin="/tmp/shadow-tls.$$"
+                        if curl -fSL "$shadow_tls_url_base/$shadow_tls_binary" -o "$temp_stls_bin"; then
+                            chmod a+x "$temp_stls_bin"
+                            # Move to final destination
+                            if mv "$temp_stls_bin" /usr/local/bin/shadow-tls; then
+                                echo "Shadow-TLS binary installed to /usr/local/bin/shadow-tls"
 
-                            # Create Shadow-TLS systemd service file using the chosen password
-                            echo "Creating Shadow-TLS systemd service file..."
-                            cat >| /etc/systemd/system/shadow-tls.service <<EOF
+                                # Create Shadow-TLS systemd service file using the chosen password
+                                echo "Creating Shadow-TLS systemd service file..."
+                                cat >| /etc/systemd/system/shadow-tls.service <<EOF
 [Unit]
 Description=Shadow-TLS Server Service (v3)
 After=network-online.target ss-rust.service
@@ -508,36 +603,37 @@ ExecStart=/usr/local/bin/shadow-tls --fastopen --v3 --strict server --wildcard-s
 [Install]
 WantedBy=multi-user.target
 EOF
-                            # Start Shadow-TLS service
-                            echo "Reloading systemd daemon and starting Shadow-TLS service..."
-                            systemctl daemon-reload
-                            systemctl enable shadow-tls
-                            systemctl restart shadow-tls
+                                # Start Shadow-TLS service
+                                echo "Reloading systemd daemon and starting Shadow-TLS service..."
+                                systemctl daemon-reload
+                                systemctl enable shadow-tls
+                                systemctl restart shadow-tls
 
-                            sleep 2 # Give service time to start
-                            if ! systemctl is-active --quiet shadow-tls; then
-                                 echo "Warning: Shadow-TLS service failed to start. Check logs with 'journalctl -u shadow-tls'. The Shadowsocks service on port $ss_port should still work directly."
-                                 # Attempt to clean up failed shadow-tls service file
-                                 systemctl disable shadow-tls 2>/dev/null
-                                 rm -f /etc/systemd/system/shadow-tls.service 2>/dev/null
-                                 rm -f /usr/local/bin/shadow-tls 2>/dev/null # Also remove binary
-                                 stls_password="" # Clear the password variable if service failed
+                                sleep 2 # Give service time to start
+                                if ! systemctl is-active --quiet shadow-tls; then
+                                     echo "Warning: Shadow-TLS service failed to start. Check logs with 'journalctl -u shadow-tls'. The Shadowsocks service on port $ss_port should still work directly."
+                                     # Attempt to clean up failed shadow-tls service file
+                                     systemctl disable shadow-tls 2>/dev/null
+                                     rm -f /etc/systemd/system/shadow-tls.service 2>/dev/null
+                                     rm -f /usr/local/bin/shadow-tls 2>/dev/null # Also remove binary
+                                     stls_password="" # Clear the password variable if service failed
+                                else
+                                     echo "Shadow-TLS service started successfully on port 443."
+                                fi
                             else
-                                 echo "Shadow-TLS service started successfully on port 443."
+                                echo "Error: Failed to move Shadow-TLS binary to /usr/local/bin/. Skipping Shadow-TLS setup."
+                                rm -f "$temp_stls_bin" # Clean up temp file
+                                stls_password=""
                             fi
                         else
-                            echo "Error: Failed to move Shadow-TLS binary to /usr/local/bin/. Skipping Shadow-TLS setup."
-                            rm -f "$temp_stls_bin" # Clean up temp file
-                            stls_password=""
+                            echo "Error: Failed to download Shadow-TLS binary. Skipping Shadow-TLS setup."
+                            rm -f "$temp_stls_bin" # Clean up temp file if it exists
+                            stls_password="" # Clear password if download failed
                         fi
                     else
-                        echo "Error: Failed to download Shadow-TLS binary. Skipping Shadow-TLS setup."
-                        rm -f "$temp_stls_bin" # Clean up temp file if it exists
-                        stls_password="" # Clear password if download failed
-                    fi
-                else
-                     stls_password="" # Clear password if arch unsupported
-                fi # end if shadow_tls_binary not empty
+                         stls_password="" # Clear password if arch unsupported
+                    fi # end if shadow_tls_binary not empty
+                fi # end if port 443 not in use
             else
                  echo "Skipping Shadow-TLS setup as no valid password was set."
             fi # end if password was set successfully
@@ -564,6 +660,10 @@ EOF
         stls_active=true
     fi
 
+    # Get server IP and hostname
+    local server_ip=$(curl -s4 http://ipv4.icanhazip.com || curl -s4 http://ifconfig.me || echo "YOUR_SERVER_IP")
+    local server_hostname=$(hostname) # Get hostname
+
     if [ -n "$stls_password" ] && [ "$stls_active" = true ]; then
         echo ""
         echo "Shadow-TLS Port (TCP Only): 443"
@@ -572,8 +672,7 @@ EOF
         echo "Shadow-TLS Version: 3"
         echo ""
         echo "Client Configuration Example (e.g., Surge/Loon):"
-        local server_ip=$(curl -s4 http://ipv4.icanhazip.com || curl -s4 http://ifconfig.me || echo "YOUR_SERVER_IP")
-        echo "vps-stls = ss, $server_ip, 443, encrypt-method=2022-blake3-aes-256-gcm, password=$ss_password, shadow-tls-password=$stls_password, shadow-tls-sni=$SHADOW_TLS_SNI, shadow-tls-version=3, udp-relay=true, udp-port=$ss_port"
+        echo "$server_hostname-stls = ss, $server_ip, 443, encrypt-method=2022-blake3-aes-256-gcm, password=$ss_password, shadow-tls-password=$stls_password, shadow-tls-sni=$SHADOW_TLS_SNI, shadow-tls-version=3, udp-relay=true, udp-port=$ss_port"
         echo ""
         echo "Note: UDP traffic goes directly to port $ss_port."
     # Add case where setup was attempted (user chose 'y') but service isn't active or password got cleared
@@ -588,16 +687,14 @@ EOF
          echo "Shadowsocks should be available directly on port $ss_port (TCP/UDP)."
          echo ""
          echo "Direct Client Configuration Example (Shadowsocks Only):"
-         local server_ip=$(curl -s4 http://ipv4.icanhazip.com || curl -s4 http://ifconfig.me || echo "YOUR_SERVER_IP")
-         echo "vps-ss = ss, $server_ip, $ss_port, encrypt-method=2022-blake3-aes-256-gcm, password=$ss_password, udp-relay=true"
+         echo "$server_hostname = ss, $server_ip, $ss_port, encrypt-method=2022-blake3-aes-256-gcm, password=$ss_password, udp-relay=true"
     # Default case: Shadow-TLS was not installed or skipped (user chose 'n' or non-systemd)
     else
         echo ""
         echo "Shadow-TLS Status: Not installed or setup skipped."
         echo ""
         echo "Direct Client Configuration Example (Shadowsocks Only):"
-        local server_ip=$(curl -s4 http://ipv4.icanhazip.com || curl -s4 http://ifconfig.me || echo "YOUR_SERVER_IP")
-        echo "vps-ss = ss, $server_ip, $ss_port, encrypt-method=2022-blake3-aes-256-gcm, password=$ss_password, udp-relay=true"
+        echo "$server_hostname = ss, $server_ip, $ss_port, encrypt-method=2022-blake3-aes-256-gcm, password=$ss_password, udp-relay=true"
     fi
     echo "--------------------------------------------------"
     echo "Installation finished!"
