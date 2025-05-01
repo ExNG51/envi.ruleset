@@ -25,6 +25,27 @@ get_service_manager() {
     fi
 }
 
+# --- Show Help Function ---
+show_help() {
+    # Use $0 to refer to the script name itself
+    echo "Usage: $0 [command] [options]"
+    echo ""
+    echo "Commands:"
+    echo "  install    Install Shadowsocks-Rust and optionally Shadow-TLS (interactive)."
+    echo "  update     Update existing Shadowsocks-Rust and Shadow-TLS installations."
+    echo "  uninstall  Uninstall Shadowsocks-Rust and Shadow-TLS."
+    echo "  view       View current configuration."
+    echo "  (no command) Show interactive menu."
+    echo ""
+    echo "Options:"
+    echo "  --latest       Fetch and use the latest stable versions from GitHub for install/update."
+    echo "  --enable-tfo   Enable TCP Fast Open (TFO) for both ssserver and shadow-tls (requires kernel support)."
+    echo "  -h, --help     Show this help message."
+    echo ""
+    echo "Note: Non-interactive install options (-p, -passwd) are not yet supported."
+}
+
+
 detect_package_manager() {
     if command -v apk >/dev/null 2>&1; then echo "apk"
     elif command -v apt >/dev/null 2>&1; then echo "apt"
@@ -497,7 +518,9 @@ install() {
     local ss_package=$(get_ss_package_name "$SS_VERSION" "$ARCH" "$IS_ALPINE")
      if [ -z "$ss_package" ]; then
          echo "Unsupported system architecture: $ARCH. Cannot determine package name."
-         exit 1
+         # Exit install function, but allow script to continue if run interactively
+         # Use return 1 instead of exit 1
+         return 1
     fi
 
     echo "Downloading $ss_package..."
@@ -505,7 +528,7 @@ install() {
     if ! wget -q -O "$ss_package" "https://github.com/shadowsocks/shadowsocks-rust/releases/download/v$SS_VERSION/$ss_package"; then
         echo "Error: Failed to download Shadowsocks package."
         rm -rf /opt/ss-rust
-        exit 1
+        return 1
     fi
 
     echo "Extracting..."
@@ -513,7 +536,7 @@ install() {
         echo "Error: Failed to extract Shadowsocks package."
         rm -f "$ss_package"
         rm -rf /opt/ss-rust
-        exit 1
+        return 1
     fi
     rm -f "$ss_package" sslocal ssmanager ssservice ssurl
     echo "Shadowsocks Rust binaries installed in /opt/ss-rust"
@@ -545,15 +568,18 @@ install() {
              fi
 
             if [[ "$port_in_use" == true ]]; then
-                echo "Error: Port $user_port_input is already in use. Exiting."
-                exit 1
+                echo "Error: Port $user_port_input is already in use. Aborting installation."
+                # Clean up partially downloaded/extracted files before returning
+                rm -rf /opt/ss-rust
+                return 1
             else
                 ss_port="$user_port_input"
                 echo "Using user-provided Shadowsocks port: $ss_port"
             fi
         else
-            echo "Error: Invalid port number '$user_port_input'. Exiting."
-            exit 1
+            echo "Error: Invalid port number '$user_port_input'. Aborting installation."
+            rm -rf /opt/ss-rust
+            return 1
         fi
     fi
 
@@ -611,21 +637,40 @@ install() {
         echo "Using user-provided Shadowsocks password."
     else
         echo "Generating random password for Shadowsocks..."
+        # Ensure openssl is available
+        if ! command -v openssl >/dev/null 2>&1; then
+            echo "Error: 'openssl' command not found. Cannot generate random password. Aborting installation."
+            rm -rf /opt/ss-rust
+            return 1
+        fi
         ss_password=$(openssl rand -base64 32)
+        if [ -z "$ss_password" ]; then
+            echo "Error: Failed to generate random password using openssl. Aborting installation."
+            rm -rf /opt/ss-rust
+            return 1
+        fi
         echo "Using randomly generated Shadowsocks password."
     fi
     echo ""
 
     echo "Creating Shadowsocks config.json..."
-    cat >| /opt/ss-rust/config.json <<EOF
+    # Use cat with Heredoc, ensure no variables inside are expanded unintentionally unless desired
+    cat >| "/opt/ss-rust/config.json" <<EOF
 {
     "server": "::",
-    "server_port": $ss_port,
-    "password": "$ss_password",
+    "server_port": ${ss_port},
+    "password": "${ss_password}",
     "method": "2022-blake3-aes-256-gcm",
     "mode": "tcp_and_udp"
 }
 EOF
+    # Verify config file creation
+    if [ ! -f "/opt/ss-rust/config.json" ]; then
+        echo "Error: Failed to create config.json. Aborting installation."
+        rm -rf /opt/ss-rust
+        return 1
+    fi
+
 
     # Req 8: Prepare TFO flag if enabled
     local ssserver_tfo_flag=""
@@ -634,12 +679,12 @@ EOF
         # Check kernel support (optional, but informative)
         if [[ -r "/proc/sys/net/ipv4/tcp_fastopen" ]]; then
             local tfo_val=$(cat /proc/sys/net/ipv4/tcp_fastopen)
-            # TFO needs client support (value 1 or 3)
-            if [[ "$tfo_val" -eq 1 || "$tfo_val" -eq 3 ]]; then
-                echo "Kernel TFO client support seems enabled (value: $tfo_val)."
+            # TFO needs server/listen support (value 2 or 3) - correction from previous script's client check
+            if [[ "$tfo_val" -eq 2 || "$tfo_val" -eq 3 ]]; then
+                echo "Kernel TFO server support seems enabled (value: $tfo_val)."
                 ssserver_tfo_flag="--fast-open" # Use the actual flag for ssserver
             else
-                echo "Warning: Kernel TFO support might not be fully enabled for clients (value: $tfo_val). Flag will be added anyway."
+                echo "Warning: Kernel TFO support might not be fully enabled for servers (value: $tfo_val). Flag will be added anyway. Check '/proc/sys/net/ipv4/tcp_fastopen'."
                  ssserver_tfo_flag="--fast-open"
             fi
         else
@@ -650,6 +695,13 @@ EOF
 
     # --- Shadowsocks Service Setup ---
     echo "Setting up Shadowsocks service ($SERVICE_MANAGER)..."
+    # Ensure binary exists and is executable
+    if [ ! -x "/opt/ss-rust/ssserver" ]; then
+        echo "Error: /opt/ss-rust/ssserver not found or not executable. Aborting service setup."
+        # Attempt cleanup before returning
+        uninstall > /dev/null 2>&1
+        return 1
+    fi
     local ssserver_exec="/opt/ss-rust/ssserver -c /opt/ss-rust/config.json ${ssserver_tfo_flag}"
 
     if [[ "$SERVICE_MANAGER" == "systemd" ]]; then
@@ -673,7 +725,12 @@ EOF
         systemctl daemon-reload
         systemctl enable ss-rust
         echo "Starting Shadowsocks service..."
-        systemctl restart ss-rust
+        if ! systemctl restart ss-rust; then
+             echo "Error: Failed to restart ss-rust service via systemctl."
+             # Attempt cleanup
+             uninstall > /dev/null 2>&1
+             return 1
+        fi
     else # openrc
         cat >| /etc/init.d/ss-rust <<EOF
 #!/sbin/openrc-run
@@ -696,28 +753,37 @@ EOF
         chmod +x /etc/init.d/ss-rust
         rc-update add ss-rust default
         echo "Starting Shadowsocks service..."
-        rc-service ss-rust restart
+         if ! rc-service ss-rust restart; then
+             echo "Error: Failed to restart ss-rust service via rc-service."
+             # Attempt cleanup
+             uninstall > /dev/null 2>&1
+             return 1
+         fi
     fi
 
     sleep 2 # Give service time to start
+    local ss_failed_to_start=false
     if [[ "$SERVICE_MANAGER" == "systemd" ]]; then
         if ! systemctl is-active --quiet ss-rust; then
-            echo "Error: Shadowsocks service (ss-rust) failed to start. Check logs with 'journalctl -u ss-rust'."
-            uninstall > /dev/null 2>&1 # Suppress uninstall output here
-            exit 1
+            echo "Error: Shadowsocks service (ss-rust) failed to start after installation. Check logs with 'journalctl -u ss-rust'."
+            ss_failed_to_start=true
         fi
     else # openrc
-         # Check if service command exists before trying to use it
          if command -v rc-service >/dev/null 2>&1; then
              if ! rc-service ss-rust status | grep -q "status: started"; then
-                 echo "Error: Shadowsocks service (ss-rust) failed to start. Check logs in /var/log/."
-                 uninstall > /dev/null 2>&1
-                 exit 1
+                 echo "Error: Shadowsocks service (ss-rust) failed to start after installation. Check logs in /var/log/."
+                 ss_failed_to_start=true
              fi
          else
               echo "Warning: Cannot verify OpenRC service status (rc-service not found)."
          fi
     fi
+
+    if [[ "$ss_failed_to_start" == true ]]; then
+        uninstall > /dev/null 2>&1 # Suppress uninstall output here
+        return 1 # Indicate failure
+    fi
+
     echo "Shadowsocks service started successfully on port $ss_port (TCP/UDP)."
 
     # --- Shadow-TLS Installation and Setup (Systemd Only) ---
@@ -741,15 +807,21 @@ EOF
 
             local stls_choice=""
             while true; do
-                # Req 1: Use read -s if choosing password later? (Currently only choice 1/2)
                 read -p "Enter your choice (1 or 2): " stls_choice
                 case $stls_choice in
                     1)
                         echo "Generating random password for Shadow-TLS..."
+                        # Ensure openssl is available
+                        if ! command -v openssl >/dev/null 2>&1; then
+                            echo "Error: 'openssl' command not found. Cannot generate random Shadow-TLS password."
+                            echo "Warning: Skipping Shadow-TLS setup."
+                            stls_password=""
+                            break # Exit password loop
+                        fi
                         stls_password=$(openssl rand -base64 16)
                         if [ -z "$stls_password" ]; then
-                            echo "Error: Failed to generate random Shadow-TLS password."
-                            echo "Warning: Skipping Shadow-TLS setup due to password generation failure."
+                            echo "Error: Failed to generate random Shadow-TLS password using openssl."
+                            echo "Warning: Skipping Shadow-TLS setup."
                             stls_password="" # Ensure it's empty if generation failed
                         else
                             echo "Random Shadow-TLS password generated."
@@ -794,13 +866,17 @@ EOF
                     local shadow_tls_binary=$(get_stls_binary_name "$ARCH")
 
                     if [ -z "$shadow_tls_binary" ]; then
-                         echo "Warning: Unsupported architecture for Shadow-TLS: $arch. Skipping Shadow-TLS setup."
+                         echo "Warning: Unsupported architecture for Shadow-TLS: $ARCH. Skipping Shadow-TLS setup."
                          stls_password="" # Clear password if arch unsupported
                     else
                         echo "Downloading Shadow-TLS binary ($shadow_tls_binary)..."
                         local shadow_tls_url_base="https://github.com/ihciah/shadow-tls/releases/download/$SHADOW_TLS_VERSION"
                         local temp_stls_bin="/tmp/shadow-tls.$$"
-                        if curl -fSL "$shadow_tls_url_base/$shadow_tls_binary" -o "$temp_stls_bin"; then
+                        # Ensure curl is available
+                         if ! command -v curl >/dev/null 2>&1; then
+                             echo "Error: 'curl' command not found. Cannot download Shadow-TLS. Skipping setup."
+                             stls_password=""
+                         elif curl -fSL "$shadow_tls_url_base/$shadow_tls_binary" -o "$temp_stls_bin"; then
                             chmod a+x "$temp_stls_bin"
                             # Move to final destination
                             if mv "$temp_stls_bin" /usr/local/bin/shadow-tls; then
@@ -808,6 +884,9 @@ EOF
 
                                 # Create Shadow-TLS systemd service file using the chosen password
                                 echo "Creating Shadow-TLS systemd service file..."
+                                # Ensure TFO flag for ssserver is reused for shadow-tls if enabled
+                                local stls_tfo_flag="$ssserver_tfo_flag" # Reuse the flag determined for ssserver
+
                                 cat >| /etc/systemd/system/shadow-tls.service <<EOF
 [Unit]
 Description=Shadow-TLS Server Service (v3)
@@ -822,8 +901,8 @@ User=root
 Restart=on-failure
 RestartSec=5s
 ExecStartPre=/bin/sh -c "ulimit -n 51200"
-# Add --fastopen to shadow-tls as well if TFO is enabled
-ExecStart=/usr/local/bin/shadow-tls ${ssserver_tfo_flag} --v3 --strict server --wildcard-sni=authed --listen [::]:443 --server 127.0.0.1:$ss_port --tls $SHADOW_TLS_SNI:443 --password $stls_password
+# Add TFO flag if enabled
+ExecStart=/usr/local/bin/shadow-tls ${stls_tfo_flag} --v3 --strict server --wildcard-sni=authed --listen [::]:443 --server 127.0.0.1:${ss_port} --tls ${SHADOW_TLS_SNI}:443 --password ${stls_password}
 
 [Install]
 WantedBy=multi-user.target
@@ -832,14 +911,23 @@ EOF
                                 echo "Reloading systemd daemon and starting Shadow-TLS service..."
                                 systemctl daemon-reload
                                 systemctl enable shadow-tls
-                                systemctl restart shadow-tls
+                                # Restart instead of start to ensure it picks up changes if already exists somehow
+                                if ! systemctl restart shadow-tls; then
+                                    echo "Warning: Failed to restart shadow-tls service via systemctl."
+                                    # Don't abort main install, just warn and attempt cleanup of stls parts
+                                    systemctl disable shadow-tls 2>/dev/null
+                                    rm -f /etc/systemd/system/shadow-tls.service 2>/dev/null
+                                    rm -f /usr/local/bin/shadow-tls 2>/dev/null
+                                    stls_password="" # Clear password as setup failed
+                                fi
 
                                 sleep 2 # Give service time to start
                                 if ! systemctl is-active --quiet shadow-tls; then
-                                     echo "Warning: Shadow-TLS service failed to start. Check logs with 'journalctl -u shadow-tls'. The Shadowsocks service on port $ss_port should still work directly."
+                                     echo "Warning: Shadow-TLS service failed to start after installation. Check logs with 'journalctl -u shadow-tls'. The Shadowsocks service on port $ss_port should still work directly."
+                                     # Attempt cleanup of stls parts
                                      systemctl disable shadow-tls 2>/dev/null
                                      rm -f /etc/systemd/system/shadow-tls.service 2>/dev/null
-                                     rm -f /usr/local/bin/shadow-tls 2>/dev/null # Also remove binary
+                                     rm -f /usr/local/bin/shadow-tls 2>/dev/null
                                      stls_password="" # Clear the password variable if service failed
                                 else
                                      echo "Shadow-TLS service started successfully on port 443."
@@ -876,7 +964,7 @@ EOF
     echo "Shadowsocks Password: $ss_password"
     echo "Shadowsocks Method: 2022-blake3-aes-256-gcm"
     if [[ "$ENABLE_TFO" == true ]]; then
-        echo "TCP Fast Open (TFO): Enabled (requires client and kernel support)"
+        echo "TCP Fast Open (TFO): Enabled (requires client/server and kernel support)"
     fi
 
     # Display Shadow-TLS info only if the password variable is non-empty AND the service is active
@@ -910,7 +998,7 @@ EOF
         echo "Shadow-TLS v3 Mode: Enabled"
         echo ""
         echo "Client Configuration Example (e.g., Surge/Loon):"
-        echo "$server_hostname-stls = ss, $server_ip, 443, encrypt-method=2022-blake3-aes-256-gcm, password=$ss_password, shadow-tls-password=$stls_password, shadow-tls-sni=$SHADOW_TLS_SNI, shadow-tls-version=3, udp-relay=true, udp-port=$ss_port"
+        echo "${server_hostname}-stls = ss, ${server_ip}, 443, encrypt-method=2022-blake3-aes-256-gcm, password=${ss_password}, shadow-tls-password=${stls_password}, shadow-tls-sni=${SHADOW_TLS_SNI}, shadow-tls-version=3, udp-relay=true, udp-port=${ss_port}"
         echo ""
         echo "Note: UDP traffic goes directly to port $ss_port."
     # **** CORRECTED ELIF CONDITION ****
@@ -925,13 +1013,13 @@ EOF
          echo "Shadowsocks should be available directly on port $ss_port (TCP/UDP)."
          echo ""
          echo "Direct Client Configuration Example (Shadowsocks Only):"
-         echo "$server_hostname = ss, $server_ip, $ss_port, encrypt-method=2022-blake3-aes-256-gcm, password=$ss_password, udp-relay=true"
+         echo "${server_hostname} = ss, ${server_ip}, ${ss_port}, encrypt-method=2022-blake3-aes-256-gcm, password=${ss_password}, udp-relay=true"
     else
         echo ""
         echo "Shadow-TLS Status: Not installed or setup skipped."
         echo ""
         echo "Direct Client Configuration Example (Shadowsocks Only):"
-        echo "$server_hostname = ss, $server_ip, $ss_port, encrypt-method=2022-blake3-aes-256-gcm, password=$ss_password, udp-relay=true"
+        echo "${server_hostname} = ss, ${server_ip}, ${ss_port}, encrypt-method=2022-blake3-aes-256-gcm, password=${ss_password}, udp-relay=true"
     fi
     echo "--------------------------------------------------"
     echo "Installation finished!"
@@ -942,7 +1030,8 @@ EOF
     else
        echo "."
     fi
-
+    echo "" # Extra newline after summary
+    return 0 # Indicate successful installation
 }
 
 
@@ -961,21 +1050,7 @@ while [ $# -gt 0 ]; do
             shift
             ;;
         -h|--help)
-            echo "Usage: $0 [command] [options]"
-            echo ""
-            echo "Commands:"
-            echo "  install    Install Shadowsocks-Rust and optionally Shadow-TLS (interactive)."
-            echo "  update     Update existing Shadowsocks-Rust and Shadow-TLS installations."
-            echo "  uninstall  Uninstall Shadowsocks-Rust and Shadow-TLS."
-            echo "  view       View current configuration." # Added view command description
-            echo "  (no command) Show interactive menu."
-            echo ""
-            echo "Options:"
-            echo "  --latest       Fetch and use the latest stable versions from GitHub for install/update."
-            echo "  --enable-tfo   Enable TCP Fast Open (TFO) for both ssserver and shadow-tls (requires kernel support)."
-            echo "  -h, --help     Show this help message."
-            echo ""
-            echo "Note: Non-interactive install options (-p, -passwd) are not yet supported."
+            show_help # Use the help function
             exit 0
             ;;
         install|update|uninstall|view) # Added 'view' as a valid command
@@ -990,7 +1065,7 @@ while [ $# -gt 0 ]; do
             ;;
         *)
             echo "Error: Unknown option or misplaced argument '$1'" >&2
-            echo "Run '$0 --help' for usage."
+            show_help # Show help on error
             exit 1
             ;;
     esac
@@ -1017,40 +1092,38 @@ fi
 # Check and install base dependencies (including jq and curl unconditionally)
 base_required_packages=()
 if [[ "$PKG_MANAGER" == "apk" || "$PKG_MANAGER" == "yum" || "$PKG_MANAGER" == "dnf" ]]; then
-    base_required_packages=(wget tar openssl curl net-tools xz coreutils jq) # Added jq
+    # net-tools might not be needed if 'ss' is preferred and available, but kept for broader compatibility
+    base_required_packages=(wget tar openssl curl net-tools xz coreutils jq)
 else # apt
-    base_required_packages=(wget tar openssl curl net-tools xz-utils coreutils jq) # Added jq
+    base_required_packages=(wget tar openssl curl net-tools xz-utils coreutils jq)
 fi
 
 # *** MODIFIED DEPENDENCY CHECK AREA ***
-# Ensure curl is also checked/added if missing, as it's needed for IP and --latest
+# Ensure curl is definitely in the list if command not found
 if ! command -v curl > /dev/null 2>&1; then
-    # Avoid adding if already present in the list (unlikely here, but safe)
     if ! [[ " ${base_required_packages[*]} " =~ " curl " ]]; then
-        # Check if curl is already handled by the package manager specific lists
-        case "$PKG_MANAGER" in
-            apk|yum|dnf)
-                 if ! [[ " ${base_required_packages[*]} " =~ " curl " ]]; then base_required_packages+=("curl"); fi
-                 ;;
-            apt)
-                 if ! [[ " ${base_required_packages[*]} " =~ " curl " ]]; then base_required_packages+=("curl"); fi
-                 ;;
-        esac
+        base_required_packages+=("curl")
     fi
 fi
-# Ensure jq is checked/added if missing (needed for view_config and --latest)
+# Ensure jq is definitely in the list if command not found
 if ! command -v jq > /dev/null 2>&1; then
     if ! [[ " ${base_required_packages[*]} " =~ " jq " ]]; then
-        # Already added above, this check is slightly redundant now but harmless
         base_required_packages+=("jq")
     fi
 fi
+# Ensure openssl is definitely in the list if command not found (needed for random passwords)
+if ! command -v openssl > /dev/null 2>&1; then
+     if ! [[ " ${base_required_packages[*]} " =~ " openssl " ]]; then
+        base_required_packages+=("openssl")
+    fi
+fi
+
 # *** END MODIFIED DEPENDENCY CHECK AREA ***
 
 
 missing_base_packages=()
 for package in "${base_required_packages[@]}"; do
-    # Special handling for xz-utils on apt
+    # Special handling for xz-utils on apt vs xz elsewhere
     if [[ "$PKG_MANAGER" == "apt" && "$package" == "xz-utils" ]]; then
         if ! check_package "xz-utils"; then
             missing_base_packages+=("xz-utils")
@@ -1059,7 +1132,7 @@ for package in "${base_required_packages[@]}"; do
          if ! check_package "xz"; then
             missing_base_packages+=("xz")
         fi
-    # Standard check for other packages
+    # Standard check for other packages (excluding xz/xz-utils handled above)
     elif [[ "$package" != "xz-utils" && "$package" != "xz" ]]; then
         if ! check_package "$package"; then
             missing_base_packages+=("$package")
@@ -1072,9 +1145,10 @@ if [ ${#missing_base_packages[@]} -ne 0 ]; then
     echo "Attempting to install base dependencies: ${missing_base_packages[*]}"
     if ! install_packages "${missing_base_packages[@]}"; then
         echo "Error: Failed to install base dependencies. Aborting."
-        # Check if jq/curl was the one that failed if needed for core functions
+        # Check if jq/curl/openssl was the one that failed if needed for core functions
         jq_missing=$(! command -v jq > /dev/null 2>&1 && echo true || echo false)
         curl_missing=$(! command -v curl > /dev/null 2>&1 && echo true || echo false)
+        openssl_missing=$(! command -v openssl > /dev/null 2>&1 && echo true || echo false)
 
         if [[ "$FETCH_LATEST" == true && ("$jq_missing" == true || "$curl_missing" == true) ]]; then
              echo "Error: 'jq' and/or 'curl' could not be installed, which is required for '--latest'."
@@ -1083,6 +1157,10 @@ if [ ${#missing_base_packages[@]} -ne 0 ]; then
          if [[ "$COMMAND" == "view" && ("$jq_missing" == true || "$curl_missing" == true) ]]; then
              echo "Error: 'jq' and/or 'curl' could not be installed, which are required for the 'view' command."
              exit 1
+         fi
+         if [[ "$COMMAND" == "install" && "$openssl_missing" == true ]]; then
+              echo "Error: 'openssl' could not be installed, which is required for password generation during installation."
+              exit 1
          fi
         # Exit if any base dependency failed critical install
         exit 1
@@ -1115,7 +1193,7 @@ if [ -n "$COMMAND" ]; then
     # Execute the command provided via argument
     case "$COMMAND" in
         install)
-            install
+            install # Call function, script will exit naturally after
             ;;
         update)
             update
@@ -1123,62 +1201,81 @@ if [ -n "$COMMAND" ]; then
         uninstall)
             uninstall
             ;;
-        view) # Added case for 'view' command
+        view)
             view_config
             ;;
         *)
             # Should not happen due to earlier parsing, but as a safeguard
-            echo "Error: Invalid command '$COMMAND'" >&2; exit 1;
+            echo "Error: Invalid command '$COMMAND'" >&2
+            show_help # Show help on invalid command
+            exit 1;
             ;;
     esac
 else
-    # --- Interactive Menu Logic (No command provided) ---
-    echo "========================================="
-    echo " Shadowsocks-Rust & Shadow-TLS Manager"
-    echo "========================================="
-    echo "Detected Service Manager: $SERVICE_MANAGER"
-    echo "Detected Package Manager: $PKG_MANAGER"
-    echo "Architecture: $ARCH"
-    if [[ "$IS_ALPINE" == true ]]; then echo "OS Type: Alpine Linux"; fi
-    echo "-----------------------------------------"
-    echo "Using Versions:"
-    echo "  Shadowsocks-Rust: $SS_VERSION"
-    echo "  Shadow-TLS: $SHADOW_TLS_VERSION"
-    if [[ "$FETCH_LATEST" == true ]]; then echo "  (Fetched Latest)"; fi
-    if [[ "$ENABLE_TFO" == true ]]; then echo "TCP Fast Open: Enabled"; fi
-    echo "-----------------------------------------"
-    echo "Please choose an option:"
-    echo "  1) Install Shadowsocks-Rust (and optionally Shadow-TLS)"
-    echo "  2) Update existing installation"
-    echo "  3) Uninstall Shadowsocks-Rust and Shadow-TLS"
-    echo "  4) View Current Configuration" # Added menu item 4
-    echo "  *) Exit"
-    echo "-----------------------------------------"
+    # --- Interactive Menu Logic (No command provided - wrapped in a loop) ---
+    while true; do # Add a loop here
+        # clear # Optional: Clear screen before showing menu
+        echo "========================================="
+        echo " Shadowsocks-Rust & Shadow-TLS Manager"
+        echo "========================================="
+        echo "Detected Service Manager: $SERVICE_MANAGER"
+        echo "Detected Package Manager: $PKG_MANAGER"
+        echo "Architecture: $ARCH"
+        if [[ "$IS_ALPINE" == true ]]; then echo "OS Type: Alpine Linux"; fi
+        echo "-----------------------------------------"
+        echo "Using Versions:"
+        echo "  Shadowsocks-Rust: $SS_VERSION"
+        echo "  Shadow-TLS: $SHADOW_TLS_VERSION"
+        if [[ "$FETCH_LATEST" == true ]]; then echo "  (Fetched Latest)"; fi
+        if [[ "$ENABLE_TFO" == true ]]; then echo "TCP Fast Open: Enabled"; fi
+        echo "-----------------------------------------"
+        echo "Please choose an option:"
+        echo "  1) Install Shadowsocks-Rust (and optionally Shadow-TLS)"
+        echo "  2) Update existing installation"
+        echo "  3) Uninstall Shadowsocks-Rust and Shadow-TLS"
+        echo "  4) View Current Configuration"
+        echo "  5) Help"
+        echo "  *) Exit"
+        echo "-----------------------------------------"
 
-    main_choice=""
-    read -p "Enter your choice: " main_choice
+        main_choice=""
+        # -r option prevents backslashes from being interpreted
+        read -rp "Enter your choice: " main_choice
+        echo "" # Add a newline
 
-    echo "" # Add a newline
-
-    # Process Choice
-    case $main_choice in
-        1)
-            install
-            ;;
-        2)
-            update
-            ;;
-        3)
-            uninstall
-            ;;
-        4) # Added case for menu item 4
-            view_config
-            ;;
-        *)
-            echo "Exiting."
-            exit 0
-            ;;
-    esac
+        # Process Choice
+        case $main_choice in
+            1)
+                install
+                # Optionally pause after completion before showing menu again
+                read -rp "Installation process finished. Press Enter to return to the menu..."
+                ;;
+            2)
+                update
+                read -rp "Update process finished. Press Enter to return to the menu..."
+                ;;
+            3)
+                uninstall
+                read -rp "Uninstallation process finished. Press Enter to return to the menu..."
+                ;;
+            4)
+                view_config
+                read -rp "Press Enter to return to the menu..."
+                ;;
+            5)
+                show_help
+                # Add a pause so the user can read the help before the menu reappears
+                read -rp "Press Enter to return to the menu..."
+                # The loop continues naturally after this case finishes.
+                ;;
+            *)
+                echo "Exiting."
+                exit 0 # Exit the script, breaking the loop.
+                ;;
+        esac
+        echo "" # Add a blank line for separation before the menu redraws
+    done # End of the while loop
 fi
 
-exit 0
+exit 0 # Exit successfully if a command was executed non-interactively
+
