@@ -508,10 +508,15 @@ EOF
             exit 1
         fi
     else # openrc
-         if ! rc-service ss-rust status | grep -q "status: started"; then
-            echo "Error: Shadowsocks service (ss-rust) failed to start. Check logs in /var/log/."
-            uninstall > /dev/null 2>&1
-            exit 1
+         # Check if service command exists before trying to use it
+         if command -v rc-service >/dev/null 2>&1; then
+             if ! rc-service ss-rust status | grep -q "status: started"; then
+                 echo "Error: Shadowsocks service (ss-rust) failed to start. Check logs in /var/log/."
+                 uninstall > /dev/null 2>&1
+                 exit 1
+             fi
+         else
+              echo "Warning: Cannot verify OpenRC service status (rc-service not found)."
          fi
     fi
     echo "Shadowsocks service started successfully on port $ss_port (TCP/UDP)."
@@ -677,12 +682,18 @@ EOF
 
     # Display Shadow-TLS info only if the password variable is non-empty AND the service is active
     local stls_active=false
+    # Ensure stls_active remains false if not systemd
     if [[ "$SERVICE_MANAGER" == "systemd" ]] && systemctl is-active --quiet shadow-tls 2>/dev/null ; then
         stls_active=true
     fi
 
     local server_ip=$(curl -s4 http://ipv4.icanhazip.com || curl -s4 http://ifconfig.me || echo "YOUR_SERVER_IP")
-    local server_hostname=$(hostname) # Get hostname
+    # Use command -v to check for hostname command before calling it
+    local server_hostname="UNKNOWN_HOST"
+    if command -v hostname >/dev/null 2>&1; then
+        server_hostname=$(hostname)
+    fi
+
 
     if [[ -n "$stls_password" && "$stls_active" == true ]]; then
         echo ""
@@ -696,7 +707,7 @@ EOF
         echo "$server_hostname-stls = ss, $server_ip, 443, encrypt-method=2022-blake3-aes-256-gcm, password=$ss_password, shadow-tls-password=$stls_password, shadow-tls-sni=$SHADOW_TLS_SNI, shadow-tls-version=3, udp-relay=true, udp-port=$ss_port"
         echo ""
         echo "Note: UDP traffic goes directly to port $ss_port."
-    # Modified Condition: Use [[ and standard grouping/operators
+    # **** CORRECTED ELIF CONDITION ****
     elif [[ "$install_stls_choice" =~ ^[Yy]$ && ( -z "$stls_password" || "$stls_active" == false ) ]]; then
          echo ""
          echo "Shadow-TLS Status: Installation attempted but FAILED TO START or configure correctly."
@@ -719,7 +730,7 @@ EOF
     echo "--------------------------------------------------"
     echo "Installation finished!"
     echo "Note: Ensure your firewall allows traffic on TCP/UDP port $ss_port"
-    # Modified Condition: Use [[
+    # **** CORRECTED IF CONDITION ****
     if [[ "$stls_active" == true ]]; then
        echo "      and TCP port 443."
     else
@@ -930,3 +941,4 @@ else
 fi
 
 exit 0
+
