@@ -55,6 +55,7 @@ show_help() {
     echo "Note: Non-interactive install options (-p, -passwd) are not yet supported."
 }
 
+
 detect_package_manager() {
     if command -v apk >/dev/null 2>&1; then echo "apk"
     elif command -v apt >/dev/null 2>&1; then echo "apt"
@@ -636,30 +637,10 @@ install() {
         done
     fi
 
-    # --- Ask for Password & Create Config ---
+    # --- Ask for Password ---
     echo ""
     # Req 1: Use read -s for password
-    read -sp "Enter Shadowsocks password (leave empty for random password): " user_pw_input
-    echo "" # Add newline after hidden input
-    if [[ -n "$user_pw_input" ]]; then
-        ss_password="$user_pw_input"
-        echo "Using user-provided Shadowsocks password."
-    else
-        echo "Generating random password for Shadowsocks..."
-        # Ensure openssl is available
-        if ! command -v openssl >/dev/null 2>&1; then
-            echo "Error: 'openssl' command not found. Cannot generate random password. Aborting installation."
-            rm -rf /opt/ss-rust
-            return 1
-        fi
-        ss_password=$(openssl rand -base64 32)
-        if [ -z "$ss_password" ]; then
-            echo "Error: Failed to generate random password using openssl. Aborting installation."
-            rm -rf /opt/ss-rust
-            return 1
-        fi
-        echo "Using randomly generated Shadowsocks password."
-    fi
+    read -sp "Enter Shadowsocks password (leave empty for random password based on method): " user_pw_input
     echo ""
 
     # --- Ask for Encryption Method ---
@@ -670,15 +651,44 @@ install() {
     read -p "Enter your choice (leave empty for default: 2): " method_choice
 
     case "$method_choice" in
-        1)
+       1)
             ss_method="2022-blake3-aes-256-gcm"
             echo "Using method: $ss_method"
             ;;
-        2|*) # Default to 2 if input is 2 or empty or invalid
+       2|*) # Default to 2 if input is 2 or empty or invalid
             ss_method="2022-blake3-aes-128-gcm"
             echo "Using default method: $ss_method"
             ;;
     esac
+    echo ""
+
+    # --- Generate or Set Password ---
+    if [[ -n "$user_pw_input" ]]; then
+        ss_password="$user_pw_input"
+        echo "Using user-provided Shadowsocks password."
+        # Optional: Add a length check/warning here in the future if needed
+    else
+        echo "Generating random password for Shadowsocks ($ss_method)..."
+        # Ensure openssl is available
+        if ! command -v openssl >/dev/null 2>&1; then
+            echo "Error: 'openssl' command not found. Cannot generate random password. Aborting installation."
+            rm -rf /opt/ss-rust
+            return 1
+        fi
+        # Generate password with length corresponding to the chosen method
+        if [[ "$ss_method" == "2022-blake3-aes-128-gcm" ]]; then
+            ss_password=$(openssl rand -base64 16) # 16 bytes for 128-bit key
+        else # Default to 32 bytes for 256-bit key
+            ss_password=$(openssl rand -base64 32) # 32 bytes for 256-bit key
+        fi
+
+        if [ -z "$ss_password" ]; then
+            echo "Error: Failed to generate random password using openssl. Aborting installation."
+            rm -rf /opt/ss-rust
+            return 1
+        fi
+        echo "Using randomly generated Shadowsocks password."
+    fi
     echo ""
 
     echo "Creating Shadowsocks config.json..."
@@ -1306,4 +1316,3 @@ else
 fi
 
 exit 0 # Exit successfully if a command was executed non-interactively
-
