@@ -3,7 +3,7 @@
 # --- Configuration ---
 SS_VERSION="1.23.0" # Shadowsocks Rust Version
 SHADOW_TLS_VERSION="v0.2.25" # Shadow-TLS Version
-# SHADOW_TLS_PASSWORD is now generated randomly if needed
+SHADOW_TLS_FIXED_PASSWORD="dEyss6rg38psKamNstVSpQ==" # Predefined fixed password
 SHADOW_TLS_SNI="gateway.icloud.com" # Changed Shadow-TLS SNI Host
 
 # --- Helper Functions ---
@@ -114,7 +114,7 @@ update() {
         shadow_tls_binary=""
         case $arch in
             x86_64) shadow_tls_binary="shadow-tls-x86_64-unknown-linux-musl" ;;
-            aarch64|armv7l) shadow_tls_binary="shadow-tls-arm-unknown-linux-musleabi" ;; # Assuming armv7l uses musleabi too
+            aarch64|arm*) shadow_tls_binary="shadow-tls-arm-unknown-linux-musleabi" ;; # Use arm* glob for wider arm compatibility
             *) echo "Warning: Unsupported architecture for Shadow-TLS update: $arch. Skipping Shadow-TLS update." ;;
         esac
 
@@ -125,7 +125,7 @@ update() {
                 mv /usr/local/bin/shadow-tls.new /usr/local/bin/shadow-tls
                 echo "Restarting Shadow-TLS service..."
                 # Note: Restarting shadow-tls doesn't re-read the password from the file,
-                # it uses the password it was initially started with. This is fine for updates.
+                # it uses the password it was initially started with. This is correct for updates.
                 systemctl restart shadow-tls
             else
                 echo "Error: Failed to download Shadow-TLS binary. Keeping existing version."
@@ -172,21 +172,28 @@ uninstall() {
 }
 
 # --- Argument Parsing for Special Modes ---
-if [ "$#" -eq 1 ]; then
-    case "$1" in
-    "uninstall")
+if [ "$#" -gt 0 ]; then # Allow arguments like -p only if not update/uninstall
+    is_special_mode=0
+    if [ "$1" = "uninstall" ] || [ "$1" = "update" ]; then
+        is_special_mode=1
+    fi
+
+    if [ $is_special_mode -eq 1 ] && [ "$#" -ne 1 ]; then
+         echo "Error: 'update' or 'uninstall' cannot be combined with other arguments."
+         echo "Usage: $0 [update|uninstall]"
+         echo "   or: $0 [-p SS_PORT] [-passwd SS_PASSWORD]"
+         exit 1
+    fi
+
+    if [ "$1" = "uninstall" ]; then
         uninstall
         exit 0
-        ;;
-    "update")
-        update # Update function now handles both SS and Shadow-TLS
-        ;;
-    *)
-        echo "Usage: $0 [-p SS_PORT] [-passwd SS_PASSWORD] [update|uninstall]"
-        exit 1
-        ;;
-    esac
+    elif [ "$1" = "update" ]; then
+        update
+        exit 0
+    fi
 fi
+
 
 # --- Start Fresh Installation ---
 echo "Starting new installation..."
@@ -268,6 +275,8 @@ echo "Shadowsocks Rust binaries installed in /opt/ss-rust"
 ss_port=""
 ss_password=""
 
+# Reparse arguments for installation options
+# This allows running ./script.sh -p 12345 -passwd mypassword
 while [ "$#" -gt 0 ]; do
     case "$1" in
     -p)
@@ -287,17 +296,28 @@ while [ "$#" -gt 0 ]; do
         ;;
     -passwd)
         shift
-        ss_password="$1"
-        echo "Using user-provided Shadowsocks password."
+        # Check if next argument exists before assigning
+        if [ -n "$1" ]; then
+            ss_password="$1"
+            echo "Using user-provided Shadowsocks password."
+        else
+             echo "Error: -passwd option requires a password argument."
+             exit 1
+        fi
         ;;
     *)
-        echo "Error: Invalid argument '$1'"
-        echo "Usage: $0 [-p SS_PORT] [-passwd SS_PASSWORD] [update|uninstall]"
+        # If it's not a known flag, it might be an invalid argument leftover
+        # from the initial check (e.g. if user tried ./script.sh update -p 1234)
+        # We already exited for invalid combinations earlier, so this might be redundant
+        # but helps catch unexpected scenarios.
+        echo "Error: Invalid argument '$1' during installation phase."
+        echo "Usage: $0 [-p SS_PORT] [-passwd SS_PASSWORD]"
         exit 1
         ;;
     esac
     shift
 done
+
 
 if [ -z "$ss_port" ]; then
     echo "Generating random port for Shadowsocks..."
@@ -390,21 +410,49 @@ fi
 echo "Shadowsocks service started successfully on port $ss_port (TCP/UDP)."
 
 # --- Shadow-TLS Installation and Setup (Systemd Only) ---
-# Declare the variable outside the if, so it's available in the final output section
-stls_password=""
+stls_password="" # Declare variable outside the if block
 
 if [ "$SERVICE_MANAGER" = "systemd" ]; then
     echo "Proceeding with Shadow-TLS setup (systemd detected)..."
 
-    # <<< CHANGE: Generate random Shadow-TLS password >>>
-    echo "Generating random password for Shadow-TLS..."
-    stls_password=$(openssl rand -base64 16) # Generate 16 random bytes, base64 encoded
-    if [ -z "$stls_password" ]; then
-        echo "Error: Failed to generate Shadow-TLS password."
-        # Decide whether to exit or continue without Shadow-TLS
-        echo "Warning: Continuing without Shadow-TLS setup due to password generation failure."
-    else
-        echo "Shadow-TLS password generated."
+    # <<< START: Password Choice Logic >>>
+    echo ""
+    echo "Choose Shadow-TLS password generation method:"
+    echo "  1) Generate a random password (Recommended)"
+    echo "  2) Use the predefined fixed password ($SHADOW_TLS_FIXED_PASSWORD)"
+    echo ""
+
+    stls_choice=""
+    while true; do
+        read -p "Enter your choice (1 or 2): " stls_choice
+        case $stls_choice in
+            1)
+                echo "Generating random password for Shadow-TLS..."
+                stls_password=$(openssl rand -base64 16)
+                if [ -z "$stls_password" ]; then
+                    echo "Error: Failed to generate random Shadow-TLS password."
+                    echo "Warning: Continuing without Shadow-TLS setup due to password generation failure."
+                    stls_password="" # Ensure it's empty if generation failed
+                else
+                    echo "Random Shadow-TLS password generated."
+                fi
+                break # Exit loop
+                ;;
+            2)
+                echo "Using predefined fixed password for Shadow-TLS."
+                stls_password="$SHADOW_TLS_FIXED_PASSWORD"
+                break # Exit loop
+                ;;
+            *)
+                echo "Invalid choice. Please enter 1 or 2."
+                ;;
+        esac
+    done
+    echo "" # Add a newline for better formatting
+    # <<< END: Password Choice Logic >>>
+
+    # Proceed only if a password was successfully set (either random or fixed)
+    if [ -n "$stls_password" ]; then
 
         # Install Shadow-TLS binary
         shadow_tls_binary=""
@@ -412,18 +460,18 @@ if [ "$SERVICE_MANAGER" = "systemd" ]; then
         arch=$(uname -m)
         case $arch in
             x86_64) shadow_tls_binary="shadow-tls-x86_64-unknown-linux-musl" ;;
-            aarch64|arm*) shadow_tls_binary="shadow-tls-arm-unknown-linux-musleabi" ;;
+            aarch64|arm*) shadow_tls_binary="shadow-tls-arm-unknown-linux-musleabi" ;; # Use arm* glob
             *) echo "Warning: Unsupported architecture for Shadow-TLS: $arch. Skipping Shadow-TLS setup.";;
         esac
 
         if [ -n "$shadow_tls_binary" ]; then
-            echo "Downloading Shadow-TLS binary for $arch..."
-            if curl -L "$shadow_tls_url_base/$shadow_tls_binary" -o /usr/local/bin/shadow-tls && chmod a+x /usr/local/bin/shadow-tls; then
+            echo "Downloading Shadow-TLS binary ($shadow_tls_binary)..."
+            # Use curl with -fSL to fail silently on server errors, follow redirects, and show progress bar if not quiet
+            if curl -fSL "$shadow_tls_url_base/$shadow_tls_binary" -o /usr/local/bin/shadow-tls && chmod a+x /usr/local/bin/shadow-tls; then
                 echo "Shadow-TLS binary installed to /usr/local/bin/shadow-tls"
 
-                # Create Shadow-TLS systemd service file
+                # Create Shadow-TLS systemd service file using the chosen password
                 echo "Creating Shadow-TLS systemd service file..."
-                # <<< CHANGE: Use generated password $stls_password and updated $SHADOW_TLS_SNI >>>
                 cat >| /etc/systemd/system/shadow-tls.service <<EOF
 [Unit]
 Description=Shadow-TLS Server Service (v3)
@@ -452,22 +500,25 @@ EOF
                 sleep 2
                 if ! systemctl is-active --quiet shadow-tls; then
                      echo "Warning: Shadow-TLS service failed to start. Check logs with 'journalctl -u shadow-tls'. The Shadowsocks service on port $ss_port should still work directly."
-                     # Invalidate password if service failed to start using it
+                     # Clear the password variable if service failed, so it's not shown misleadingly
                      stls_password=""
                 else
                      echo "Shadow-TLS service started successfully on port 443."
                 fi
             else
                 echo "Error: Failed to download or set permissions for Shadow-TLS binary. Skipping Shadow-TLS setup."
-                stls_password="" # Invalidate password if download failed
+                stls_password="" # Clear password if download failed
             fi
         else
-             stls_password="" # Invalidate password if arch unsupported
+             stls_password="" # Clear password if arch unsupported
         fi # end if shadow_tls_binary not empty
-    fi # end if password generated successfully
+    else
+         echo "Skipping Shadow-TLS setup as no valid password was set (e.g., random generation failed)."
+    fi # end if password was set successfully
+
 else
     echo "Skipping Shadow-TLS setup (Systemd not detected)."
-fi
+fi # end systemd check
 
 # --- Final Output ---
 echo "--------------------------------------------------"
@@ -477,34 +528,36 @@ echo "Shadowsocks Port (TCP/UDP): $ss_port"
 echo "Shadowsocks Password: $ss_password"
 echo "Shadowsocks Method: 2022-blake3-aes-256-gcm"
 
-# <<< CHANGE: Use $stls_password variable here >>>
-# Check if stls_password is not empty (meaning setup was attempted and likely succeeded)
-# AND if the service is actually active
-if [ -n "$stls_password" ] && [ "$SERVICE_MANAGER" = "systemd" ] && [ -f "/usr/local/bin/shadow-tls" ] && systemctl is-active --quiet shadow-tls; then
+# Display Shadow-TLS info only if the password variable is non-empty AND the service is active
+if [ -n "$stls_password" ] && [ "$SERVICE_MANAGER" = "systemd" ] && systemctl is-active --quiet shadow-tls 2>/dev/null ; then
+    echo ""
     echo "Shadow-TLS Port (TCP Only): 443"
-    echo "Shadow-TLS Password: $stls_password" # Display the generated password
+    echo "Shadow-TLS Password: $stls_password" # Display the generated or fixed password
     echo "Shadow-TLS SNI: $SHADOW_TLS_SNI (Wildcard enabled, client can use others)"
     echo "Shadow-TLS Version: 3"
     echo ""
-    echo "Client Configuration (e.g., Surge/Loon):"
-    server_ip=$(curl -s http://ipv4.icanhazip.com || curl -s http://ifconfig.me || echo "YOUR_SERVER_IP")
+    echo "Client Configuration Example (e.g., Surge/Loon):"
+    server_ip=$(curl -s4 http://ipv4.icanhazip.com || curl -s4 http://ifconfig.me || echo "YOUR_SERVER_IP")
     echo "vps-stls = ss, $server_ip, 443, encrypt-method=2022-blake3-aes-256-gcm, password=$ss_password, shadow-tls-password=$stls_password, shadow-tls-sni=$SHADOW_TLS_SNI, shadow-tls-version=3, udp-relay=true, udp-port=$ss_port"
     echo ""
     echo "Note: UDP traffic goes directly to port $ss_port."
+# Add case where setup was attempted (systemd exists, binary potentially downloaded) but service isn't active
 elif [ "$SERVICE_MANAGER" = "systemd" ] && [ -f "/usr/local/bin/shadow-tls" ]; then
-     # This case covers when Shadow-TLS was attempted but failed to start or password generation failed
-     echo "Shadow-TLS Status: Installation attempted but FAILED TO START or configure correctly."
+     echo ""
+     echo "Shadow-TLS Status: Installation or service start FAILED."
      echo "Please check logs: journalctl -u shadow-tls"
      echo "Shadowsocks should be available directly on port $ss_port (TCP/UDP)."
      echo ""
-     echo "Direct Client Configuration (Shadowsocks Only):"
-     server_ip=$(curl -s http://ipv4.icanhazip.com || curl -s http://ifconfig.me || echo "YOUR_SERVER_IP")
+     echo "Direct Client Configuration Example (Shadowsocks Only):"
+     server_ip=$(curl -s4 http://ipv4.icanhazip.com || curl -s4 http://ifconfig.me || echo "YOUR_SERVER_IP")
      echo "vps-ss = ss, $server_ip, $ss_port, encrypt-method=2022-blake3-aes-256-gcm, password=$ss_password, udp-relay=true"
+# Default case: Shadow-TLS was not installed (non-systemd, unsupported arch, etc.)
 else
-    echo "Shadow-TLS Status: Not installed (Systemd not detected or architecture unsupported)."
     echo ""
-    echo "Direct Client Configuration (Shadowsocks Only):"
-    server_ip=$(curl -s http://ipv4.icanhazip.com || curl -s http://ifconfig.me || echo "YOUR_SERVER_IP")
+    echo "Shadow-TLS Status: Not installed or setup skipped."
+    echo ""
+    echo "Direct Client Configuration Example (Shadowsocks Only):"
+    server_ip=$(curl -s4 http://ipv4.icanhazip.com || curl -s4 http://ifconfig.me || echo "YOUR_SERVER_IP")
     echo "vps-ss = ss, $server_ip, $ss_port, encrypt-method=2022-blake3-aes-256-gcm, password=$ss_password, udp-relay=true"
 fi
 echo "--------------------------------------------------"
