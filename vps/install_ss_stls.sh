@@ -27,8 +27,18 @@ get_service_manager() {
 
 # --- Show Help Function ---
 show_help() {
-    # Use $0 to refer to the script name itself
-    echo "Usage: $0 [command] [options]"
+    local script_name
+    local default_name="ss_manager.sh" # Define a default/preferred name
+
+    # Check if $0 starts with /dev/fd/
+    if [[ "$0" == "/dev/fd/"* ]]; then
+        script_name="$default_name"
+    else
+        # Otherwise, use the basename of $0
+        script_name=$(basename "$0")
+    fi
+
+    echo "Usage: ${script_name} [command] [options]"
     echo ""
     echo "Commands:"
     echo "  install    Install Shadowsocks-Rust and optionally Shadow-TLS (interactive)."
