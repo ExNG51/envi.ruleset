@@ -55,7 +55,6 @@ show_help() {
     echo "Note: Non-interactive install options (-p, -passwd) are not yet supported."
 }
 
-
 detect_package_manager() {
     if command -v apk >/dev/null 2>&1; then echo "apk"
     elif command -v apt >/dev/null 2>&1; then echo "apt"
@@ -663,6 +662,25 @@ install() {
     fi
     echo ""
 
+    # --- Ask for Encryption Method ---
+    local ss_method="" # Declare variable
+    echo "Choose Shadowsocks encryption method:"
+    echo "  1) 2022-blake3-aes-256-gcm"
+    echo "  2) 2022-blake3-aes-128-gcm (Default)"
+    read -p "Enter your choice (leave empty for default: 2): " method_choice
+
+    case "$method_choice" in
+        1)
+            ss_method="2022-blake3-aes-256-gcm"
+            echo "Using method: $ss_method"
+            ;;
+        2|*) # Default to 2 if input is 2 or empty or invalid
+            ss_method="2022-blake3-aes-128-gcm"
+            echo "Using default method: $ss_method"
+            ;;
+    esac
+    echo ""
+
     echo "Creating Shadowsocks config.json..."
     # Use cat with Heredoc, ensure no variables inside are expanded unintentionally unless desired
     cat >| "/opt/ss-rust/config.json" <<EOF
@@ -670,7 +688,7 @@ install() {
     "server": "::",
     "server_port": ${ss_port},
     "password": "${ss_password}",
-    "method": "2022-blake3-aes-256-gcm",
+    "method": "${ss_method}",
     "mode": "tcp_and_udp"
 }
 EOF
@@ -972,7 +990,7 @@ EOF
     echo "Shadowsocks Version: $SS_VERSION"
     echo "Shadowsocks Port (TCP/UDP): $ss_port"
     echo "Shadowsocks Password: $ss_password"
-    echo "Shadowsocks Method: 2022-blake3-aes-256-gcm"
+    echo "Shadowsocks Method: $ss_method"
     if [[ "$ENABLE_TFO" == true ]]; then
         echo "TCP Fast Open (TFO): Enabled (requires client/server and kernel support)"
     fi
@@ -1008,7 +1026,7 @@ EOF
         echo "Shadow-TLS v3 Mode: Enabled"
         echo ""
         echo "Client Configuration Example (e.g., Surge/Loon):"
-        echo "${server_hostname}-stls = ss, ${server_ip}, 443, encrypt-method=2022-blake3-aes-256-gcm, password=${ss_password}, shadow-tls-password=${stls_password}, shadow-tls-sni=${SHADOW_TLS_SNI}, shadow-tls-version=3, udp-relay=true, udp-port=${ss_port}"
+        echo "${server_hostname}-stls = ss, ${server_ip}, 443, encrypt-method=${ss_method}, password=${ss_password}, shadow-tls-password=${stls_password}, shadow-tls-sni=${SHADOW_TLS_SNI}, shadow-tls-version=3, udp-relay=true, udp-port=${ss_port}"
         echo ""
         echo "Note: UDP traffic goes directly to port $ss_port."
     # **** CORRECTED ELIF CONDITION ****
@@ -1023,13 +1041,13 @@ EOF
          echo "Shadowsocks should be available directly on port $ss_port (TCP/UDP)."
          echo ""
          echo "Direct Client Configuration Example (Shadowsocks Only):"
-         echo "${server_hostname} = ss, ${server_ip}, ${ss_port}, encrypt-method=2022-blake3-aes-256-gcm, password=${ss_password}, udp-relay=true"
+         echo "${server_hostname} = ss, ${server_ip}, ${ss_port}, encrypt-method=${ss_method}, password=${ss_password}, udp-relay=true"
     else
         echo ""
         echo "Shadow-TLS Status: Not installed or setup skipped."
         echo ""
         echo "Direct Client Configuration Example (Shadowsocks Only):"
-        echo "${server_hostname} = ss, ${server_ip}, ${ss_port}, encrypt-method=2022-blake3-aes-256-gcm, password=${ss_password}, udp-relay=true"
+        echo "${server_hostname} = ss, ${server_ip}, ${ss_port}, encrypt-method=${ss_method}, password=${ss_password}, udp-relay=true"
     fi
     echo "--------------------------------------------------"
     echo "Installation finished!"
