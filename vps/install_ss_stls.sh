@@ -1,5 +1,4 @@
 #!/bin/bash
-set -x
 
 # --- Configuration (Defaults, can be overridden by --latest) ---
 SS_VERSION="1.23.0" # Shadowsocks Rust Version
