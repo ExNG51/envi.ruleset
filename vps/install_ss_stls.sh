@@ -201,6 +201,11 @@ update() {
     # Req 9: Check if latest versions need fetching for update
     if [[ "$FETCH_LATEST" == true ]]; then
         echo "Fetching latest version information for update..."
+        # Ensure jq and curl are available for fetching
+        if ! command -v jq > /dev/null 2>&1 || ! command -v curl > /dev/null 2>&1; then
+            echo "Error: 'jq' and 'curl' are required for '--latest' but are not available. Cannot fetch latest versions for update."
+            exit 1
+        fi
         local latest_ss=$(get_latest_github_release "shadowsocks/shadowsocks-rust")
         local latest_stls=$(get_latest_github_release "ihciah/shadow-tls")
         if [ -n "$latest_ss" ]; then SS_VERSION="$latest_ss"; fi
@@ -270,6 +275,200 @@ update() {
     fi
 
     echo "Update completed. Services restarted."
+}
+
+
+# --- View Configuration Function ---
+view_config() {
+    echo "Checking existing configuration..."
+    echo "--------------------------------------------------"
+
+    local ss_config_file="/opt/ss-rust/config.json"
+    local ss_installed=false
+    local stls_installed=false
+    local ss_running=false
+    local stls_running=false
+    local ss_tfo_enabled="Unknown"
+    local stls_tfo_enabled="Unknown"
+    local ss_port=""
+    local ss_password=""
+    local ss_method=""
+    local stls_password="N/A"
+    local stls_sni="$SHADOW_TLS_SNI" # Default, might be overridden if found in service file
+    local server_ip
+    local server_hostname
+
+    # --- Check Shadowsocks ---
+    if [ -f "$ss_config_file" ]; then
+        ss_installed=true
+        echo "Shadowsocks Installation found at /opt/ss-rust."
+
+        # Check jq availability
+        if ! command -v jq > /dev/null 2>&1; then
+            echo "Warning: 'jq' command not found. Cannot reliably parse config.json. Attempting fallback..."
+            # Fallback using grep (less reliable)
+            ss_port=$(grep -oP '"server_port":\s*\K[0-9]+' "$ss_config_file")
+            ss_password=$(grep -oP '"password":\s*"\K[^"]+' "$ss_config_file")
+            ss_method=$(grep -oP '"method":\s*"\K[^"]+' "$ss_config_file")
+            if [ -z "$ss_port" ] || [ -z "$ss_password" ] || [ -z "$ss_method" ]; then
+                 echo "Error: Fallback parsing of config.json failed."
+                 # Clear potentially partial results
+                 ss_port="Error"
+                 ss_password="Error"
+                 ss_method="Error"
+            fi
+        else
+             # Use jq (preferred)
+            ss_port=$(jq -r '.server_port // empty' "$ss_config_file")
+            ss_password=$(jq -r '.password // empty' "$ss_config_file")
+            ss_method=$(jq -r '.method // empty' "$ss_config_file")
+             if [ -z "$ss_port" ] || [ -z "$ss_password" ] || [ -z "$ss_method" ]; then
+                echo "Warning: Failed to extract some values from config.json using jq."
+                # Indicate missing values if jq parsing failed
+                [ -z "$ss_port" ] && ss_port="Not Found"
+                [ -z "$ss_password" ] && ss_password="Not Found"
+                [ -z "$ss_method" ] && ss_method="Not Found"
+            fi
+        fi
+
+        # Check service status and TFO
+        if [[ "$SERVICE_MANAGER" == "systemd" ]]; then
+            if systemctl is-active --quiet ss-rust; then ss_running=true; fi
+            local service_file="/etc/systemd/system/ss-rust.service"
+            if [ -f "$service_file" ] && grep -q -- '--fast-open' "$service_file"; then
+                 ss_tfo_enabled="Enabled"
+            else
+                 ss_tfo_enabled="Disabled"
+            fi
+        elif [[ "$SERVICE_MANAGER" == "openrc" ]]; then
+            # Check if service command exists before trying to use it
+            if command -v rc-service >/dev/null 2>&1; then
+                if rc-service ss-rust status | grep -q "status: started"; then ss_running=true; fi
+            else
+                 echo "Warning: Cannot verify OpenRC service status (rc-service not found)."
+                 ss_running="Unknown" # Indicate we couldn't check
+            fi
+            local init_script="/etc/init.d/ss-rust"
+             if [ -f "$init_script" ] && grep -q -- '-c .* --fast-open' "$init_script"; then # Look for flag in command_args
+                 ss_tfo_enabled="Enabled"
+             else
+                 ss_tfo_enabled="Disabled"
+            fi
+        else
+             ss_running="Unknown" # Service manager unknown
+             ss_tfo_enabled="Unknown"
+        fi
+
+    else
+        echo "Shadowsocks installation not found (missing $ss_config_file)."
+    fi
+
+    # --- Check Shadow-TLS (Systemd only currently) ---
+    if [[ "$SERVICE_MANAGER" == "systemd" ]]; then
+        local stls_service_file="/etc/systemd/system/shadow-tls.service"
+        local stls_binary="/usr/local/bin/shadow-tls"
+        if [ -f "$stls_service_file" ] && [ -f "$stls_binary" ]; then
+             stls_installed=true
+             echo "Shadow-TLS Installation found."
+             if systemctl is-active --quiet shadow-tls; then stls_running=true; fi
+
+             # Attempt to extract password and SNI from service file (Use with caution)
+             # Use grep to extract the value after --password
+             stls_password=$(grep -oP 'ExecStart=.*--password\s+\K[^ ]+' "$stls_service_file")
+             if [ -z "$stls_password" ]; then stls_password="Not Found in Service File"; fi
+
+             # Use grep to extract the value after --tls (e.g., sni:443)
+             local tls_param=$(grep -oP 'ExecStart=.*--tls\s+\K[^ ]+' "$stls_service_file")
+             if [[ "$tls_param" == *":"* ]]; then # Basic check if it contains ':'
+                  stls_sni="${tls_param%:*}" # Extract the part before the last colon
+             elif [ -n "$tls_param" ]; then
+                 stls_sni="$tls_param (Port missing?)" # Handle case where format might be unexpected
+             else
+                  stls_sni="Not Found in Service File"
+             fi
+
+
+             # Check TFO for shadow-tls
+             if grep -q -- '--fast-open' "$stls_service_file"; then
+                 stls_tfo_enabled="Enabled"
+             else
+                 stls_tfo_enabled="Disabled"
+             fi
+
+        else
+            echo "Shadow-TLS installation not found (missing service file or binary)."
+        fi
+    else
+         echo "Shadow-TLS check skipped (only supported on systemd)."
+         stls_installed="N/A (Not Systemd)"
+         stls_running="N/A"
+         stls_password="N/A"
+         stls_sni="N/A"
+         stls_tfo_enabled="N/A"
+    fi
+
+    # --- Get Server Info ---
+    # Check curl availability before using
+    if command -v curl > /dev/null 2>&1; then
+        server_ip=$(curl -s4 http://ipv4.icanhazip.com || curl -s4 http://ifconfig.me || echo "YOUR_SERVER_IP")
+    else
+        echo "Warning: 'curl' command not found. Cannot determine external IP address."
+        server_ip="UNKNOWN_IP (curl missing)"
+    fi
+
+    server_hostname="UNKNOWN_HOST"
+    if command -v hostname >/dev/null 2>&1; then
+        server_hostname=$(hostname)
+    fi
+
+    # --- Display Summary ---
+    echo ""
+    echo "--- Configuration Summary ---"
+    echo "Server IP: $server_ip"
+    echo "Server Hostname: $server_hostname"
+    echo ""
+
+    if [[ "$ss_installed" == true ]]; then
+        echo "[Shadowsocks]"
+        echo "  Status: $( [[ "$ss_running" == true ]] && echo "Running" || echo "Stopped/Unknown" )"
+        echo "  Port (TCP/UDP): $ss_port"
+        echo "  Password: $ss_password"
+        echo "  Method: $ss_method"
+        echo "  TCP Fast Open: $ss_tfo_enabled"
+    else
+        echo "[Shadowsocks]"
+        echo "  Status: Not Installed"
+    fi
+    echo ""
+
+    if [[ "$SERVICE_MANAGER" == "systemd" ]]; then
+        echo "[Shadow-TLS (v3)]"
+         if [[ "$stls_installed" == true ]]; then
+             echo "  Status: $( [[ "$stls_running" == true ]] && echo "Running" || echo "Stopped/Unknown" )"
+             echo "  Listen Port (TCP): 443"
+             # SECURITY NOTE: Displaying the password directly.
+             echo "  Password: $stls_password  <-- (Extracted from service file)"
+             echo "  SNI: $stls_sni  <-- (Extracted from service file, client may use wildcard)"
+             echo "  TCP Fast Open: $stls_tfo_enabled"
+         else
+            echo "  Status: Not Installed"
+         fi
+    else
+         echo "[Shadow-TLS (v3)]"
+         echo "  Status: N/A (Requires Systemd)"
+    fi
+    echo "--------------------------------------------------"
+    # Provide hints if services are stopped
+    if [[ "$ss_installed" == true && "$ss_running" != true ]]; then
+         echo "Hint: Shadowsocks service (ss-rust) is not running."
+         if [[ "$SERVICE_MANAGER" == "systemd" ]]; then echo "      Try: systemctl start ss-rust / journalctl -u ss-rust"; fi
+         if [[ "$SERVICE_MANAGER" == "openrc" ]]; then echo "      Try: rc-service ss-rust start / check logs in /var/log/"; fi
+    fi
+     if [[ "$SERVICE_MANAGER" == "systemd" && "$stls_installed" == true && "$stls_running" != true ]]; then
+         echo "Hint: Shadow-TLS service (shadow-tls) is not running."
+         echo "      Try: systemctl start shadow-tls / journalctl -u shadow-tls"
+    fi
+    echo ""
 }
 
 
@@ -687,7 +886,14 @@ EOF
         stls_active=true
     fi
 
-    local server_ip=$(curl -s4 http://ipv4.icanhazip.com || curl -s4 http://ifconfig.me || echo "YOUR_SERVER_IP")
+    # Check curl availability before getting IP
+    local server_ip="YOUR_SERVER_IP" # Default fallback
+    if command -v curl > /dev/null 2>&1; then
+        server_ip=$(curl -s4 http://ipv4.icanhazip.com || curl -s4 http://ifconfig.me || echo "YOUR_SERVER_IP")
+    else
+        echo "Warning: 'curl' command not found. Cannot determine external IP address for summary."
+    fi
+
     # Use command -v to check for hostname command before calling it
     local server_hostname="UNKNOWN_HOST"
     if command -v hostname >/dev/null 2>&1; then
@@ -761,6 +967,7 @@ while [ $# -gt 0 ]; do
             echo "  install    Install Shadowsocks-Rust and optionally Shadow-TLS (interactive)."
             echo "  update     Update existing Shadowsocks-Rust and Shadow-TLS installations."
             echo "  uninstall  Uninstall Shadowsocks-Rust and Shadow-TLS."
+            echo "  view       View current configuration." # Added view command description
             echo "  (no command) Show interactive menu."
             echo ""
             echo "Options:"
@@ -771,7 +978,7 @@ while [ $# -gt 0 ]; do
             echo "Note: Non-interactive install options (-p, -passwd) are not yet supported."
             exit 0
             ;;
-        install|update|uninstall)
+        install|update|uninstall|view) # Added 'view' as a valid command
             # Capture command if provided positionally (and no command already captured)
             if [ -z "$COMMAND" ]; then
                 COMMAND="$1"
@@ -807,60 +1014,87 @@ if [[ "$PKG_MANAGER" == "unknown" ]]; then
    exit 1
 fi
 
-# Check and install base dependencies (including jq if --latest is used)
+# Check and install base dependencies (including jq and curl unconditionally)
 base_required_packages=()
 if [[ "$PKG_MANAGER" == "apk" || "$PKG_MANAGER" == "yum" || "$PKG_MANAGER" == "dnf" ]]; then
-    base_required_packages=(wget tar openssl curl net-tools xz coreutils)
+    base_required_packages=(wget tar openssl curl net-tools xz coreutils jq) # Added jq
 else # apt
-    base_required_packages=(wget tar openssl curl net-tools xz-utils coreutils)
+    base_required_packages=(wget tar openssl curl net-tools xz-utils coreutils jq) # Added jq
 fi
-if [[ "$FETCH_LATEST" == true ]]; then
-    # Add jq if fetching latest versions
-     if ! command -v jq > /dev/null 2>&1; then
-        base_required_packages+=("jq")
-     fi
-fi
-# Add curl check here as it's crucial for fetching latest
+
+# *** MODIFIED DEPENDENCY CHECK AREA ***
+# Ensure curl is also checked/added if missing, as it's needed for IP and --latest
 if ! command -v curl > /dev/null 2>&1; then
-    # Avoid adding if already present
+    # Avoid adding if already present in the list (unlikely here, but safe)
     if ! [[ " ${base_required_packages[*]} " =~ " curl " ]]; then
-      base_required_packages+=("curl")
+        # Check if curl is already handled by the package manager specific lists
+        case "$PKG_MANAGER" in
+            apk|yum|dnf)
+                 if ! [[ " ${base_required_packages[*]} " =~ " curl " ]]; then base_required_packages+=("curl"); fi
+                 ;;
+            apt)
+                 if ! [[ " ${base_required_packages[*]} " =~ " curl " ]]; then base_required_packages+=("curl"); fi
+                 ;;
+        esac
     fi
 fi
+# Ensure jq is checked/added if missing (needed for view_config and --latest)
+if ! command -v jq > /dev/null 2>&1; then
+    if ! [[ " ${base_required_packages[*]} " =~ " jq " ]]; then
+        # Already added above, this check is slightly redundant now but harmless
+        base_required_packages+=("jq")
+    fi
+fi
+# *** END MODIFIED DEPENDENCY CHECK AREA ***
 
 
 missing_base_packages=()
 for package in "${base_required_packages[@]}"; do
-    if ! check_package "$package"; then
-        missing_base_packages+=("$package")
+    # Special handling for xz-utils on apt
+    if [[ "$PKG_MANAGER" == "apt" && "$package" == "xz-utils" ]]; then
+        if ! check_package "xz-utils"; then
+            missing_base_packages+=("xz-utils")
+        fi
+    elif [[ "$PKG_MANAGER" != "apt" && "$package" == "xz" ]]; then
+         if ! check_package "xz"; then
+            missing_base_packages+=("xz")
+        fi
+    # Standard check for other packages
+    elif [[ "$package" != "xz-utils" && "$package" != "xz" ]]; then
+        if ! check_package "$package"; then
+            missing_base_packages+=("$package")
+        fi
     fi
 done
+
 
 if [ ${#missing_base_packages[@]} -ne 0 ]; then
     echo "Attempting to install base dependencies: ${missing_base_packages[*]}"
     if ! install_packages "${missing_base_packages[@]}"; then
         echo "Error: Failed to install base dependencies. Aborting."
-        # Check if jq/curl was the one that failed if needed for --latest
-        if [[ "$FETCH_LATEST" == true && (" ${missing_base_packages[*]} " =~ " jq " || " ${missing_base_packages[*]} " =~ " curl ") ]]; then
-             # Check specifically which one is missing *after* the failed install attempt
-             jq_missing=$(! command -v jq > /dev/null 2>&1 && echo true || echo false)
-             curl_missing=$(! command -v curl > /dev/null 2>&1 && echo true || echo false)
-             if [[ "$jq_missing" == true || "$curl_missing" == true ]]; then
-                 echo "Error: 'jq' and/or 'curl' could not be installed, which is required for '--latest'."
-                 exit 1
-             fi
+        # Check if jq/curl was the one that failed if needed for core functions
+        jq_missing=$(! command -v jq > /dev/null 2>&1 && echo true || echo false)
+        curl_missing=$(! command -v curl > /dev/null 2>&1 && echo true || echo false)
+
+        if [[ "$FETCH_LATEST" == true && ("$jq_missing" == true || "$curl_missing" == true) ]]; then
+             echo "Error: 'jq' and/or 'curl' could not be installed, which is required for '--latest'."
+             exit 1
         fi
+         if [[ "$COMMAND" == "view" && ("$jq_missing" == true || "$curl_missing" == true) ]]; then
+             echo "Error: 'jq' and/or 'curl' could not be installed, which are required for the 'view' command."
+             exit 1
+         fi
         # Exit if any base dependency failed critical install
         exit 1
     fi
 fi
 
-# Req 9: Fetch latest versions if requested
+# Req 9: Fetch latest versions if requested (moved after dependency install success)
 if [[ "$FETCH_LATEST" == true ]]; then
     echo "Fetching latest version information..."
      # Ensure jq and curl are available now
     if ! command -v jq > /dev/null 2>&1 || ! command -v curl > /dev/null 2>&1; then
-        echo "Error: 'jq' and 'curl' are required for '--latest' but are not available. Please install them."
+        echo "Error: 'jq' and 'curl' are required for '--latest' but are not available after installation attempt. Please install them manually."
         exit 1
     fi
     latest_ss=$(get_latest_github_release "shadowsocks/shadowsocks-rust")
@@ -889,6 +1123,9 @@ if [ -n "$COMMAND" ]; then
         uninstall)
             uninstall
             ;;
+        view) # Added case for 'view' command
+            view_config
+            ;;
         *)
             # Should not happen due to earlier parsing, but as a safeguard
             echo "Error: Invalid command '$COMMAND'" >&2; exit 1;
@@ -914,6 +1151,7 @@ else
     echo "  1) Install Shadowsocks-Rust (and optionally Shadow-TLS)"
     echo "  2) Update existing installation"
     echo "  3) Uninstall Shadowsocks-Rust and Shadow-TLS"
+    echo "  4) View Current Configuration" # Added menu item 4
     echo "  *) Exit"
     echo "-----------------------------------------"
 
@@ -933,6 +1171,9 @@ else
         3)
             uninstall
             ;;
+        4) # Added case for menu item 4
+            view_config
+            ;;
         *)
             echo "Exiting."
             exit 0
@@ -941,4 +1182,3 @@ else
 fi
 
 exit 0
-
