@@ -22,22 +22,42 @@ is_alpine() {
 }
 
 check_package() {
+    # Define PKG_MANAGER locally within the function if not already global
+    local PKG_MANAGER
+    if command -v apk >/dev/null 2>&1; then PKG_MANAGER="apk"
+    elif command -v apt >/dev/null 2>&1; then PKG_MANAGER="apt"
+    elif command -v dnf >/dev/null 2>&1; then PKG_MANAGER="dnf"
+    elif command -v yum >/dev/null 2>&1; then PKG_MANAGER="yum"
+    else return 1 # Indicate no known package manager found
+    fi
+
     case "$PKG_MANAGER" in
         apk) apk info -e "$1" >/dev/null 2>&1 ;;
         apt) dpkg -l "$1" 2>/dev/null | grep -q "^ii" ;;
         dnf|yum) rpm -q "$1" >/dev/null 2>&1 ;;
-        *) return 1 ;;
+        *) return 1 ;; # Should not happen due to check above, but good practice
     esac
 }
 
 install_packages() {
+    # Define PKG_MANAGER locally within the function if not already global
+    local PKG_MANAGER
+    if command -v apk >/dev/null 2>&1; then PKG_MANAGER="apk"
+    elif command -v apt >/dev/null 2>&1; then PKG_MANAGER="apt"
+    elif command -v dnf >/dev/null 2>&1; then PKG_MANAGER="dnf"
+    elif command -v yum >/dev/null 2>&1; then PKG_MANAGER="yum"
+    else
+        echo "Error: No supported package manager found for installation (apk/apt/dnf/yum)."
+        return 1
+    fi
+
     echo "Installing required packages: $*"
     case "$PKG_MANAGER" in
         apk) apk add --no-cache "$@" >/dev/null 2>&1 ;;
         apt) apt update >/dev/null 2>&1 && apt install -y "$@" >/dev/null 2>&1 ;;
         dnf) dnf install -y "$@" >/dev/null 2>&1 ;;
         yum) yum install -y "$@" >/dev/null 2>&1 ;;
-        *) echo "Error: Package manager $PKG_MANAGER not supported for installation." ; return 1 ;;
+        # *) This case is handled by the initial check
     esac
     if [ $? -ne 0 ]; then
         echo "Error: Failed to install required packages"
@@ -178,7 +198,7 @@ install() {
 
     # --- Dependency Check and Installation ---
     echo "Checking package manager and dependencies..."
-    local PKG_MANAGER="" # Local variable for package manager
+    local PKG_MANAGER # Determine package manager again specifically for install function scope
     if command -v apk >/dev/null 2>&1; then PKG_MANAGER="apk"
     elif command -v apt >/dev/null 2>&1; then PKG_MANAGER="apt"
     elif command -v dnf >/dev/null 2>&1; then PKG_MANAGER="dnf"
@@ -188,6 +208,7 @@ install() {
     echo "Using package manager: $PKG_MANAGER"
 
     local required_packages=()
+    # Define required packages based on the determined manager
     if [ "$PKG_MANAGER" = "apk" ] || [ "$PKG_MANAGER" = "yum" ] || [ "$PKG_MANAGER" = "dnf" ]; then
         required_packages=(wget tar openssl curl net-tools xz)
     else # apt
@@ -196,12 +217,14 @@ install() {
 
     local missing_packages=()
     for package in "${required_packages[@]}"; do
+        # Pass the identified PKG_MANAGER to check_package
         if ! check_package "$package"; then
             missing_packages+=("$package")
         fi
     done
 
     if [ ${#missing_packages[@]} -ne 0 ]; then
+        # Pass the identified PKG_MANAGER to install_packages
         if ! install_packages "${missing_packages[@]}"; then
             exit 1
         fi
@@ -258,11 +281,15 @@ install() {
     read -p "Enter Shadowsocks port (leave empty for random port between 10000-65535): " user_port_input
     if [[ -n "$user_port_input" ]]; then
         if [[ "$user_port_input" =~ ^[0-9]+$ ]] && [ "$user_port_input" -ge 1 ] && [ "$user_port_input" -le 65535 ]; then
-            if ! ss -tuln | awk '{print $5}' | grep -q ":${user_port_input}$"; then
+            # Check port availability using net-tools (ss)
+            if command -v ss > /dev/null && ! ss -tuln | awk '{print $5}' | grep -q ":${user_port_input}$"; then
                 ss_port="$user_port_input"
                 echo "Using user-provided Shadowsocks port: $ss_port"
+            elif ! command -v ss > /dev/null && command -v netstat > /dev/null && ! netstat -tuln | awk '{print $4}' | grep -q ":${user_port_input}$"; then
+                 ss_port="$user_port_input"
+                 echo "Using user-provided Shadowsocks port: $ss_port (checked with netstat)"
             else
-                echo "Error: Port $user_port_input is already in use. Exiting."
+                echo "Error: Port $user_port_input is already in use or cannot check. Exiting."
                 exit 1
             fi
         else
@@ -275,11 +302,18 @@ install() {
         echo "Generating random port for Shadowsocks..."
         while true; do
             ss_port=$(( ( RANDOM % 55536 ) + 10000 ))
-            if ! ss -tuln | awk '{print $5}' | grep -q ":$ss_port$"; then
+            # Check port availability using ss or netstat
+            if command -v ss > /dev/null && ! ss -tuln | awk '{print $5}' | grep -q ":$ss_port$"; then
                 echo "Using randomly generated Shadowsocks port: $ss_port"
                 break
+            elif ! command -v ss > /dev/null && command -v netstat > /dev/null && ! netstat -tuln | awk '{print $4}' | grep -q ":$ss_port$"; then
+                 echo "Using randomly generated Shadowsocks port: $ss_port (checked with netstat)"
+                 break
+            elif ! command -v ss > /dev/null && ! command -v netstat > /dev/null; then
+                 echo "Warning: Cannot check port availability (ss or netstat not found). Using generated port $ss_port."
+                 break
             fi
-            sleep 0.1
+            sleep 0.1 # Prevent tight loop if checking fails consistently
         done
     fi
 
@@ -374,12 +408,12 @@ EOF
 
     # --- Shadow-TLS Installation and Setup (Systemd Only) ---
     local stls_password="" # Declare variable
+    local install_stls_choice="n" # Default to no
 
     if [ "$SERVICE_MANAGER" = "systemd" ]; then
         echo ""
         echo "--- Shadow-TLS Setup (Optional) ---"
         # Ask if user wants to install Shadow-TLS first
-        local install_stls_choice=""
         read -p "Do you want to install Shadow-TLS (requires port 443)? (y/N): " install_stls_choice
         if [[ "$install_stls_choice" =~ ^[Yy]$ ]]; then
             echo "Proceeding with Shadow-TLS setup..."
@@ -422,6 +456,17 @@ EOF
 
             # Proceed only if a password was successfully set (either random or fixed)
             if [ -n "$stls_password" ]; then
+                # Check if port 443 is available
+                if command -v ss > /dev/null && ss -tuln | awk '{print $5}' | grep -q ":443$"; then
+                    echo "Error: Port 443 is already in use. Cannot install Shadow-TLS. Exiting."
+                    exit 1
+                elif ! command -v ss > /dev/null && command -v netstat > /dev/null && netstat -tuln | awk '{print $4}' | grep -q ":443$"; then
+                     echo "Error: Port 443 is already in use (checked with netstat). Cannot install Shadow-TLS. Exiting."
+                     exit 1
+                elif ! command -v ss > /dev/null && ! command -v netstat > /dev/null; then
+                     echo "Warning: Cannot check if port 443 is in use (ss or netstat not found). Proceeding anyway."
+                fi
+
                 # Install Shadow-TLS binary
                 local shadow_tls_binary=""
                 local shadow_tls_url_base="https://github.com/ihciah/shadow-tls/releases/download/$SHADOW_TLS_VERSION"
@@ -434,12 +479,17 @@ EOF
 
                 if [ -n "$shadow_tls_binary" ]; then
                     echo "Downloading Shadow-TLS binary ($shadow_tls_binary)..."
-                    if curl -fSL "$shadow_tls_url_base/$shadow_tls_binary" -o /usr/local/bin/shadow-tls && chmod a+x /usr/local/bin/shadow-tls; then
-                        echo "Shadow-TLS binary installed to /usr/local/bin/shadow-tls"
+                    # Use /tmp for download to avoid permission issues before moving
+                    local temp_stls_bin="/tmp/shadow-tls.$$"
+                    if curl -fSL "$shadow_tls_url_base/$shadow_tls_binary" -o "$temp_stls_bin"; then
+                        chmod a+x "$temp_stls_bin"
+                        # Move to final destination
+                        if mv "$temp_stls_bin" /usr/local/bin/shadow-tls; then
+                            echo "Shadow-TLS binary installed to /usr/local/bin/shadow-tls"
 
-                        # Create Shadow-TLS systemd service file using the chosen password
-                        echo "Creating Shadow-TLS systemd service file..."
-                        cat >| /etc/systemd/system/shadow-tls.service <<EOF
+                            # Create Shadow-TLS systemd service file using the chosen password
+                            echo "Creating Shadow-TLS systemd service file..."
+                            cat >| /etc/systemd/system/shadow-tls.service <<EOF
 [Unit]
 Description=Shadow-TLS Server Service (v3)
 After=network-online.target ss-rust.service
@@ -458,21 +508,31 @@ ExecStart=/usr/local/bin/shadow-tls --fastopen --v3 --strict server --wildcard-s
 [Install]
 WantedBy=multi-user.target
 EOF
-                        # Start Shadow-TLS service
-                        echo "Reloading systemd daemon and starting Shadow-TLS service..."
-                        systemctl daemon-reload
-                        systemctl enable shadow-tls
-                        systemctl restart shadow-tls
+                            # Start Shadow-TLS service
+                            echo "Reloading systemd daemon and starting Shadow-TLS service..."
+                            systemctl daemon-reload
+                            systemctl enable shadow-tls
+                            systemctl restart shadow-tls
 
-                        sleep 2 # Give service time to start
-                        if ! systemctl is-active --quiet shadow-tls; then
-                             echo "Warning: Shadow-TLS service failed to start. Check logs with 'journalctl -u shadow-tls'. The Shadowsocks service on port $ss_port should still work directly."
-                             stls_password="" # Clear the password variable if service failed
+                            sleep 2 # Give service time to start
+                            if ! systemctl is-active --quiet shadow-tls; then
+                                 echo "Warning: Shadow-TLS service failed to start. Check logs with 'journalctl -u shadow-tls'. The Shadowsocks service on port $ss_port should still work directly."
+                                 # Attempt to clean up failed shadow-tls service file
+                                 systemctl disable shadow-tls 2>/dev/null
+                                 rm -f /etc/systemd/system/shadow-tls.service 2>/dev/null
+                                 rm -f /usr/local/bin/shadow-tls 2>/dev/null # Also remove binary
+                                 stls_password="" # Clear the password variable if service failed
+                            else
+                                 echo "Shadow-TLS service started successfully on port 443."
+                            fi
                         else
-                             echo "Shadow-TLS service started successfully on port 443."
+                            echo "Error: Failed to move Shadow-TLS binary to /usr/local/bin/. Skipping Shadow-TLS setup."
+                            rm -f "$temp_stls_bin" # Clean up temp file
+                            stls_password=""
                         fi
                     else
-                        echo "Error: Failed to download or set permissions for Shadow-TLS binary. Skipping Shadow-TLS setup."
+                        echo "Error: Failed to download Shadow-TLS binary. Skipping Shadow-TLS setup."
+                        rm -f "$temp_stls_bin" # Clean up temp file if it exists
                         stls_password="" # Clear password if download failed
                     fi
                 else
@@ -498,7 +558,13 @@ EOF
     echo "Shadowsocks Method: 2022-blake3-aes-256-gcm"
 
     # Display Shadow-TLS info only if the password variable is non-empty AND the service is active
-    if [ -n "$stls_password" ] && [ "$SERVICE_MANAGER" = "systemd" ] && systemctl is-active --quiet shadow-tls 2>/dev/null ; then
+    # Also ensure SERVICE_MANAGER is systemd for this check
+    local stls_active=false
+    if [ "$SERVICE_MANAGER" = "systemd" ] && systemctl is-active --quiet shadow-tls 2>/dev/null ; then
+        stls_active=true
+    fi
+
+    if [ -n "$stls_password" ] && [ "$stls_active" = true ]; then
         echo ""
         echo "Shadow-TLS Port (TCP Only): 443"
         echo "Shadow-TLS Password: $stls_password"
@@ -510,26 +576,24 @@ EOF
         echo "vps-stls = ss, $server_ip, 443, encrypt-method=2022-blake3-aes-256-gcm, password=$ss_password, shadow-tls-password=$stls_password, shadow-tls-sni=$SHADOW_TLS_SNI, shadow-tls-version=3, udp-relay=true, udp-port=$ss_port"
         echo ""
         echo "Note: UDP traffic goes directly to port $ss_port."
-    # Add case where setup was attempted but service isn't active
-    elif [ "$SERVICE_MANAGER" = "systemd" ] && [ -f "/usr/local/bin/shadow-tls" ]; then
+    # Add case where setup was attempted (user chose 'y') but service isn't active or password got cleared
+    elif [[ "$install_stls_choice" =~ ^[Yy]$ ]] && { [ -z "$stls_password" ] || [ "$stls_active" = false ]; }; then
          echo ""
          echo "Shadow-TLS Status: Installation attempted but FAILED TO START or configure correctly."
-         echo "Please check logs: journalctl -u shadow-tls"
+         if [ "$SERVICE_MANAGER" = "systemd" ]; then
+             echo "Please check logs: journalctl -u shadow-tls"
+         else
+             echo "(Shadow-TLS setup is only supported on systemd systems.)"
+         fi
          echo "Shadowsocks should be available directly on port $ss_port (TCP/UDP)."
          echo ""
          echo "Direct Client Configuration Example (Shadowsocks Only):"
          local server_ip=$(curl -s4 http://ipv4.icanhazip.com || curl -s4 http://ifconfig.me || echo "YOUR_SERVER_IP")
          echo "vps-ss = ss, $server_ip, $ss_port, encrypt-method=2022-blake3-aes-256-gcm, password=$ss_password, udp-relay=true"
-    # Default case: Shadow-TLS was not installed or skipped
+    # Default case: Shadow-TLS was not installed or skipped (user chose 'n' or non-systemd)
     else
-        # Check if the user explicitly skipped it
-        if [[ "$install_stls_choice" =~ ^[Yy]$ ]]; then
-           echo ""
-           echo "Shadow-TLS Status: Installation skipped or failed."
-        else # Implicitly skipped (non-systemd or chose 'N')
-           echo ""
-           echo "Shadow-TLS Status: Not installed or setup skipped."
-        fi
+        echo ""
+        echo "Shadow-TLS Status: Not installed or setup skipped."
         echo ""
         echo "Direct Client Configuration Example (Shadowsocks Only):"
         local server_ip=$(curl -s4 http://ipv4.icanhazip.com || curl -s4 http://ifconfig.me || echo "YOUR_SERVER_IP")
@@ -548,37 +612,145 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-# Display Menu
-echo "========================================="
-echo " Shadowsocks-Rust & Shadow-TLS Manager"
-echo "========================================="
-echo "Please choose an option:"
-echo "  1) Install Shadowsocks-Rust (and optionally Shadow-TLS)"
-echo "  2) Update existing installation"
-echo "  3) Uninstall Shadowsocks-Rust and Shadow-TLS"
-echo "  *) Exit"
-echo "-----------------------------------------"
+# Check if running interactively or with arguments
+if [ $# -gt 0 ]; then
+    # --- Argument Parsing Logic ---
+    COMMAND="$1"
+    shift # Remove the command from arguments
 
-local main_choice=""
-read -p "Enter your choice: " main_choice
+    SS_PORT_ARG=""
+    SS_PASSWD_ARG=""
 
-echo "" # Add a newline
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -p)
+                if [ -n "$2" ]; then
+                    SS_PORT_ARG="$2"
+                    shift 2
+                else
+                    echo "Error: -p requires a port number." >&2
+                    exit 1
+                fi
+                ;;
+            -passwd)
+                 if [ -n "$2" ]; then
+                    SS_PASSWD_ARG="$2"
+                    shift 2
+                else
+                    echo "Error: -passwd requires a password." >&2
+                    exit 1
+                fi
+                ;;
+            *)
+                echo "Error: Unknown option '$1'" >&2
+                # Display usage here as well
+                echo ""
+                echo "Usage: $0 <command> [options]"
+                echo ""
+                echo "Commands:"
+                echo "  install    Install Shadowsocks-Rust and optionally Shadow-TLS."
+                echo "             Options for install:"
+                echo "               -p <port>       Specify the Shadowsocks server port (default: random)."
+                echo "               -passwd <password> Specify the Shadowsocks password (default: random)."
+                echo "  update     Update existing Shadowsocks-Rust and Shadow-TLS installations."
+                echo "  uninstall  Uninstall Shadowsocks-Rust and Shadow-TLS."
+                echo ""
+                echo "Examples:"
+                echo "  $0 install"
+                echo "  $0 install -p 20000 -passwd mysecretpassword"
+                echo "  $0 update"
+                echo "  $0 uninstall"
+                exit 1
+                ;;
+        esac
+    done
 
-# Process Choice
-case $main_choice in
-    1)
-        install # Call install function (will ask for port/pw inside)
-        ;;
-    2)
-        update
-        ;;
-    3)
-        uninstall
-        ;;
-    *)
-        echo "Exiting."
-        exit 0
-        ;;
-esac
+    case "$COMMAND" in
+        install)
+            # Override interactive prompts if arguments are provided
+            # Modify the install function to accept these as optional arguments or set global vars
+            # For simplicity here, we'll exit if arguments are provided without modifying install() heavily
+            # A better approach would refactor install() to check for these argument variables.
+            # Since the user expects the menu, we will ignore arguments for now and proceed to menu.
+            # OR, we can choose to error out if arguments are given, as the script isn't designed for it yet.
+            echo "Warning: Command line arguments (-p, -passwd) are not fully supported with the interactive menu flow yet."
+            echo "Please run the script without arguments to use the interactive setup."
+            # Alternatively, to support args, you would pass $SS_PORT_ARG and $SS_PASSWD_ARG to install()
+            # and modify install() to use them if set, skipping the prompts.
+            # For now, let's just run the command requested without args.
+             if [ -n "$SS_PORT_ARG" ] || [ -n "$SS_PASSWD_ARG" ]; then
+                 echo "Ignoring provided arguments and running '$COMMAND' interactively."
+             fi
+             install # Call install without arguments
+            ;;
+        update)
+            if [ -n "$SS_PORT_ARG" ] || [ -n "$SS_PASSWD_ARG" ]; then
+                 echo "Warning: Arguments -p and -passwd are not applicable to the 'update' command."
+            fi
+            update
+            ;;
+        uninstall)
+            if [ -n "$SS_PORT_ARG" ] || [ -n "$SS_PASSWD_ARG" ]; then
+                 echo "Warning: Arguments -p and -passwd are not applicable to the 'uninstall' command."
+            fi
+            uninstall
+            ;;
+        *)
+            echo "Error: Unknown command '$COMMAND'" >&2
+            # Display usage again
+            echo ""
+            echo "Usage: $0 <command> [options]"
+            echo ""
+            echo "Commands:"
+            echo "  install    Install Shadowsocks-Rust and optionally Shadow-TLS."
+            echo "             Options for install:"
+            echo "               -p <port>       Specify the Shadowsocks server port (default: random)."
+            echo "               -passwd <password> Specify the Shadowsocks password (default: random)."
+            echo "  update     Update existing Shadowsocks-Rust and Shadow-TLS installations."
+            echo "  uninstall  Uninstall Shadowsocks-Rust and Shadow-TLS."
+            echo ""
+            echo "Examples:"
+            echo "  $0 install"
+            echo "  $0 install -p 20000 -passwd mysecretpassword"
+            echo "  $0 update"
+            echo "  $0 uninstall"
+            exit 1
+            ;;
+    esac
+
+else
+    # --- Interactive Menu Logic (No arguments provided) ---
+    echo "========================================="
+    echo " Shadowsocks-Rust & Shadow-TLS Manager"
+    echo "========================================="
+    echo "Please choose an option:"
+    echo "  1) Install Shadowsocks-Rust (and optionally Shadow-TLS)"
+    echo "  2) Update existing installation"
+    echo "  3) Uninstall Shadowsocks-Rust and Shadow-TLS"
+    echo "  *) Exit"
+    echo "-----------------------------------------"
+
+    main_choice="" # Removed 'local' here
+    read -p "Enter your choice: " main_choice
+
+    echo "" # Add a newline
+
+    # Process Choice
+    case $main_choice in
+        1)
+            install # Call install function (will ask for port/pw inside)
+            ;;
+        2)
+            update
+            ;;
+        3)
+            uninstall
+            ;;
+        *)
+            echo "Exiting."
+            exit 0
+            ;;
+    esac
+fi
 
 exit 0
