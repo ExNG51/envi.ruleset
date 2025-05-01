@@ -55,7 +55,6 @@ show_help() {
     echo "Note: Non-interactive install options (-p, -passwd) are not yet supported."
 }
 
-
 detect_package_manager() {
     if command -v apk >/dev/null 2>&1; then echo "apk"
     elif command -v apt >/dev/null 2>&1; then echo "apt"
@@ -503,7 +502,7 @@ view_config() {
 }
 
 
-# --- Install Function ---
+# --- Install Function (MODIFIED WITH OPTIONAL PASSWORD REGENERATION) ---
 install() {
     # Use global SERVICE_MANAGER, PKG_MANAGER, ARCH, IS_ALPINE, ENABLE_TFO
     if [[ "$SERVICE_MANAGER" == "unknown" ]]; then
@@ -551,14 +550,15 @@ install() {
     rm -f "$ss_package" sslocal ssmanager ssservice ssurl
     echo "Shadowsocks Rust binaries installed in /opt/ss-rust"
 
-    # --- Shadowsocks Configuration (Interactive) ---
+    # --- Shadowsocks Configuration (Interactive - REORDERED) ---
     local ss_port=""
     local ss_password=""
+    local ss_method="" # Declare method var early
     local user_port_input=""
     local user_pw_input=""
     local use_shuf_for_port=true # Flag to indicate if we should try using shuf
 
-    # Ask for Port
+    # 1. Ask for Port
     echo ""
     read -p "Enter Shadowsocks port (leave empty for random port between 10000-65535): " user_port_input
     if [[ -n "$user_port_input" ]]; then
@@ -637,17 +637,11 @@ install() {
         done
     fi
 
-    # --- Ask for Password ---
+    # 2. Ask for Encryption Method
     echo ""
-    # Req 1: Use read -s for password
-    read -sp "Enter Shadowsocks password (leave empty for random password based on method): " user_pw_input
-    echo ""
-
-    # --- Ask for Encryption Method ---
-    local ss_method="" # Declare variable
     echo "Choose Shadowsocks encryption method:"
-    echo "  1) 2022-blake3-aes-256-gcm"
-    echo "  2) 2022-blake3-aes-128-gcm (Default)"
+    echo "  1) 2022-blake3-aes-256-gcm (Requires 44-char Base64 password)"
+    echo "  2) 2022-blake3-aes-128-gcm (Default, Requires 24-char Base64 password)"
     read -p "Enter your choice (leave empty for default: 2): " method_choice
 
     case "$method_choice" in
@@ -662,35 +656,97 @@ install() {
     esac
     echo ""
 
-    # --- Generate or Set Password ---
-    if [[ -n "$user_pw_input" ]]; then
-        ss_password="$user_pw_input"
-        echo "Using user-provided Shadowsocks password."
-        # Optional: Add a length check/warning here in the future if needed
+    # 3. Ask for Password
+    echo ""
+    local required_len_hint=""
+    local required_len=0 # Also store required length numerically
+    if [[ "$ss_method" == "2022-blake3-aes-128-gcm" ]]; then
+        required_len=24
+        required_len_hint="(24 chars required)"
     else
+        required_len=44
+        required_len_hint="(44 chars required)"
+    fi
+    read -sp "Enter Shadowsocks password $required_len_hint (leave empty for random password): " user_pw_input
+    echo ""
+
+    # 4. Generate or Set Password - MODIFIED VALIDATION & REGENERATION OPTION
+    if [[ -n "$user_pw_input" ]]; then
+        local provided_len=${#user_pw_input}
+
+        if [[ "$provided_len" -ne "$required_len" ]]; then
+            # --- Password Length Mismatch Handling ---
+            echo "Error: Invalid password length." >&2
+            echo "The chosen method '$ss_method' requires a Base64 encoded password of exactly $required_len characters." >&2
+            echo "You provided a password of $provided_len characters." >&2
+            echo ""
+            local generate_instead_choice=""
+            read -p "Would you like to generate a random password instead? (y/N): " generate_instead_choice
+
+            if [[ "$generate_instead_choice" =~ ^[Yy]$ ]]; then
+                echo "Generating random password for Shadowsocks ($ss_method)..."
+                # Ensure openssl is available (check needed here too)
+                if ! command -v openssl >/dev/null 2>&1; then
+                    echo "Error: 'openssl' command not found. Cannot generate random password. Aborting installation." >&2
+                    rm -rf /opt/ss-rust
+                    return 1
+                fi
+                # Generate password with correct Base64 length
+                local raw_len=0
+                if [[ "$ss_method" == "2022-blake3-aes-128-gcm" ]]; then raw_len=16; else raw_len=32; fi
+                ss_password=$(openssl rand -base64 $raw_len)
+
+                # Verify generated password length
+                local generated_len=${#ss_password}
+                if [[ "$generated_len" -ne "$required_len" ]]; then
+                     echo "Error: Failed to generate random password with correct length ($generated_len != $required_len) using openssl." >&2
+                     echo "Aborting installation." >&2
+                     rm -rf /opt/ss-rust
+                     return 1
+                fi
+                echo "Using randomly generated Shadowsocks password."
+            else
+                echo "Aborting installation as requested." >&2
+                rm -rf /opt/ss-rust
+                return 1 # Abort if user doesn't want to generate
+            fi
+            # --- End of Mismatch Handling ---
+        else
+            # Password length is correct
+            ss_password="$user_pw_input"
+            echo "Using user-provided Shadowsocks password (Length OK)."
+        fi
+
+    else # User left password input empty
         echo "Generating random password for Shadowsocks ($ss_method)..."
         # Ensure openssl is available
         if ! command -v openssl >/dev/null 2>&1; then
-            echo "Error: 'openssl' command not found. Cannot generate random password. Aborting installation."
+            echo "Error: 'openssl' command not found. Cannot generate random password. Aborting installation." >&2
             rm -rf /opt/ss-rust
             return 1
         fi
-        # Generate password with length corresponding to the chosen method
-        if [[ "$ss_method" == "2022-blake3-aes-128-gcm" ]]; then
-            ss_password=$(openssl rand -base64 16) # 16 bytes for 128-bit key
-        else # Default to 32 bytes for 256-bit key
-            ss_password=$(openssl rand -base64 32) # 32 bytes for 256-bit key
-        fi
+        # Generate password with correct Base64 length
+        local raw_len=0
+         if [[ "$ss_method" == "2022-blake3-aes-128-gcm" ]]; then raw_len=16; else raw_len=32; fi
+        ss_password=$(openssl rand -base64 $raw_len)
 
-        if [ -z "$ss_password" ]; then
-            echo "Error: Failed to generate random password using openssl. Aborting installation."
-            rm -rf /opt/ss-rust
-            return 1
+        # Verify generated password length
+        local generated_len=${#ss_password}
+        # Recalculate expected length based on method for verification
+        local expected_gen_len=0
+        if [[ "$ss_method" == "2022-blake3-aes-128-gcm" ]]; then expected_gen_len=24; else expected_gen_len=44; fi
+
+        if [[ "$generated_len" -ne "$expected_gen_len" ]]; then
+             echo "Error: Failed to generate random password with correct length ($generated_len != $expected_gen_len) using openssl." >&2
+             echo "Aborting installation." >&2
+             rm -rf /opt/ss-rust
+             return 1
         fi
         echo "Using randomly generated Shadowsocks password."
     fi
     echo ""
 
+    # --- Create config.json ---
     echo "Creating Shadowsocks config.json..."
     # Use cat with Heredoc, ensure no variables inside are expanded unintentionally unless desired
     cat >| "/opt/ss-rust/config.json" <<EOF
@@ -1150,7 +1206,7 @@ if ! command -v jq > /dev/null 2>&1; then
     fi
 fi
 # Ensure openssl is definitely in the list if command not found (needed for random passwords)
-if ! command -v openssl > /dev/null 2>&1; then
+if ! command -v openssl >/dev/null 2>&1; then
      if ! [[ " ${base_required_packages[*]} " =~ " openssl " ]]; then
         base_required_packages+=("openssl")
     fi
@@ -1316,3 +1372,4 @@ else
 fi
 
 exit 0 # Exit successfully if a command was executed non-interactively
+
