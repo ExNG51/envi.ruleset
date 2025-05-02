@@ -211,6 +211,8 @@ maxretry = 3
 ignoreip = 127.0.0.1/8 ::1 ${CURRENT_IP:-}
 # 后端设置 (根据检测结果设置)
 backend = ${FAIL2BAN_BACKEND}
+# 使用 ufw 作防火墙
+banaction = ufw
 [sshd]
 enabled = true
 port = ${DETECTED_SSH_PORT:-ssh} # 使用检测到的端口，若未检测到则使用默认 'ssh'
