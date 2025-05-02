@@ -311,17 +311,45 @@ filter = sshd
 # 日志路径 (如果检测到特定文件路径则使用，否则留空让 fail2ban 使用默认或 systemd 后端)
 EOF
     # 添加 logpath (如果需要)
+    local logpath_display="" # 用于后续输出显示
     if [ -n "$SSH_LOG_PATH" ] && [ "$SSH_LOG_PATH" != "using systemd backend" ]; then
         echo "logpath = $SSH_LOG_PATH" >> "$FAIL2BAN_JAIL_LOCAL"
         echo -e "${BLUE}[i] 使用检测到的日志路径: ${CYAN}$SSH_LOG_PATH${RESET}"
+        logpath_display="${CYAN}$SSH_LOG_PATH${RESET}"
     elif [ "$FAIL2BAN_BACKEND" != "systemd" ] && [ -z "$SSH_LOG_PATH" ]; then # 明确检测失败的情况
          echo "# logpath = %(sshd_log)s  # 自动检测失败，请根据系统检查并取消注释或修改" >> "$FAIL2BAN_JAIL_LOCAL"
          echo -e "${YELLOW}[i] 未能自动检测日志路径，请在 ${CYAN}${FAIL2BAN_JAIL_LOCAL}${YELLOW} 中检查 'logpath'。${RESET}"
+         logpath_display="${YELLOW}(自动检测失败，使用 Fail2ban 默认或需手动设置)${RESET}"
     elif [ "$FAIL2BAN_BACKEND" == "systemd" ]; then
         echo -e "${BLUE}[i] 使用 systemd 后端，无需设置 logpath。${RESET}"
+        logpath_display="${MAGENTA}(使用 systemd journal，无需显式设置)${RESET}"
     fi
 
     check_command_status "创建/更新 ${CYAN}${FAIL2BAN_JAIL_LOCAL}${RESET}" || return 1
+
+    # --- 新增：显示配置参数 ---
+    echo -e "${BLUE}${BOLD}\n[+] Fail2ban (${CYAN}${FAIL2BAN_JAIL_LOCAL}${BLUE}) 配置摘要:${RESET}"
+    echo -e "  ${MAGENTA}[DEFAULT]${RESET}"
+    echo -e "    ${CYAN}bantime${RESET}  = 30d"
+    echo -e "    ${CYAN}findtime${RESET} = 5m"
+    echo -e "    ${CYAN}maxretry${RESET} = 3"
+    # 处理 CURRENT_IP 为空的情况
+    local current_ip_display="${CURRENT_IP}"
+    if [ -z "$current_ip_display" ]; then
+        current_ip_display="${YELLOW}(未自动获取或手动输入)${RESET}"
+    else
+        current_ip_display="${CYAN}${BOLD}${current_ip_display}${RESET}"
+    fi
+    echo -e "    ${CYAN}ignoreip${RESET} = 127.0.0.1/8 ::1 ${current_ip_display}"
+    echo -e "    ${CYAN}backend${RESET}  = ${MAGENTA}${FAIL2BAN_BACKEND}${RESET}"
+    echo -e "    ${CYAN}banaction${RESET}= ufw"
+    echo -e "  ${MAGENTA}[sshd]${RESET}"
+    echo -e "    ${CYAN}enabled${RESET}  = true"
+    echo -e "    ${CYAN}port${RESET}     = ${CYAN}${DETECTED_SSH_PORT:-ssh}${RESET}"
+    echo -e "    ${CYAN}filter${RESET}   = sshd"
+    echo -e "    ${CYAN}logpath${RESET}  = ${logpath_display}" # 使用前面处理好的 logpath 显示内容
+    echo "----------------------------------------"
+    # --- 显示结束 ---
 
     # 重启 Fail2ban 服务
     echo -e "${BLUE}${BOLD}[+] 正在重启 Fail2ban 服务...${RESET}"
@@ -404,8 +432,10 @@ secure_ssh() {
                     echo -e "${BLUE}[-] ChallengeResponseAuthentication 已设置为 no，无需修改。${RESET}"
                  fi
             fi
-            if $success && $changes_made; then
-                echo -e "${GREEN}${BOLD}[✓] 已禁用密码认证。${YELLOW}请确保您已配置 SSH 密钥！${RESET}"
+            if $success && $changes_made; then # 只有当真正修改了才提示
+                 if grep -qE "^\s*PasswordAuthentication\s+no" "$SSH_CONFIG_FILE" && grep -qE "^\s*ChallengeResponseAuthentication\s+no" "$SSH_CONFIG_FILE"; then
+                    echo -e "${GREEN}${BOLD}[✓] 已禁用密码认证。${YELLOW}请确保您已配置 SSH 密钥！${RESET}"
+                 fi
             fi
         else
             echo -e "${YELLOW}[-] 跳过禁用密码认证。${BOLD}(为了安全，强烈建议使用密钥登录)${RESET}"
@@ -571,7 +601,7 @@ while true; do
     DETECTED_TCP_PORTS=""
     DETECTED_UDP_PORTS=""
 
-    echo -e "\n${BLUE}${BOLD}================= Linux 安全加固脚本 (v2.3) =================${RESET}"
+    echo -e "\n${BLUE}${BOLD}================= Linux 安全加固脚本 (v2.4) =================${RESET}"
     echo -e "${CYAN}请选择要执行的操作:${RESET}"
     echo -e " ${YELLOW}1.${RESET} 安装 UFW 和 Fail2ban (及依赖)"
     echo -e " ${YELLOW}2.${RESET} 配置 UFW 防火墙 (${RED}将重置现有规则${RESET})"
