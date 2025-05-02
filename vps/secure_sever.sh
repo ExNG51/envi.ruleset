@@ -327,7 +327,7 @@ EOF
 
     check_command_status "创建/更新 ${CYAN}${FAIL2BAN_JAIL_LOCAL}${RESET}" || return 1
 
-    # --- 新增：显示配置参数 ---
+    # --- 显示配置参数 ---
     echo -e "${BLUE}${BOLD}\n[+] Fail2ban (${CYAN}${FAIL2BAN_JAIL_LOCAL}${BLUE}) 配置摘要:${RESET}"
     echo -e "  ${MAGENTA}[DEFAULT]${RESET}"
     echo -e "    ${CYAN}bantime${RESET}  = 30d"
@@ -401,26 +401,69 @@ secure_ssh() {
     local success=true
     local changes_made=false # 标记是否有实际修改
 
-    echo -e "${BLUE}[i] 根据您的要求，跳过禁用 Root 登录的设置。${RESET}"
+    # 禁用 Root 登录
+    read -p "$(echo -e ${YELLOW}${BOLD}"[?] 是否要尝试禁用 Root 账户通过 SSH 登录? (y/N): "${RESET})" disable_root_login
+    if [[ "$disable_root_login" =~ ^[Yy]$ ]]; then
+        echo -e "${BLUE}[+] 正在检查禁用 Root 登录的安全性...${RESET}"
+        # 查找 sudo 组中的非 root 用户
+        local sudo_users=$(getent group sudo | cut -d: -f4 | tr ',' '\n' | grep -v '^root$' || true)
+        # 也可以检查 /etc/sudoers.d/ 文件中的用户，但 getent group 更简单通用
+        if [ -z "$sudo_users" ]; then
+            # 如果没有找到其他 sudo 用户
+            echo -e "${RED}${BOLD}[✗] 安全检查失败!${RESET}${RED} 未找到其他具有 sudo 权限的用户。${RESET}"
+            echo -e "${RED}    为了防止您被锁定在服务器之外，脚本无法自动禁用 Root 登录。${RESET}"
+            echo -e "${YELLOW}    请先手动创建一个具有 sudo 权限的新用户，并确保可以使用该用户登录，然后再尝试禁用 Root 登录。${RESET}"
+            success=false # 阻止后续执行
+        else
+            # 找到其他 sudo 用户，进行二次确认
+            echo -e "${YELLOW}${BOLD}[!] 安全警告!${RESET}${YELLOW} 检测到以下可能具有 sudo 权限的用户:${RESET}"
+            echo -e "${CYAN}${sudo_users}${RESET}" # 列出找到的用户
+            echo -e "${YELLOW}    在禁用 Root 登录之前，${BOLD}请务必确认您可以使用上述至少一个用户通过 SSH 成功登录，并且该用户拥有 sudo 权限${RESET}${YELLOW}，否则您将无法管理服务器！${RESET}"
+            read -p "$(echo -e ${YELLOW}${BOLD}"[?] 您是否已确认并理解风险，确实要继续禁用 Root 登录? (y/N): "${RESET})" confirm_disable_root
+            if [[ "$confirm_disable_root" =~ ^[Yy]$ ]]; then
+                echo -e "${BLUE}[+] 设置 Root 禁止登录 (PermitRootLogin no)...${RESET}"
+                if ! grep -qE "^\s*PermitRootLogin\s+no" "$SSH_CONFIG_FILE"; then
+                    sed -i -E 's/^\s*#?\s*PermitRootLogin\s+.*/PermitRootLogin no/' "$SSH_CONFIG_FILE"
+                    if ! grep -qE "^\s*PermitRootLogin\s+no" "$SSH_CONFIG_FILE"; then
+                        echo "PermitRootLogin no" >> "$SSH_CONFIG_FILE"
+                    fi
+                    check_command_status "设置 PermitRootLogin no" || success=false
+                    changes_made=true
+                else
+                    echo -e "${BLUE}[-] PermitRootLogin 已设置为 no，无需修改。${RESET}"
+                fi
+            else
+                echo -e "${YELLOW}[-] 取消禁用 Root 登录。${RESET}"
+                # success 保持 true，允许继续执行后续 SSH 配置
+            fi
+        fi
+    else
+         echo -e "${BLUE}[i] 跳过禁用 Root 登录的设置。${RESET}"
+    fi
+    echo "---"
+
 
     # 禁用密码认证
-    if $success; then
+    if $success; then # 只有在前面的步骤没有明确失败时才继续
         read -p "$(echo -e ${YELLOW}${BOLD}"[?] 是否禁用 SSH 密码认证，强制使用密钥登录? (强烈推荐 'y') (y/N): "${RESET})" disable_password_auth
         if [[ "$disable_password_auth" =~ ^[Yy]$ ]]; then
             echo -e "${BLUE}[+] 禁用密码认证 (PasswordAuthentication no)...${RESET}"
+            local pw_auth_changed=false
             if ! grep -qE "^\s*PasswordAuthentication\s+no" "$SSH_CONFIG_FILE"; then
                 sed -i -E 's/^\s*#?\s*PasswordAuthentication\s+.*/PasswordAuthentication no/' "$SSH_CONFIG_FILE"
-                if ! grep -qE "^\s*PasswordAuthentication\s+no" "$SSH_CONFIG_FILE"; then # 如果 sed 没替换掉 (例如原先没有这行), 则追加
+                if ! grep -qE "^\s*PasswordAuthentication\s+no" "$SSH_CONFIG_FILE"; then
                    echo "PasswordAuthentication no" >> "$SSH_CONFIG_FILE"
                 fi
                 check_command_status "设置 PasswordAuthentication no" || success=false
                 changes_made=true
+                pw_auth_changed=true
             else
                 echo -e "${BLUE}[-] PasswordAuthentication 已设置为 no，无需修改。${RESET}"
             fi
 
             if $success; then
                  echo -e "${BLUE}[+] 禁用 ChallengeResponseAuthentication (no)...${RESET}"
+                 local chal_resp_changed=false
                  if ! grep -qE "^\s*#?\s*ChallengeResponseAuthentication\s+no" "$SSH_CONFIG_FILE"; then
                     sed -i -E 's/^\s*#?\s*ChallengeResponseAuthentication\s+.*/ChallengeResponseAuthentication no/' "$SSH_CONFIG_FILE"
                      if ! grep -qE "^\s*ChallengeResponseAuthentication\s+no" "$SSH_CONFIG_FILE"; then
@@ -428,14 +471,13 @@ secure_ssh() {
                      fi
                     check_command_status "设置 ChallengeResponseAuthentication no" || success=false
                     changes_made=true
+                    chal_resp_changed=true
                  else
                     echo -e "${BLUE}[-] ChallengeResponseAuthentication 已设置为 no，无需修改。${RESET}"
                  fi
             fi
-            if $success && $changes_made; then # 只有当真正修改了才提示
-                 if grep -qE "^\s*PasswordAuthentication\s+no" "$SSH_CONFIG_FILE" && grep -qE "^\s*ChallengeResponseAuthentication\s+no" "$SSH_CONFIG_FILE"; then
-                    echo -e "${GREEN}${BOLD}[✓] 已禁用密码认证。${YELLOW}请确保您已配置 SSH 密钥！${RESET}"
-                 fi
+            if $success && ($pw_auth_changed || $chal_resp_changed); then # 只有当真正修改了才提示
+                echo -e "${GREEN}${BOLD}[✓] 已禁用密码认证。${YELLOW}请确保您已配置 SSH 密钥！${RESET}"
             fi
         else
             echo -e "${YELLOW}[-] 跳过禁用密码认证。${BOLD}(为了安全，强烈建议使用密钥登录)${RESET}"
@@ -601,7 +643,7 @@ while true; do
     DETECTED_TCP_PORTS=""
     DETECTED_UDP_PORTS=""
 
-    echo -e "\n${BLUE}${BOLD}================= Linux 安全加固脚本 (v2.4) =================${RESET}"
+    echo -e "\n${BLUE}${BOLD}================= Linux 安全加固脚本 (v2.5) =================${RESET}"
     echo -e "${CYAN}请选择要执行的操作:${RESET}"
     echo -e " ${YELLOW}1.${RESET} 安装 UFW 和 Fail2ban (及依赖)"
     echo -e " ${YELLOW}2.${RESET} 配置 UFW 防火墙 (${RED}将重置现有规则${RESET})"
