@@ -200,12 +200,12 @@ configure_fail2ban() {
     echo "[+] 正在创建 $FAIL2BAN_JAIL_LOCAL..."
     cat > "$FAIL2BAN_JAIL_LOCAL" << EOF
 [DEFAULT]
-# 默认禁止时间（秒）
-bantime = 1h
+# 默认禁止时间
+bantime = 30d
 # 在多少时间内达到最大重试次数则封禁
-findtime = 10m
+findtime = 5m
 # 最大重试次数
-maxretry = 5
+maxretry = 3
 # 忽略的 IP 地址，可以是单个 IP、CIDR 或 DNS 主机名
 # 将当前 IP 加入白名单 (如果获取到)
 ignoreip = 127.0.0.1/8 ::1 ${CURRENT_IP:-}
