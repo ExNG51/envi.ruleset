@@ -89,6 +89,9 @@ DOMAIN-SUFFIX,emby.cjpc.cc
 # > 流媒体JH服务器
 DOMAIN-SUFFIX,film.reddust.link
 
+# > 流媒体SNTP服务器
+DOMAIN-SUFFIX,cn2gias.uk
+
 # > 流媒体MisakaF服务器
 DOMAIN-SUFFIX,misakaf.org  
 DOMAIN-SUFFIX,embyvip.misakaf.org
