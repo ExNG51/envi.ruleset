@@ -70,6 +70,12 @@ DOMAIN-SUFFIX,imo.im
 DOMAIN-SUFFIX,yy.com
 DOMAIN-SUFFIX,joyy.sg
 DOMAIN-SUFFIX,joyy.com
+DOMAIN-SUFFIX,ymcdn.net
+DOMAIN-SUFFIX,yystatic.com
+
+# Self-Owned Infrastructure
+IP-ASN,10122
+IP-ASN,38590
 
 # =========================================
 # Advanced Matching (Process & UA)
@@ -83,3 +89,11 @@ DOMAIN-KEYWORD,musical.ly
 # Bigo
 USER-AGENT,BigoLive*
 USER-AGENT,Bigo*
+DOMAIN-KEYWORD,bigo
+
+# Edge Network & CDNs (Aggressive Mode)
+# IP-ASN,21859
+# IP-ASN,199524
+# IP-ASN,29802
+# IP-ASN,40065
+# IP-ASN,60068
