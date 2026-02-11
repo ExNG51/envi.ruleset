@@ -34,6 +34,11 @@ Prompt_UserInput() {
     if [ -z "$Input_CronInterval" ]; then
         Input_CronInterval="5"
     fi
+
+    echo "------------------------------------------"
+    echo "[可选配置] Telegram 报警机器人 (不使用请直接回车跳过)"
+    read -p "请输入 Telegram Bot Token: " Input_TgToken
+    read -p "请输入 Telegram Chat ID: " Input_TgChatId
 }
 
 # 动态生成配置文件并写入目标路径
@@ -45,6 +50,8 @@ Generate_Configuration() {
 Config_ApiToken="${Input_ApiToken}"
 Config_ZoneId="${Input_ZoneId}"
 Config_DomainName="${Input_DomainName}"
+Config_TgToken="${Input_TgToken}"
+Config_TgChatId="${Input_TgChatId}"
 EOF
     # 保护敏感配置，仅限 root 读写
     chmod 600 "$Define_ConfigFile" 
@@ -68,7 +75,6 @@ Configure_CronJob() {
     local Cron_Expression="*/${Input_CronInterval} * * * * ${Define_CoreScriptPath} >/dev/null 2>&1"
     
     echo "[信息] 正在配置系统定时任务..."
-    # 移除旧的同名任务以防重复，并添加新任务
     (crontab -l 2>/dev/null | grep -v "$Define_CoreScriptPath"; echo "$Cron_Expression") | crontab -
     
     echo "=========================================="
@@ -86,6 +92,5 @@ Generate_Configuration
 Deploy_CoreScript
 Configure_CronJob
 
-# 立即触发一次初次运行以验证配置
 echo "[信息] 正在首次运行 DDNS 同步脚本..."
 $Define_CoreScriptPath
