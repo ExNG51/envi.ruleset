@@ -6,8 +6,7 @@
 
 # --- 版本与路径定义 ---
 Define_ScriptVersion="1.0.0"
-# [重要] 替换为 sync_cloudflare_ddns.sh 的真实 Raw 链接
-Define_UpdateUrl="https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/sync_cloudflare_ddns.sh"
+Define_UpdateUrl="https://raw.githubusercontent.com/ExNG51/envi.ruleset/refs/heads/main/vps/install_cloudflare_ddns.sh"
 Define_ConfigFile="/usr/local/etc/config_cloudflare_ddns.conf"
 Define_SelfPath="/usr/local/bin/sync_cloudflare_ddns.sh"
 
