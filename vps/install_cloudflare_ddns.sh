@@ -7,8 +7,7 @@
 # --- 路径与 URL 定义 ---
 Define_ConfigFile="/usr/local/etc/config_cloudflare_ddns.conf"
 Define_CoreScriptPath="/usr/local/bin/sync_cloudflare_ddns.sh"
-# [重要] 替换为 sync_cloudflare_ddns.sh 的真实 Raw 链接
-Define_CoreScriptUrl="https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/sync_cloudflare_ddns.sh"
+Define_CoreScriptUrl="https://raw.githubusercontent.com/ExNG51/envi.ruleset/refs/heads/main/vps/sync_cloudflare_ddns.sh"
 
 # 验证当前执行环境是否具备管理员权限
 Verify_RootAccess() {
