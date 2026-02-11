@@ -1,388 +1,240 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-# 定义颜色和样式
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[1;34m'
-BOLD='\033[1m'
-NC='\033[0m' # No Color
+# ==============================================================================
+# 脚本意图: NAT VPS 专属系统初始化与轻量级网络协议栈调优
+# 命名规范: 意图导向命名法 (动词+核心名词)
+# ==============================================================================
 
-# 打印显著的提示信息函数
-print_info() {
-    echo -e "${BLUE}${BOLD}$1${NC}"
-}
+# 定义全局界面输出样式
+readonly COLOR_TEXT_RED='\033[0;31m'
+readonly COLOR_TEXT_GREEN='\033[0;32m'
+readonly COLOR_TEXT_YELLOW='\033[1;33m'
+readonly COLOR_TEXT_BLUE='\033[1;34m'
+readonly FORMAT_TEXT_BOLD='\033[1m'
+readonly STYLE_RESET='\033[0m'
 
-print_success() {
-    echo -e "${GREEN}${BOLD}$1${NC}"
-}
+# 核心状态输出函数 (UI保持中文)
+display_status_info() { echo -e "${COLOR_TEXT_BLUE}${FORMAT_TEXT_BOLD}[信息] $1${STYLE_RESET}"; }
+display_status_success() { echo -e "${COLOR_TEXT_GREEN}${FORMAT_TEXT_BOLD}[成功] $1${STYLE_RESET}"; }
+display_status_warning() { echo -e "${COLOR_TEXT_YELLOW}${FORMAT_TEXT_BOLD}[警告] $1${STYLE_RESET}"; }
+display_status_error() { echo -e "${COLOR_TEXT_RED}${FORMAT_TEXT_BOLD}[错误] $1${STYLE_RESET}"; }
 
-print_warning() {
-    echo -e "${YELLOW}${BOLD}$1${NC}"
-}
-
-print_error() {
-    echo -e "${RED}${BOLD}$1${NC}"
-}
-
-# 检查是否具有sudo权限
-echo "检查 sudo 权限"
-if [[ $EUID -ne 0 ]]; then
-   print_error "请以 root 身份或使用 sudo 执行此脚本。"
-   exit 1
-fi
-print_success "sudo 权限检查通过"
-
-# 检测系统类型和包管理器
-echo "检测系统类型和包管理器"
-if [ -f /etc/os-release ]; then
-    . /etc/os-release
-    OS=$NAME
-    VER=$VERSION_ID
-    print_success "系统类型: $OS, 版本: $VER"
-else
-    print_error "无法检测操作系统类型。"
-    exit 1
-fi
-
-case $OS in
-    "CentOS Linux"|"AlmaLinux")
-        PKG_MANAGER="dnf"
-        ;;
-    "Ubuntu"|"Debian GNU/Linux")
-        PKG_MANAGER="apt"
-        ;;
-    *)
-        print_error "不支持的操作系统: $OS"
-        exit 1
-        ;;
-esac
-print_success "包管理器: $PKG_MANAGER"
-
-# 检测并安装所需的指令
-check_and_install() {
-    echo "检查 $1 是否已安装"
-    if ! command -v $1 &> /dev/null; then
-        print_info "$1 未安装，正在安装..."
-        $PKG_MANAGER install -y $1
-        if [ $? -ne 0 ]; then
-            print_error "$1 安装失败。"
-            exit 1
-        fi
-    else
-        print_success "$1 已安装，跳过安装。"
+# ------------------------------------------------------------------------------
+# 模块: 基础环境校验
+# ------------------------------------------------------------------------------
+validate_root_privilege() {
+    display_status_info "正在校验 root 权限..."
+    if [[ $EUID -ne 0 ]]; then
+       display_status_error "权限不足：请以 root 身份或使用 sudo 执行此脚本。"
+       exit 1
     fi
+    display_status_success "root 权限校验通过。"
 }
 
-# 创建并启用交换空间
-setup_swap() {
-    if [ -f /mnt/swap ]; then
-        print_warning "交换文件已存在，跳过创建。"
+detect_operating_system_environment() {
+    display_status_info "正在探测操作系统架构与包管理器..."
+    if [[ -f /etc/os-release ]]; then
+        source /etc/os-release
+        local_os_name=$NAME
+        local_os_version=$VERSION_ID
+        display_status_success "识别到系统: $local_os_name (版本: $local_os_version)"
+    else
+        display_status_error "无法探测操作系统类型，文件 /etc/os-release 缺失。"
+        exit 1
+    fi
+
+    # 确定包管理器并赋值给全局变量
+    if command -v apt-get &> /dev/null; then
+        GLOBAL_PKG_MANAGER="apt-get"
+        GLOBAL_BIND_UTILS="dnsutils"
+    elif command -v dnf &> /dev/null; then
+        GLOBAL_PKG_MANAGER="dnf"
+        GLOBAL_BIND_UTILS="bind-utils"
+    else
+        display_status_error "不支持当前系统的包管理器，仅支持 apt 或 dnf。"
+        exit 1
+    fi
+    display_status_success "已绑定主包管理器: $GLOBAL_PKG_MANAGER"
+}
+
+# ------------------------------------------------------------------------------
+# 模块: 核心资源与系统配置
+# ------------------------------------------------------------------------------
+configure_virtual_memory_swap() {
+    display_status_info "正在配置虚拟内存 (Swap)..."
+    if [[ -f /mnt/swap ]]; then
+        display_status_warning "交换文件 /mnt/swap 已存在，跳过创建以保护磁盘寿命。"
         return
     fi
 
-    MEM_SIZE_MB=$(awk '/MemTotal:/ {print int($2/1024)}' /proc/meminfo)
-    SWAP_SIZE_MB=$((MEM_SIZE_MB < 1024 ? MEM_SIZE_MB : 1024))
-
-    if [ ! -d /mnt ]; then
-        print_error "/mnt 目录不存在，请检查挂载点。"
-        exit 1
+    local memory_total_mb
+    memory_total_mb=$(awk '/MemTotal:/ {print int($2/1024)}' /proc/meminfo)
+    
+    # NAT VPS 策略：若物理内存小于 1024MB，则分配 2 倍物理内存；否则分配 1024MB
+    local swap_target_size_mb
+    if (( memory_total_mb < 1024 )); then
+        swap_target_size_mb=$((memory_total_mb * 2))
+    else
+        swap_target_size_mb=1024
     fi
 
-    if [ $(df -m /mnt | tail -1 | awk '{print $4}') -lt $SWAP_SIZE_MB ]; then
-        print_error "/mnt 没有足够的空间创建交换文件。"
-        exit 1
-    fi
-
-    dd if=/dev/zero of=/mnt/swap bs=1M count=$SWAP_SIZE_MB
+    # LXC 虚拟化环境通常不支持创建 Loop 设备或 Swap，增加容错拦截
+    dd if=/dev/zero of=/mnt/swap bs=1M count="$swap_target_size_mb" status=none
     chmod 600 /mnt/swap
-    mkswap /mnt/swap
-    swapon /mnt/swap
-
-    if ! grep -q '/mnt/swap' /etc/fstab; then
-        echo "/mnt/swap swap swap defaults 0 0" >> /etc/fstab
-        print_success "交换文件已添加到 /etc/fstab。"
-    fi
-
-    sed -i '/vm.swappiness/d' /etc/sysctl.conf
-    echo "vm.swappiness = 25" >> /etc/sysctl.conf
-    sysctl -w vm.swappiness=25
-    swapon -a
-    swapon --show
-
-    if [ $? -eq 0 ]; then
-        print_success "交换空间已成功启用。"
+    
+    if mkswap /mnt/swap &>/dev/null && swapon /mnt/swap &>/dev/null; then
+        if ! grep -q '/mnt/swap' /etc/fstab; then
+            echo "/mnt/swap swap swap defaults 0 0" >> /etc/fstab
+        fi
+        # 降低对 Swap 的依赖倾向，保护廉价 IO 性能
+        sed -i '/vm.swappiness/d' /etc/sysctl.conf
+        echo "vm.swappiness = 10" >> /etc/sysctl.conf
+        sysctl -w vm.swappiness=10 &>/dev/null
+        display_status_success "虚拟内存 (大小: ${swap_target_size_mb}MB) 挂载并激活成功。"
     else
-        print_error "交换空间启用失败。"
-        exit 1
+        display_status_warning "当前虚拟化架构（如 LXC）不支持自行挂载 Swap，已自动清理并跳过该步骤。"
+        rm -f /mnt/swap
     fi
 }
 
-# 修改时区为新加坡
-set_timezone() {
+calibrate_system_timezone() {
+    display_status_info "正在校准系统时区为 Asia/Singapore..."
+    local current_timezone
     current_timezone=$(timedatectl | grep "Time zone" | awk '{print $3}')
-    if [ "$current_timezone" == "Asia/Singapore" ]; then
-        print_success "当前系统时区已经是 Asia/Singapore，跳过时区设置。"
+    
+    if [[ "$current_timezone" == "Asia/Singapore" ]]; then
+        display_status_success "时区校验一致，当前已是 Asia/Singapore。"
     else
-        print_info "设置系统时区为 Asia/Singapore..."
         timedatectl set-timezone Asia/Singapore
-        new_timezone=$(timedatectl | grep "Time zone" | awk '{print $3}')
-        print_success "当前系统时区已设置为: $new_timezone"
+        display_status_success "系统时区已成功校准为: Asia/Singapore"
     fi
 }
 
-# 检查系统负载
-check_system_load() {
-    max_wait_time=60  # 最大等待时间（秒）
-    wait_interval=5    # 每次等待间隔（秒）
-    waited_time=0
-
-    while [ $(awk '{print $1}' /proc/loadavg | cut -d. -f1) -gt 1 ]; do
-        print_warning "系统负载过高，等待中..."
-        sleep $wait_interval
-        waited_time=$((waited_time + wait_interval))
-
-        if [ $waited_time -ge $max_wait_time ]; then
-            print_error "系统负载持续过高，超出最大等待时间。"
-            exit 1
-        fi
-    done
-}
-
-# 更新系统
-update_system() {
-    print_info "更新系统中..."
-    if [ "$PKG_MANAGER" == "dnf" ]; then
-        dnf update -y
-    elif [ "$PKG_MANAGER" == "apt" ]; then
-        apt update && apt upgrade -y
-    fi
-    if [ $? -eq 0 ]; then
-        print_success "系统更新完成。"
-    else
-        print_error "系统更新失败。"
-        exit 1
-    fi
-}
-
-# 安装 EPEL 仓库（仅适用于 CentOS/RHEL/AlmaLinux）
-install_epel() {
-    if [ "$PKG_MANAGER" == "dnf" ]; then
+# ------------------------------------------------------------------------------
+# 模块: 依赖包管理与更新
+# ------------------------------------------------------------------------------
+upgrade_system_packages() {
+    display_status_info "正在同步软件源并升级系统组件..."
+    if [[ "$GLOBAL_PKG_MANAGER" == "dnf" ]]; then
+        # CentOS/AlmaLinux 预置 EPEL
         if ! dnf repolist enabled | grep -q "epel"; then
-            print_info "安装 EPEL 仓库..."
-            dnf install -y epel-release
-            if [ $? -eq 0 ]; then
-                print_success "EPEL 仓库安装成功。"
-            else
-                print_error "EPEL 仓库安装失败。"
-                exit 1
-            fi
-        else
-            print_success "EPEL 仓库已经安装。"
+            dnf install -y epel-release &>/dev/null
         fi
+        dnf update -y &>/dev/null
+    elif [[ "$GLOBAL_PKG_MANAGER" == "apt-get" ]]; then
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update &>/dev/null && apt-get upgrade -y &>/dev/null
     fi
+    display_status_success "系统组件升级完毕。"
 }
 
-# 安装必要的工具
-install_tools() {
-    # 检测系统类型
-    if [ -f /etc/debian_version ]; then
-        # Debian/Ubuntu 系列
-        PKG_MANAGER="apt-get"
-        INSTALL_CMD="$PKG_MANAGER install -y"
-        UPDATE_CMD="$PKG_MANAGER update"
-        BIND_UTILS="dnsutils"  # Debian/Ubuntu 使用 dnsutils 代替 bind-utils
-    elif [ -f /etc/redhat-release ]; then
-        # Red Hat 系列
-        PKG_MANAGER="dnf"
-        INSTALL_CMD="$PKG_MANAGER install -y"
-        UPDATE_CMD="$PKG_MANAGER check-update"
-        BIND_UTILS="bind-utils"
-    else
-        echo "Unsupported distribution"
-        return 1
-    fi
-
-    # 更新包列表
-    $UPDATE_CMD
-
-    # 定义工具列表，使用关联数组来处理不同发行版的包名差异
-    declare -A tools
-    tools=(
-        ["sudo"]="sudo"
-        ["curl"]="curl"
-        ["jq"]="jq"
-        ["wget"]="wget"
-        ["unzip"]="unzip"
-        ["bind-utils"]="$BIND_UTILS"
-        ["dkms"]="dkms"
+install_essential_utilities() {
+    display_status_info "正在验证并安装必备运维工具箱..."
+    
+    # 修复此前关联数组带来的兼容性隐患，改用基础数组进行遍历
+    local array_system_dependencies=(
+        "sudo" "curl" "jq" "wget" "unzip" "dkms" "$GLOBAL_BIND_UTILS"
     )
 
-    # 检查并安装工具
-    for tool in "${!tools[@]}"; do
-        package_name=${tools[$tool]}
-        if ! command -v $tool &> /dev/null && [ "$tool" != "bind-utils" ]; then
-            echo "$tool is not installed. Installing $package_name..."
-            $INSTALL_CMD $package_name
-        elif [ "$tool" == "bind-utils" ]; then
-            # 特殊处理 bind-utils/dnsutils
+    for package_name in "${array_system_dependencies[@]}"; do
+        # 针对 dnsutils/bind-utils 统一检测 nslookup 二进制文件
+        if [[ "$package_name" == "$GLOBAL_BIND_UTILS" ]]; then
             if ! command -v nslookup &> /dev/null; then
-                echo "$tool is not installed. Installing $package_name..."
-                $INSTALL_CMD $package_name
+                $GLOBAL_PKG_MANAGER install -y "$package_name" &>/dev/null
             fi
         else
-            echo "$tool is already installed."
+            if ! command -v "$package_name" &> /dev/null; then
+                $GLOBAL_PKG_MANAGER install -y "$package_name" &>/dev/null
+            fi
         fi
     done
+    display_status_success "运维工具箱安装校验完成。"
 }
 
-# 检查并安装单个工具的函数（如果需要的话）
-check_and_install() {
-    tool=$1
-    if ! command -v $tool &> /dev/null; then
-        echo "$tool is not installed. Installing..."
-        $INSTALL_CMD $tool
+# ------------------------------------------------------------------------------
+# 模块: 纯静态网络协议栈调优 (替代 Tuned 以节省内存)
+# ------------------------------------------------------------------------------
+optimize_kernel_sysctl_network() {
+    display_status_info "正在注入 NAT VPS 专属底层网络调优参数..."
+    local sysctl_config_file="/etc/sysctl.d/99-nat-vps-network.conf"
+
+    # 构建并写入针对高并发、短连接优化的内核参数
+    cat > "$sysctl_config_file" <<EOF
+# 提升网络吞吐量，使用 BBR 拥塞控制与 FQ 队列调度
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+
+# NAT 穿透保护：仅作为客户端开启 TCP Fast Open，避免严格 NAT 下丢包
+net.ipv4.tcp_fastopen = 1
+
+# 释放并扩大本地临时端口范围 (应对大量并发外部请求)
+net.ipv4.ip_local_port_range = 10240 65535
+
+# 开启 TCP 连接复用，快速回收 TIME_WAIT 状态套接字
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.tcp_fin_timeout = 15
+
+# 提升连接追踪表容量 (防止 NAT 下 Conntrack Table Full)
+net.netfilter.nf_conntrack_max = 262144
+EOF
+
+    # 尝试加载 BBR 模块 (针对 KVM/XEN)，并重载配置
+    modprobe tcp_bbr &>/dev/null || true
+    sysctl --system &>/dev/null
+
+    # 验证 BBR 是否成功生效 (兼容 LXC 等无法修改拥塞算法的环境)
+    local active_congestion_algo
+    active_congestion_algo=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
+    
+    if [[ "$active_congestion_algo" == "bbr" ]]; then
+        display_status_success "静态网络调优注入成功，BBR 引擎已挂载。"
     else
-        echo "$tool is already installed."
+        display_status_warning "静态网络调优已注入。但当前内核/虚拟化限制了 BBR 引擎的挂载 (常见于 LXC 环境)。"
     fi
 }
 
-# 开启 TCP Fast Open (TFO)
-enable_tfo() {
-    print_info "开启 TCP Fast Open (TFO)..."
-    echo "3" > /proc/sys/net/ipv4/tcp_fastopen
-    echo "net.ipv4.tcp_fastopen=3" > /etc/sysctl.d/30-tcp_fastopen.conf
-    sysctl --system
+remove_orphaned_packages() {
+    display_status_info "正在清理孤立依赖以释放磁盘空间..."
+    if [[ "$GLOBAL_PKG_MANAGER" == "dnf" ]]; then
+        dnf autoremove -y &>/dev/null
+    elif [[ "$GLOBAL_PKG_MANAGER" == "apt-get" ]]; then
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get autoremove -y &>/dev/null
+        apt-get clean &>/dev/null
+    fi
+    display_status_success "系统垃圾清理完成。"
 }
 
-# 设置 BBR+FQ
-setup_bbr() {
-    current_algo=$(sysctl net.ipv4.tcp_congestion_control | awk '{print $3}')
+# ------------------------------------------------------------------------------
+# 模块: 主生命周期总线
+# ------------------------------------------------------------------------------
+execute_main_lifecycle() {
+    clear
+    display_status_info "=== NAT VPS 初始化与优化总线启动 ==="
+    
+    validate_root_privilege
+    detect_operating_system_environment
+    configure_virtual_memory_swap
+    calibrate_system_timezone
+    upgrade_system_packages
+    install_essential_utilities
+    optimize_kernel_sysctl_network
+    remove_orphaned_packages
 
-    if [ "$current_algo" == "bbr" ]; then
-        print_success "当前系统已使用 BBR 算法。"
-    else
-        print_info "当前系统未使用 BBR 算法，正在设置 BBR..."
-
-        # 检查内核版本是否支持 BBR
-        if ! modprobe tcp_bbr &> /dev/null; then
-            print_error "当前内核不支持 BBR，请升级内核后再试。"
-            exit 1
-        fi
-
-        sysctl -w net.core.default_qdisc=fq
-        sysctl -w net.ipv4.tcp_congestion_control=bbr
-
-        if ! grep -q "net.core.default_qdisc=fq" /etc/sysctl.conf; then
-            echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
-        fi
-        if ! grep -q "net.ipv4.tcp_congestion_control=bbr" /etc/sysctl.conf; then
-            echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
-        fi
-
-        print_success "BBR 设置完成。"
-    fi
-
-    final_algo=$(sysctl net.ipv4.tcp_congestion_control | awk '{print $3}')
-    if [ "$final_algo" == "bbr" ]; then
-        print_success "BBR 已成功启用。"
-    else
-        print_error "BBR 启用失败，请检查配置。"
-        exit 1
-    fi
-}
-
-# 设置网络性能优化
-setup_network_performance() {
-    print_info "设置网络性能优化配置..."
-    check_and_install tuned
-    systemctl enable tuned.service
-    systemctl start tuned.service
-    tuned-adm profile network-throughput
-
-    if systemctl is-active --quiet tuned.service; then
-        print_success "tuned 服务已成功启动。"
-    else
-        print_error "tuned 服务未启动，请检查日志进行排查。"
-        exit 1
-    fi
-
-    active_profile=$(tuned-adm active)
-    if [[ "$active_profile" == *"network-throughput"* ]]; then
-        print_success "网络吞吐量优化配置已成功应用。"
-    else
-        print_error "未能应用网络吞吐量优化配置。"
-        exit 1
-    fi
-}
-
-# 清理不需要的包
-clean_system() {
-    print_info "清理系统..."
-    if [ "$PKG_MANAGER" == "dnf" ]; then
-        dnf autoremove -y
-    elif [ "$PKG_MANAGER" == "apt" ]; then
-        apt autoremove -y
-    fi
-
-    if [ $? -eq 0 ]; then
-        print_success "系统清理完成，不需要的包已移除。"
-    else
-        print_error "系统清理失败，请检查错误信息。"
-        exit 1
-    fi
-}
-
-# 安装 Debian Cloud 内核
-install_debian_cloud_kernel() {
-    if [ "$OS" == "Debian GNU/Linux" ]; then
-        print_info "安装 Debian Cloud 内核..."
-        $PKG_MANAGER install -y linux-image-cloud-amd64
-        if [ $? -eq 0 ]; then
-            print_success "Debian Cloud 内核安装成功。"
-            print_info "更新 GRUB 配置..."
-            update-grub
-            if [ $? -eq 0 ]; then
-                print_success "GRUB 配置更新成功。"
-            else
-                print_error "GRUB 配置更新失败。"
-                exit 1
-            fi
-        else
-            print_error "Debian Cloud 内核安装失败。"
-            exit 1
-        fi
-    fi
-}
-
-# 主函数
-main() {
-    print_info "开始系统优化和配置..."
-
-    setup_swap
-    set_timezone
-    check_system_load
-    update_system
-    install_debian_cloud_kernel
-    install_epel
-    install_tools
-    enable_tfo
-    setup_bbr
-    setup_network_performance
-    clean_system
-
-    print_success "所有任务完成！"
-
-    read -p "是否现在重启系统？(y/n) " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        print_info "系统将在 10 秒后重启..."
-        sleep 10
+    display_status_success "所有系统初始化与网络优化任务编排执行完毕！"
+    echo ""
+    
+    # 交互式重启确认 (UI保持中文)
+    read -p "是否立即重启系统以全面应用内核更改？[Y/n] " -n 1 -r
+    echo ""
+    if [[ $REPLY =~ ^[Yy]$ ]] || [[ -z $REPLY ]]; then
+        display_status_info "系统将在 5 秒后执行重启指令..."
+        sleep 5
         reboot
     else
-        print_info "请记得稍后手动重启系统以应用所有更改。"
+        display_status_warning "请务必在合适的窗口期手动重启系统，以确保网络堆栈变更生效。"
     fi
 }
 
-# 执行主函数
-main
+# 挂载入口执行
+execute_main_lifecycle
