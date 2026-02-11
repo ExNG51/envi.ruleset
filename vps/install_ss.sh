@@ -17,6 +17,7 @@ Print_Info() { echo -e "${Define_ColorCyan}[信息]${Define_ColorReset} $1"; }
 Print_Success() { echo -e "${Define_ColorGreen}[成功]${Define_ColorReset} $1"; }
 Print_Warning() { echo -e "${Define_ColorYellow}[警告]${Define_ColorReset} $1"; }
 Print_Error() { echo -e "${Define_ColorRed}[错误]${Define_ColorReset} $1"; }
+Print_Prompt() { echo -e "${Define_ColorYellow}[交互]${Define_ColorReset} $1 \c"; }
 
 # ==========================================
 # 2. 全局状态与路径定义
@@ -26,8 +27,7 @@ State_PackageManager="unknown"
 Config_InstallPath="/opt/ss-rust"
 Config_SystemdPath="/etc/systemd/system/ss-rust.service"
 Config_OpenrcPath="/etc/init.d/ss-rust"
-# 兜底版本号：仅在 GitHub API 触碰限流阈值时启用，防阻断
-Config_FallbackVersion="1.24.0" 
+Config_FallbackVersion="1.24.0" # 当 GitHub API 受限时的回退版本
 
 # ==========================================
 # 3. 基础环境校验模块
@@ -93,7 +93,6 @@ Install_SystemDependencies() {
 # 4. 核心功能：获取、安全更新与卸载模块
 # ==========================================
 Fetch_LatestVersion() {
-    # 修复核心：将 UI 提示重定向到标准错误流 (>&2)，防止污染版本号变量
     Print_Info "正在向 GitHub 请求最新版本号..." >&2
     local Fetched_Version=$(curl -s -m 5 https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/latest | grep '"tag_name":' | sed -E 's/.*"v([^"]+)".*/\1/')
     if [ -z "$Fetched_Version" ]; then
@@ -192,19 +191,54 @@ Configure_SecurityRules() {
     local Inject_Port=$1
     local Inject_Psk=$2
 
+    # --- 交互式端口配置 ---
     if [ -z "$Inject_Port" ]; then
-        while true; do
-            Inject_Port=$(shuf -i 10000-60000 -n 1)
-            if ! netstat -tuln | grep -q ":$Inject_Port "; then break; fi
-        done
-        Print_Info "未指定端口，已分配随机安全端口: ${Define_ColorYellow}${Inject_Port}${Define_ColorReset}"
+        Print_Prompt "是否需要手动指定监听端口？(NAT VPS 推荐手动指定) [y/N]: "
+        read Confirm_Port
+        if [[ "$Confirm_Port" =~ ^[Yy]$ ]]; then
+            while true; do
+                read -p "请输入指定端口 (1-65535): " Input_ManualPort
+                if [[ "$Input_ManualPort" =~ ^[0-9]+$ ]] && [ "$Input_ManualPort" -ge 1 ] && [ "$Input_ManualPort" -le 65535 ]; then
+                    if ! netstat -tuln | grep -q ":$Input_ManualPort "; then
+                        Inject_Port="$Input_ManualPort"
+                        break
+                    else
+                        Print_Error "端口 $Input_ManualPort 已被占用，请更换其他端口。"
+                    fi
+                else
+                    Print_Error "无效的端口号，请输入 1-65535 之间的数字。"
+                fi
+            done
+        else
+            while true; do
+                Inject_Port=$(shuf -i 10000-60000 -n 1)
+                if ! netstat -tuln | grep -q ":$Inject_Port "; then break; fi
+            done
+            Print_Info "未手动指定，已分配随机安全端口: ${Define_ColorYellow}${Inject_Port}${Define_ColorReset}"
+        fi
     fi
 
+    # --- 交互式密钥配置 ---
     if [ -z "$Inject_Psk" ]; then
-        Inject_Psk=$(openssl rand -base64 16)
-        Print_Info "未指定密码，已生成强加密密钥。"
+        Print_Prompt "是否需要手动指定连接密码？(默认将自动生成高强度密钥) [y/N]: "
+        read Confirm_Psk
+        if [[ "$Confirm_Psk" =~ ^[Yy]$ ]]; then
+            while true; do
+                read -p "请输入自定义密码: " Input_ManualPsk
+                if [ -n "$Input_ManualPsk" ]; then
+                    Inject_Psk="$Input_ManualPsk"
+                    break
+                else
+                    Print_Error "密码不能为空，请重新输入。"
+                fi
+            done
+        else
+            Inject_Psk=$(openssl rand -base64 16)
+            Print_Info "已自动生成强加密密钥。"
+        fi
     fi
 
+    # 写入配置文件
     cat >|"$Config_InstallPath/config.json" <<EOF
 {
     "server": "::",
@@ -215,6 +249,7 @@ Configure_SecurityRules() {
 }
 EOF
 
+    # 权限锁定
     chown nobody "$Config_InstallPath/config.json" 2>/dev/null || true
     chmod 400 "$Config_InstallPath/config.json"
     Print_Success "配置文件权限已被锁定 (chmod 400)。"
