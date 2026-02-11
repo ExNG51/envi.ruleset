@@ -26,7 +26,8 @@ State_PackageManager="unknown"
 Config_InstallPath="/opt/ss-rust"
 Config_SystemdPath="/etc/systemd/system/ss-rust.service"
 Config_OpenrcPath="/etc/init.d/ss-rust"
-Config_FallbackVersion="1.23.0" # 当 GitHub API 受限时的回退版本
+# 兜底版本号：仅在 GitHub API 触碰限流阈值时启用，防阻断
+Config_FallbackVersion="1.24.0" 
 
 # ==========================================
 # 3. 基础环境校验模块
@@ -70,7 +71,6 @@ Detect_PackageManager() {
 
 Install_SystemDependencies() {
     Print_Info "正在检查并安装必要的系统依赖 (包含 CA 根证书)..."
-    # 新增 ca-certificates 确保 TLS 校验的合法性
     local Required_Packages=(wget tar openssl curl net-tools ca-certificates)
     
     if [ "$State_PackageManager" = "apk" ] || [ "$State_PackageManager" = "yum" ] || [ "$State_PackageManager" = "dnf" ]; then
@@ -93,10 +93,11 @@ Install_SystemDependencies() {
 # 4. 核心功能：获取、安全更新与卸载模块
 # ==========================================
 Fetch_LatestVersion() {
-    Print_Info "正在向 GitHub 请求最新版本号..."
+    # 修复核心：将 UI 提示重定向到标准错误流 (>&2)，防止污染版本号变量
+    Print_Info "正在向 GitHub 请求最新版本号..." >&2
     local Fetched_Version=$(curl -s -m 5 https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/latest | grep '"tag_name":' | sed -E 's/.*"v([^"]+)".*/\1/')
     if [ -z "$Fetched_Version" ]; then
-        Print_Warning "获取最新版本失败 (API 速率限制)，安全回退至稳定版 v${Config_FallbackVersion}"
+        Print_Warning "获取最新版本失败 (API 速率限制)，安全回退至稳定版 v${Config_FallbackVersion}" >&2
         echo "$Config_FallbackVersion"
     else
         echo "$Fetched_Version"
@@ -112,13 +113,13 @@ Generate_DownloadUrl() {
         case $System_Arch in
             x86_64) Package_Name="shadowsocks-v${Inject_Version}.x86_64-unknown-linux-musl.tar.xz" ;;
             aarch64) Package_Name="shadowsocks-v${Inject_Version}.aarch64-unknown-linux-musl.tar.xz" ;;
-            *) Print_Error "不支持的系统架构: $System_Arch"; exit 1 ;;
+            *) Print_Error "不支持的系统架构: $System_Arch" >&2; exit 1 ;;
         esac
     else
         case $System_Arch in
             x86_64) Package_Name="shadowsocks-v${Inject_Version}.x86_64-unknown-linux-gnu.tar.xz" ;;
             aarch64) Package_Name="shadowsocks-v${Inject_Version}.aarch64-unknown-linux-gnu.tar.xz" ;;
-            *) Print_Error "不支持的系统架构: $System_Arch"; exit 1 ;;
+            *) Print_Error "不支持的系统架构: $System_Arch" >&2; exit 1 ;;
         esac
     fi
     echo "https://github.com/shadowsocks/shadowsocks-rust/releases/download/v${Inject_Version}/${Package_Name}"
@@ -138,7 +139,6 @@ Execute_CoreUpdate() {
     mkdir -p "$Temp_Dir" && cd "$Temp_Dir" || exit 1
 
     Print_Info "正在通过强制 TLS 下载核心组件..."
-    # 安全加固：强制 HTTPS 与 TLSv1.2 以上协议，防中间人劫持
     if ! wget --secure-protocol=TLSv1_2 --https-only -q --show-progress "$Download_Url"; then
         Print_Error "核心包下载失败或证书校验不通过，更新已中止以保护现有服务。"
         rm -rf "$Temp_Dir"
@@ -205,7 +205,6 @@ Configure_SecurityRules() {
         Print_Info "未指定密码，已生成强加密密钥。"
     fi
 
-    # 写入配置文件
     cat >|"$Config_InstallPath/config.json" <<EOF
 {
     "server": "::",
@@ -216,8 +215,6 @@ Configure_SecurityRules() {
 }
 EOF
 
-    # 安全加固：锁定文件权限，防越权读取
-    # 将所有权交接给 nobody（跨平台低权限标准账户），并设置为仅 owner 可读 (400)
     chown nobody "$Config_InstallPath/config.json" 2>/dev/null || true
     chmod 400 "$Config_InstallPath/config.json"
     Print_Success "配置文件权限已被锁定 (chmod 400)。"
@@ -236,9 +233,7 @@ After=network.target
 
 [Service]
 Type=simple
-# 安全加固：剥夺 Root 权限，使用系统默认的低权限账户 nobody 运行
 User=nobody
-# 赋予 nobody 绑定 1024 以下低位端口的特权（如果配置了低端口的话）
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 ExecStart=$Config_InstallPath/ssserver -c $Config_InstallPath/config.json
 Restart=on-failure
@@ -255,7 +250,6 @@ EOF
 #!/sbin/openrc-run
 
 name="Shadowsocks Rust Secure Server"
-# 安全加固：在 Alpine 体系下同样降权为 nobody 运行
 command_user="nobody"
 command="$Config_InstallPath/ssserver"
 command_args="-c $Config_InstallPath/config.json"
@@ -280,7 +274,6 @@ Deploy_ShadowsocksServer() {
     local Input_Port=$1
     local Input_Psk=$2
 
-    # 拦截误触
     if [ -d "$Config_InstallPath" ]; then
         Print_Warning "检测到系统已安装 Shadowsocks-Rust。"
         read -p "是否要覆盖重装并清除原有配置？(y/N): " Confirm_Overwrite
@@ -292,13 +285,13 @@ Deploy_ShadowsocksServer() {
     fi
 
     Install_SystemDependencies
+    
     local Target_Version=$(Fetch_LatestVersion)
     local Download_Url=$(Generate_DownloadUrl "$Target_Version")
     
     mkdir -p "$Config_InstallPath" && cd "$Config_InstallPath" || exit 1
     Print_Info "正在通过强制 TLS 下载 v${Target_Version} 核心包..."
     
-    # 安全加固下载
     if ! wget --secure-protocol=TLSv1_2 --https-only -q --show-progress "$Download_Url"; then
         Print_Error "核心包下载失败或证书不安全，部署中止。"
         rm -rf "$Config_InstallPath"
@@ -315,8 +308,8 @@ Deploy_ShadowsocksServer() {
     local Server_Ip=$(curl -s -m 5 -4 http://api.ipify.org || curl -s -m 5 -6 https://api64.ipify.org)
     
     echo "=========================================================="
-    Print_Success "企业级高可用 Shadowsocks-Rust 部署完毕！"
-    echo -e "${Define_ColorCyan}节点连接信息 (Surge 格式):${Define_ColorReset}"
+    Print_Success "Shadowsocks-Rust 部署完毕！"
+    echo -e "${Define_ColorCyan}节点连接信息:${Define_ColorReset}"
     echo -e "${Define_ColorYellow}$(hostname) = ss, ${Server_Ip}, ${Node_Port}, encrypt-method=2022-blake3-aes-128-gcm, password=${Node_Psk}, udp-relay=true${Define_ColorReset}"
     echo "=========================================================="
 }
@@ -360,4 +353,5 @@ while [ "$#" -gt 0 ]; do
     esac
     shift
 done
+
 Deploy_ShadowsocksServer "$User_Port" "$User_Psk"
