@@ -6,7 +6,7 @@
 # ==========================================
 
 # --- 版本与路径定义 ---
-Define_ScriptVersion="1.2.0" 
+Define_ScriptVersion="1.2.1" 
 Define_UpdateUrl="https://raw.githubusercontent.com/ExNG51/envi.ruleset/refs/heads/main/vps/install_cloudflare_ddns.sh"
 Define_ConfigFile="/usr/local/etc/config_cloudflare_ddns.conf"
 Define_SelfPath="/usr/local/bin/sync_cloudflare_ddns.sh"
@@ -42,7 +42,7 @@ Perform_SelfUpdate() {
         mv -f "$Path_TempFile" "$Define_SelfPath"
         chmod +x "$Define_SelfPath"
         # 更新成功后推送通知 (若配置了 TG)
-        Notify_Telegram "🔄 [DDNS 自动更新]\n已成功升级至版本: v${String_RemoteVersion}"
+        Notify_Telegram "🔄 [DDNS 自动更新]%0A已成功升级至版本: v${String_RemoteVersion}"
         exec "$Define_SelfPath" "$@"
         exit 0
     else
@@ -59,7 +59,7 @@ Notify_Telegram() {
     # 仅当配置文件中存在 Token 和 ChatId 时才发送请求
     if [ -n "$Config_TgToken" ] && [ -n "$Config_TgChatId" ]; then
         # 附加域名信息以便于多台机器区分
-        local Format_Message="🌐 [${Config_DomainName}]\n${Inject_Message}"
+        local Format_Message="🌐 [${Config_DomainName}]%0A${Inject_Message}"
         curl -s -X POST "https://api.telegram.org/bot${Config_TgToken}/sendMessage" \
              -d "chat_id=${Config_TgChatId}" \
              -d "text=${Format_Message}" >/dev/null 2>&1
@@ -139,7 +139,7 @@ Execute_DdnsProcess() {
     local Queried_RecordId=$(Query_DnsRecordId "$Inject_RecordType")
     if [ -z "$Queried_RecordId" ]; then
         echo "[错误] 未找到 Cloudflare ${Inject_RecordType} 记录。"
-        Notify_Telegram "❌ [错误] 获取 ${Inject_RecordType} Record ID 失败。\n请确认 Cloudflare 中已存在该记录。"
+        Notify_Telegram "❌ [错误] 获取 ${Inject_RecordType} Record ID 失败。%0A请确认 Cloudflare 中已存在该记录。"
         return 1
     fi
 
@@ -149,10 +149,10 @@ Execute_DdnsProcess() {
     if echo "$Committed_Result" | grep -q '"success":true'; then
         echo "$Fetched_Ip" > "$Inject_CacheFile"
         echo "[成功] ${Inject_Type} (${Inject_RecordType}) 已更新至: ${Fetched_Ip}"
-        Notify_Telegram "✅ [状态报告]\n${Inject_Type} 解析已成功更新！\n旧 IP: ${Cached_Ip:-无}\n新 IP: ${Fetched_Ip}"
+        Notify_Telegram "✅ [状态报告]%0A${Inject_Type} 解析已成功更新！%0A旧 IP: ${Cached_Ip:-无}%0A新 IP: ${Fetched_Ip}"
     else
         echo "[错误] ${Inject_Type} 更新失败: ${Committed_Result}"
-        Notify_Telegram "❌ [严重错误]\n${Inject_Type} 更新至 Cloudflare 失败！\nAPI 响应: 解析错误或 Token 失效。"
+        Notify_Telegram "❌ [严重错误]%0A${Inject_Type} 更新至 Cloudflare 失败！%0AAPI 响应: 解析错误或 Token 失效。"
     fi
 }
 
