@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==========================================
-# 描述：Cloudflare DDNS 自动化安装与配置分离脚本
+# 描述：Cloudflare DDNS 自动化安装与配置分离脚本 (支持双栈 IPv4/IPv6)
 # 规则：遵循意图导向命名法
 # ==========================================
 
@@ -20,8 +20,11 @@ Verify_RootAccess() {
 # 收集用户输入的 Cloudflare 配置信息
 Prompt_UserInput() {
     echo "=========================================="
-    echo " Cloudflare DDNS 安装向导 (支持自动更新)  "
+    echo " Cloudflare DDNS 安装向导 (支持 IPv4 & IPv6 双栈) "
     echo "=========================================="
+    echo "[提示] 脚本将自动检测 VPS 的公网 IPv4 和 IPv6 地址。"
+    echo "[提示] 请确保在 Cloudflare 中已为您需要的 IP 类型创建了 A 或 AAAA 记录。"
+    echo "------------------------------------------"
     read -p "请输入 Cloudflare API Token: " Input_ApiToken
     read -p "请输入 Cloudflare Zone ID: " Input_ZoneId
     read -p "请输入目标域名 (例如: ddns.example.com): " Input_DomainName
