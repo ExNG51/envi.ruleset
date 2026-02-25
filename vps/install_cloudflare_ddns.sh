@@ -39,6 +39,17 @@ Prompt_UserInput() {
     echo "[可选配置] Telegram 报警机器人 (不使用请直接回车跳过)"
     read -p "请输入 Telegram Bot Token: " Input_TgToken
     read -p "请输入 Telegram Chat ID: " Input_TgChatId
+
+    # ==========================================
+    # 输入清洗 (Sanitization)
+    # 消除通过 SSH 复制粘贴时意外引入的空格、制表符或换行符
+    # 彻底杜绝因格式污染导致的 "Token 失效" 或 URL 解析错误
+    # ==========================================
+    Input_ApiToken="${Input_ApiToken//[[:space:]]/}"
+    Input_ZoneId="${Input_ZoneId//[[:space:]]/}"
+    Input_DomainName="${Input_DomainName//[[:space:]]/}"
+    Input_TgToken="${Input_TgToken//[[:space:]]/}"
+    Input_TgChatId="${Input_TgChatId//[[:space:]]/}"
 }
 
 # 动态生成配置文件并写入目标路径
@@ -91,6 +102,14 @@ Prompt_UserInput
 Generate_Configuration
 Deploy_CoreScript
 Configure_CronJob
+
+# ==========================================
+# 强制清除旧缓存
+# 应对 VPS 重装或重新配置的场景，防止旧的 IP 缓存导致脚本判定为“未发生变化”从而跳过首次运行
+# ==========================================
+echo "[信息] 正在清理可能存在的历史状态缓存..."
+rm -f /tmp/cf_ddns_ipv4.cache
+rm -f /tmp/cf_ddns_ipv6.cache
 
 echo "[信息] 正在首次运行 DDNS 同步脚本..."
 $Define_CoreScriptPath
