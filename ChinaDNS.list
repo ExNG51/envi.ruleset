@@ -2,6 +2,8 @@
 DOMAIN,doh.pub
 DOMAIN,sm2.doh.pub
 DOMAIN,dns.alidns.com
+DOMAIN-SUFFIX,api-huacloud.net
+DOMAIN-SUFFIX,em.mesl.cloud
 ## > CHINA DNS IP-CIDR
 IP-CIDR,114.114.114.114/32,no-resolve
 IP-CIDR,119.29.107.85/32,no-resolve
