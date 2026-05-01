@@ -10,6 +10,22 @@ DETECTED_SSH_PORT=""  # 全局变量存储检测到的SSH端口
 SSH_LOG_PATH=""       # 全局变量存储检测到的SSH日志路径
 FAIL2BAN_BACKEND="auto" # 全局变量存储检测到的Fail2ban后端
 CURRENT_IP=""         # 全局变量存储当前外部IP
+MANUAL_TCP_PORTS="" # 手动兜底 TCP 端口，默认不启用；示例："443 8443"
+MANUAL_UDP_PORTS="" # 手动兜底 UDP 端口，默认不启用；示例："443 8443"
+SINGBOX_CONFIG_FILES=(
+    "/etc/sing-box/config.json"
+    "/usr/local/etc/sing-box/config.json"
+    "/opt/sing-box/config.json"
+)
+SINGBOX_CONFIG_DIRS=(
+    "/etc/sing-box/conf"
+    "/usr/local/etc/sing-box/conf"
+    "/opt/sing-box/conf"
+)
+CADDY_CONFIG_FILES=(
+    "/etc/caddy/Caddyfile"
+    "/usr/local/etc/caddy/Caddyfile"
+)
 
 # --- 颜色定义 ---
 RESET='\033[0m'
@@ -33,6 +49,19 @@ check_command_status() {
         echo -e "${GREEN}${BOLD}[✓] 成功:${RESET}${GREEN} '${description}' 执行完毕。${RESET}"
         return 0 # 返回成功状态
     fi
+}
+
+# 规范化端口列表
+# 说明：
+# - 只保留 1-65535 范围内的纯数字端口
+# - 自动去重、升序排序，并输出空格分隔格式
+normalize_port_list() {
+    echo "$1" \
+        | tr ' ' '\n' \
+        | grep -E '^[0-9]+$' \
+        | awk '$1 >= 1 && $1 <= 65535' \
+        | sort -un \
+        | tr '\n' ' '
 }
 
 # 获取当前外部 IP 地址
@@ -143,7 +172,7 @@ detect_proxy_ports() {
     echo -e "${BLUE}${BOLD}[+] 正在检测常用代理工具端口 (TCP/UDP)...${RESET}"
     local proxy_ports_tcp=""
     local proxy_ports_udp=""
-    local grep_pattern='snell|snell-server|ssserver|shadow-tls|trojan|hysteria|tuic'
+    local grep_pattern='snell|snell-server|ssserver|shadow-tls|trojan|hysteria|tuic|sing-box|caddy'
 
     # --- 使用 ss 命令 (优先) ---
     if command -v ss &> /dev/null; then
@@ -271,12 +300,160 @@ detect_proxy_ports() {
         echo -e "${BLUE}[-] 未检测到与模式 (${MAGENTA}$grep_pattern${BLUE}) 匹配的常用代理 UDP 端口。${RESET}"
     fi
     # 去重全局变量 (以防万一重复追加)
-    DETECTED_TCP_PORTS=$(echo "$DETECTED_TCP_PORTS" | tr ' ' '\n' | sort -un | tr '\n' ' ')
-    DETECTED_UDP_PORTS=$(echo "$DETECTED_UDP_PORTS" | tr ' ' '\n' | sort -un | tr '\n' ' ')
+    DETECTED_TCP_PORTS=$(normalize_port_list "$DETECTED_TCP_PORTS")
+    DETECTED_UDP_PORTS=$(normalize_port_list "$DETECTED_UDP_PORTS")
     echo "----------------------------------------"
 }
 # --- End of merged detect_proxy_ports ---
 
+# 检测 sing-box 配置中的监听端口
+# 说明：
+# - 优先使用 jq 解析 JSON
+# - 没有 jq 时使用 grep 作为降级方案
+# - 对检测到的 sing-box 端口默认同时加入 TCP 与 UDP，避免协议类型判断失误导致漏放
+# - 不在这里硬编码任何用户端口
+detect_singbox_ports() {
+    echo -e "${BLUE}${BOLD}[+] 正在检测 sing-box 配置端口...${RESET}"
+
+    local detected_singbox_ports=""
+    local current_config_file=""
+    local current_config_dir=""
+    local singbox_config_candidates=()
+
+    for current_config_file in "${SINGBOX_CONFIG_FILES[@]}"; do
+        if [ -f "$current_config_file" ]; then
+            singbox_config_candidates+=("$current_config_file")
+        fi
+    done
+
+    for current_config_dir in "${SINGBOX_CONFIG_DIRS[@]}"; do
+        if [ ! -d "$current_config_dir" ]; then
+            continue
+        fi
+
+        echo -e "${BLUE}[i] 发现 sing-box 配置目录: ${CYAN}$current_config_dir${RESET}"
+
+        for current_config_file in "$current_config_dir"/*.json; do
+            if [ -f "$current_config_file" ]; then
+                singbox_config_candidates+=("$current_config_file")
+            fi
+        done
+    done
+
+    if [ ${#singbox_config_candidates[@]} -eq 0 ]; then
+        echo -e "${BLUE}[-] 未发现可读取的 sing-box 配置文件。${RESET}"
+    fi
+
+    for current_config_file in "${singbox_config_candidates[@]}"; do
+        echo -e "${BLUE}[i] 发现 sing-box 配置文件: ${CYAN}$current_config_file${RESET}"
+
+        local current_ports=""
+
+        if command -v jq &> /dev/null; then
+            current_ports=$(jq -r '
+                .. | objects | select(has("listen_port")) | .listen_port
+            ' "$current_config_file" 2>/dev/null)
+            current_ports=$(normalize_port_list "$current_ports")
+        fi
+
+        if [ -z "$current_ports" ]; then
+            # jq 无法解析 JSONC、尾逗号或其他非标准 JSON 时，使用 grep 兜底提取 listen_port
+            current_ports=$(grep -oE '"listen_port"[[:space:]]*:[[:space:]]*"?[0-9]+"?' "$current_config_file" \
+                | grep -oE '[0-9]+')
+            current_ports=$(normalize_port_list "$current_ports")
+        fi
+
+        if [ -n "$current_ports" ]; then
+            detected_singbox_ports+="$current_ports "
+        fi
+    done
+
+    detected_singbox_ports=$(normalize_port_list "$detected_singbox_ports")
+
+    if [ -n "$detected_singbox_ports" ]; then
+        echo -e "${GREEN}${BOLD}[✓] 检测到 sing-box 配置端口: ${CYAN}${detected_singbox_ports}${RESET}"
+
+        DETECTED_TCP_PORTS+="$detected_singbox_ports "
+        DETECTED_UDP_PORTS+="$detected_singbox_ports "
+
+        DETECTED_TCP_PORTS=$(normalize_port_list "$DETECTED_TCP_PORTS")
+        DETECTED_UDP_PORTS=$(normalize_port_list "$DETECTED_UDP_PORTS")
+    else
+        echo -e "${BLUE}[-] 未从 sing-box 配置文件中检测到 listen_port。${RESET}"
+    fi
+
+    echo "----------------------------------------"
+}
+
+# 检测 Caddy 配置中的监听端口
+# 说明：
+# - 233boy 的自动 TLS 配置会在 Caddyfile 中写入 http_port / https_port
+# - Caddy 作为前置 HTTP/HTTPS 服务，仅补充 TCP 放行端口
+# - 不在这里硬编码 80/443，始终以配置文件中的实际端口为准
+detect_caddy_ports() {
+    echo -e "${BLUE}${BOLD}[+] 正在检测 Caddy 配置端口...${RESET}"
+
+    local detected_caddy_ports=""
+    local current_config_file=""
+
+    for current_config_file in "${CADDY_CONFIG_FILES[@]}"; do
+        if [ ! -f "$current_config_file" ]; then
+            continue
+        fi
+
+        echo -e "${BLUE}[i] 发现 Caddy 配置文件: ${CYAN}$current_config_file${RESET}"
+
+        local current_ports=""
+        current_ports=$(grep -E '^[[:space:]]*(http_port|https_port)[[:space:]]+[0-9]+' "$current_config_file" \
+            | grep -oE '[0-9]+')
+        current_ports=$(normalize_port_list "$current_ports")
+
+        if [ -n "$current_ports" ]; then
+            detected_caddy_ports+="$current_ports "
+        fi
+    done
+
+    detected_caddy_ports=$(normalize_port_list "$detected_caddy_ports")
+
+    if [ -n "$detected_caddy_ports" ]; then
+        echo -e "${GREEN}${BOLD}[✓] 检测到 Caddy 配置端口: ${CYAN}${detected_caddy_ports}${RESET}"
+
+        DETECTED_TCP_PORTS+="$detected_caddy_ports "
+        DETECTED_TCP_PORTS=$(normalize_port_list "$DETECTED_TCP_PORTS")
+    else
+        echo -e "${BLUE}[-] 未从 Caddy 配置文件中检测到 http_port / https_port。${RESET}"
+    fi
+
+    echo "----------------------------------------"
+}
+
+# 应用手动端口兜底配置
+# 说明：
+# - 默认不添加任何端口
+# - 仅当 MANUAL_TCP_PORTS / MANUAL_UDP_PORTS 被用户显式填写时才生效
+# - 不得在默认配置中固化用户临时端口
+apply_manual_ports() {
+    echo -e "${BLUE}${BOLD}[+] 正在检查手动端口兜底配置...${RESET}"
+
+    if [ -n "$MANUAL_TCP_PORTS" ]; then
+        echo -e "${GREEN}[✓] 手动 TCP 端口: ${CYAN}$MANUAL_TCP_PORTS${RESET}"
+        DETECTED_TCP_PORTS+="$MANUAL_TCP_PORTS "
+    else
+        echo -e "${BLUE}[-] 未配置手动 TCP 端口。${RESET}"
+    fi
+
+    if [ -n "$MANUAL_UDP_PORTS" ]; then
+        echo -e "${GREEN}[✓] 手动 UDP 端口: ${CYAN}$MANUAL_UDP_PORTS${RESET}"
+        DETECTED_UDP_PORTS+="$MANUAL_UDP_PORTS "
+    else
+        echo -e "${BLUE}[-] 未配置手动 UDP 端口。${RESET}"
+    fi
+
+    DETECTED_TCP_PORTS=$(normalize_port_list "$DETECTED_TCP_PORTS")
+    DETECTED_UDP_PORTS=$(normalize_port_list "$DETECTED_UDP_PORTS")
+
+    echo "----------------------------------------"
+}
 
 # --- 主要功能函数 ---
 # 1. 安装必要的软件包
@@ -311,6 +488,7 @@ install_packages() {
     local wget_pkg="wget"
     local net_tools_pkg="net-tools"
     local iproute_pkg="iproute" # 通常是 iproute2 在 apt, iproute 在 yum/dnf
+    local jq_pkg="jq"
     local fail2ban_ufw_action="" # fail2ban-action for ufw if needed
 
     if [[ "$pkg_manager" == "yum" || "$pkg_manager" == "dnf" ]]; then
@@ -333,8 +511,8 @@ install_packages() {
     fi
 
     # 安装软件包
-    echo -e "${BLUE}[+] 正在安装软件包: ${CYAN}${ufw_pkg}, ${fail2ban_pkg}, ${curl_pkg}, ${wget_pkg}, ${net_tools_pkg}, ${iproute_pkg}${RESET}"
-    sudo $pkg_manager install -y "$ufw_pkg" "$fail2ban_pkg" "$curl_pkg" "$wget_pkg" "$net_tools_pkg" "$iproute_pkg" > /dev/null 2>&1
+    echo -e "${BLUE}[+] 正在安装软件包: ${CYAN}${ufw_pkg}, ${fail2ban_pkg}, ${curl_pkg}, ${wget_pkg}, ${net_tools_pkg}, ${iproute_pkg}, ${jq_pkg}${RESET}"
+    sudo $pkg_manager install -y "$ufw_pkg" "$fail2ban_pkg" "$curl_pkg" "$wget_pkg" "$net_tools_pkg" "$iproute_pkg" "$jq_pkg" > /dev/null 2>&1
     check_command_status "安装核心软件包" || return 1
 
     echo -e "${GREEN}${BOLD}[✓] 软件包安装完成。${RESET}"
@@ -372,7 +550,10 @@ configure_ufw() {
 
     # 检测 SSH 和代理端口
     detect_ssh_port # 这会填充 DETECTED_SSH_PORT 并可能添加到 DETECTED_TCP_PORTS
-    detect_proxy_ports # 这会填充 DETECTED_TCP_PORTS 和 DETECTED_UDP_PORTS
+    detect_proxy_ports # 这会根据已运行进程填充 DETECTED_TCP_PORTS 和 DETECTED_UDP_PORTS
+    detect_singbox_ports # 这会根据 sing-box 配置文件补充端口
+    detect_caddy_ports # 这会根据 Caddy 配置文件补充前置 HTTP/HTTPS TCP 端口
+    apply_manual_ports # 这会应用用户显式配置的手动兜底端口，默认不添加任何端口
 
     # 确保 SSH 端口已确定
     if [ -z "$DETECTED_SSH_PORT" ]; then
@@ -386,7 +567,7 @@ configure_ufw() {
     check_command_status "允许 SSH 端口 $DETECTED_SSH_PORT/tcp" || return 1
 
     # 允许检测到的 TCP 端口 (去重并排除已添加的 SSH 端口)
-    local unique_tcp_ports=$(echo "$DETECTED_TCP_PORTS" | tr ' ' '\n' | grep -v "^${DETECTED_SSH_PORT}$" | sort -un | tr '\n' ' ')
+    local unique_tcp_ports=$(normalize_port_list "$DETECTED_TCP_PORTS" | tr ' ' '\n' | grep -v "^${DETECTED_SSH_PORT}$" | tr '\n' ' ')
     unique_tcp_ports=${unique_tcp_ports% } # Remove trailing space
     if [ -n "$unique_tcp_ports" ]; then
         echo -e "${BLUE}[+] 允许其他检测到的 TCP 端口: ${CYAN}${unique_tcp_ports}${RESET}"
@@ -397,7 +578,7 @@ configure_ufw() {
     fi
 
     # 允许检测到的 UDP 端口 (去重)
-    local unique_udp_ports=$(echo "$DETECTED_UDP_PORTS" | tr ' ' '\n' | sort -un | tr '\n' ' ')
+    local unique_udp_ports=$(normalize_port_list "$DETECTED_UDP_PORTS")
     unique_udp_ports=${unique_udp_ports% } # Remove trailing space
     if [ -n "$unique_udp_ports" ]; then
          echo -e "${BLUE}[+] 允许检测到的 UDP 端口: ${CYAN}${unique_udp_ports}${RESET}"
