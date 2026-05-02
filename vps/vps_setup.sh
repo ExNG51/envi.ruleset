@@ -1,562 +1,540 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -Eeuo pipefail
 
-# 定义颜色和样式
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[1;34m'
-BOLD='\033[1m'
-NC='\033[0m' # No Color
+# ==============================================================================
+# 脚本意图: VPS 通用初始化入口，支持独立公网 IP 与 NAT VPS 两种 profile
+# 用法示例:
+#   bash vps_setup.sh --profile public
+#   bash vps_setup.sh --profile nat --yes
+#   bash vps_setup.sh --profile public --install-docker --ssh-port 2222
+# ==============================================================================
 
-# 打印显著的提示信息函数
-print_info() {
-    echo -e "${BLUE}${BOLD}$1${NC}"
+readonly COLOR_TEXT_RED='\033[0;31m'
+readonly COLOR_TEXT_GREEN='\033[0;32m'
+readonly COLOR_TEXT_YELLOW='\033[1;33m'
+readonly COLOR_TEXT_BLUE='\033[1;34m'
+readonly FORMAT_TEXT_BOLD='\033[1m'
+readonly STYLE_RESET='\033[0m'
+
+display_status_info() { echo -e "${COLOR_TEXT_BLUE}${FORMAT_TEXT_BOLD}[信息] $1${STYLE_RESET}"; }
+display_status_success() { echo -e "${COLOR_TEXT_GREEN}${FORMAT_TEXT_BOLD}[成功] $1${STYLE_RESET}"; }
+display_status_warning() { echo -e "${COLOR_TEXT_YELLOW}${FORMAT_TEXT_BOLD}[警告] $1${STYLE_RESET}"; }
+display_status_error() { echo -e "${COLOR_TEXT_RED}${FORMAT_TEXT_BOLD}[错误] $1${STYLE_RESET}"; }
+
+GLOBAL_PROFILE="${VPS_PROFILE:-}"
+GLOBAL_TIMEZONE="${VPS_TIMEZONE:-Asia/Singapore}"
+GLOBAL_ASSUME_YES=false
+GLOBAL_INSTALL_DOCKER=false
+GLOBAL_INSTALL_NODEJS=false
+GLOBAL_INSTALL_CLOUD_KERNEL=false
+GLOBAL_SSH_PORT=""
+GLOBAL_PKG_MANAGER=""
+GLOBAL_BIND_UTILS=""
+GLOBAL_OS_ID=""
+GLOBAL_OS_NAME=""
+GLOBAL_OS_VERSION=""
+
+show_usage() {
+    cat <<'EOF'
+用法: bash vps_setup.sh [options]
+
+Options:
+  --profile public|nat       VPS 类型。public=独立公网 IP，nat=NAT VPS。
+  --timezone Zone/Name       设置时区，默认 Asia/Singapore。
+  --yes                      非交互执行，公共可选组件默认不安装。
+  --install-docker           public profile 可选：通过系统包管理器安装 Docker。
+  --install-nodejs           public profile 可选：通过系统包管理器安装 Node.js/npm。
+  --install-cloud-kernel     public profile 可选：Debian 安装 linux-image-cloud-amd64。
+  --ssh-port PORT            public profile 可选：安全修改 SSH 监听端口。
+  -h, --help                 显示帮助。
+EOF
 }
 
-print_success() {
-    echo -e "${GREEN}${BOLD}$1${NC}"
-}
-
-print_warning() {
-    echo -e "${YELLOW}${BOLD}$1${NC}"
-}
-
-print_error() {
-    echo -e "${RED}${BOLD}$1${NC}"
-}
-
-# 检查是否具有sudo权限
-echo "检查 sudo 权限"
-if [[ $EUID -ne 0 ]]; then
-   print_error "请以 root 身份或使用 sudo 执行此脚本。"
-   exit 1
-fi
-print_success "sudo 权限检查通过"
-
-# 检测系统类型和包管理器
-echo "检测系统类型和包管理器"
-if [ -f /etc/os-release ]; then
-    . /etc/os-release
-    OS=$NAME
-    VER=$VERSION_ID
-    print_success "系统类型: $OS, 版本: $VER"
-else
-    print_error "无法检测操作系统类型。"
-    exit 1
-fi
-
-case $OS in
-    "CentOS Linux"|"AlmaLinux")
-        PKG_MANAGER="dnf"
-        ;;
-    "Ubuntu"|"Debian GNU/Linux")
-        PKG_MANAGER="apt"
-        ;;
-    *)
-        print_error "不支持的操作系统: $OS"
-        exit 1
-        ;;
-esac
-print_success "包管理器: $PKG_MANAGER"
-
-# 检测并安装所需的指令
-check_and_install() {
-    echo "检查 $1 是否已安装"
-    if ! command -v $1 &> /dev/null; then
-        print_info "$1 未安装，正在安装..."
-        $PKG_MANAGER install -y $1
-        if [ $? -ne 0 ]; then
-            print_error "$1 安装失败。"
-            exit 1
-        fi
-    else
-        print_success "$1 已安装，跳过安装。"
-    fi
-}
-
-# 创建并启用交换空间
-setup_swap() {
-    if [ -f /mnt/swap ]; then
-        print_warning "交换文件已存在，跳过创建。"
-        return
-    fi
-
-    MEM_SIZE_MB=$(awk '/MemTotal:/ {print int($2/1024)}' /proc/meminfo)
-    SWAP_SIZE_MB=$((MEM_SIZE_MB < 1024 ? MEM_SIZE_MB : 1024))
-
-    if [ ! -d /mnt ]; then
-        print_error "/mnt 目录不存在，请检查挂载点。"
-        exit 1
-    fi
-
-    if [ $(df -m /mnt | tail -1 | awk '{print $4}') -lt $SWAP_SIZE_MB ]; then
-        print_error "/mnt 没有足够的空间创建交换文件。"
-        exit 1
-    fi
-
-    dd if=/dev/zero of=/mnt/swap bs=1M count=$SWAP_SIZE_MB
-    chmod 600 /mnt/swap
-    mkswap /mnt/swap
-    swapon /mnt/swap
-
-    if ! grep -q '/mnt/swap' /etc/fstab; then
-        echo "/mnt/swap swap swap defaults 0 0" >> /etc/fstab
-        print_success "交换文件已添加到 /etc/fstab。"
-    fi
-
-    sed -i '/vm.swappiness/d' /etc/sysctl.conf
-    echo "vm.swappiness = 25" >> /etc/sysctl.conf
-    sysctl -w vm.swappiness=25
-    swapon -a
-    swapon --show
-
-    if [ $? -eq 0 ]; then
-        print_success "交换空间已成功启用。"
-    else
-        print_error "交换空间启用失败。"
-        exit 1
-    fi
-}
-
-# 修改时区为新加坡
-set_timezone() {
-    current_timezone=$(timedatectl | grep "Time zone" | awk '{print $3}')
-    if [ "$current_timezone" == "Asia/Singapore" ]; then
-        print_success "当前系统时区已经是 Asia/Singapore，跳过时区设置。"
-    else
-        print_info "设置系统时区为 Asia/Singapore..."
-        timedatectl set-timezone Asia/Singapore
-        new_timezone=$(timedatectl | grep "Time zone" | awk '{print $3}')
-        print_success "当前系统时区已设置为: $new_timezone"
-    fi
-}
-
-# 检查系统负载
-check_system_load() {
-    max_wait_time=60  # 最大等待时间（秒）
-    wait_interval=5    # 每次等待间隔（秒）
-    waited_time=0
-
-    while [ $(awk '{print $1}' /proc/loadavg | cut -d. -f1) -gt 1 ]; do
-        print_warning "系统负载过高，等待中..."
-        sleep $wait_interval
-        waited_time=$((waited_time + wait_interval))
-
-        if [ $waited_time -ge $max_wait_time ]; then
-            print_error "系统负载持续过高，超出最大等待时间。"
-            exit 1
-        fi
-    done
-}
-
-# 更新系统
-update_system() {
-    print_info "更新系统中..."
-    if [ "$PKG_MANAGER" == "dnf" ]; then
-        dnf update -y
-    elif [ "$PKG_MANAGER" == "apt" ]; then
-        apt update && apt upgrade -y
-    fi
-    if [ $? -eq 0 ]; then
-        print_success "系统更新完成。"
-    else
-        print_error "系统更新失败。"
-        exit 1
-    fi
-}
-
-# 安装 EPEL 仓库（仅适用于 CentOS/RHEL/AlmaLinux）
-install_epel() {
-    if [ "$PKG_MANAGER" == "dnf" ]; then
-        if ! dnf repolist enabled | grep -q "epel"; then
-            print_info "安装 EPEL 仓库..."
-            dnf install -y epel-release
-            if [ $? -eq 0 ]; then
-                print_success "EPEL 仓库安装成功。"
-            else
-                print_error "EPEL 仓库安装失败。"
+parse_arguments() {
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --profile)
+                shift
+                GLOBAL_PROFILE="${1:-}"
+                ;;
+            --timezone)
+                shift
+                GLOBAL_TIMEZONE="${1:-}"
+                ;;
+            --yes)
+                GLOBAL_ASSUME_YES=true
+                ;;
+            --install-docker)
+                GLOBAL_INSTALL_DOCKER=true
+                ;;
+            --install-nodejs)
+                GLOBAL_INSTALL_NODEJS=true
+                ;;
+            --install-cloud-kernel)
+                GLOBAL_INSTALL_CLOUD_KERNEL=true
+                ;;
+            --ssh-port)
+                shift
+                GLOBAL_SSH_PORT="${1:-}"
+                ;;
+            -h|--help)
+                show_usage
+                exit 0
+                ;;
+            *)
+                display_status_error "未知参数: $1"
+                show_usage
                 exit 1
-            fi
-        else
-            print_success "EPEL 仓库已经安装。"
-        fi
-    fi
-}
-
-# 安装必要的工具
-install_tools() {
-    # 检测系统类型
-    if [ -f /etc/debian_version ]; then
-        # Debian/Ubuntu 系列
-        PKG_MANAGER="apt-get"
-        INSTALL_CMD="$PKG_MANAGER install -y"
-        UPDATE_CMD="$PKG_MANAGER update"
-        BIND_UTILS="dnsutils"  # Debian/Ubuntu 使用 dnsutils 代替 bind-utils
-    elif [ -f /etc/redhat-release ]; then
-        # Red Hat 系列
-        PKG_MANAGER="dnf"
-        INSTALL_CMD="$PKG_MANAGER install -y"
-        UPDATE_CMD="$PKG_MANAGER check-update"
-        BIND_UTILS="bind-utils"
-    else
-        echo "Unsupported distribution"
-        return 1
-    fi
-
-    # 更新包列表
-    $UPDATE_CMD
-
-    # 定义工具列表，使用关联数组来处理不同发行版的包名差异
-    declare -A tools
-    tools=(
-        ["sudo"]="sudo"
-        ["curl"]="curl"
-        ["jq"]="jq"
-        ["wget"]="wget"
-        ["unzip"]="unzip"
-        ["bind-utils"]="$BIND_UTILS"
-        ["dkms"]="dkms"
-    )
-
-    # 检查并安装工具
-    for tool in "${!tools[@]}"; do
-        package_name=${tools[$tool]}
-        if ! command -v $tool &> /dev/null && [ "$tool" != "bind-utils" ]; then
-            echo "$tool is not installed. Installing $package_name..."
-            $INSTALL_CMD $package_name
-        elif [ "$tool" == "bind-utils" ]; then
-            # 特殊处理 bind-utils/dnsutils
-            if ! command -v nslookup &> /dev/null; then
-                echo "$tool is not installed. Installing $package_name..."
-                $INSTALL_CMD $package_name
-            fi
-        else
-            echo "$tool is already installed."
-        fi
+                ;;
+        esac
+        shift
     done
 }
 
-# 检查并安装单个工具的函数（如果需要的话）
-check_and_install() {
-    tool=$1
-    if ! command -v $tool &> /dev/null; then
-        echo "$tool is not installed. Installing..."
-        $INSTALL_CMD $tool
-    else
-        echo "$tool is already installed."
-    fi
-}
-
-# 开启 TCP Fast Open (TFO)
-enable_tfo() {
-    print_info "开启 TCP Fast Open (TFO)..."
-    echo "3" > /proc/sys/net/ipv4/tcp_fastopen
-    echo "net.ipv4.tcp_fastopen=3" > /etc/sysctl.d/30-tcp_fastopen.conf
-    sysctl --system
-}
-
-# 设置 BBR+FQ
-setup_bbr() {
-    current_algo=$(sysctl net.ipv4.tcp_congestion_control | awk '{print $3}')
-
-    if [ "$current_algo" == "bbr" ]; then
-        print_success "当前系统已使用 BBR 算法。"
-    else
-        print_info "当前系统未使用 BBR 算法，正在设置 BBR..."
-
-        # 检查内核版本是否支持 BBR
-        if ! modprobe tcp_bbr &> /dev/null; then
-            print_error "当前内核不支持 BBR，请升级内核后再试。"
-            exit 1
-        fi
-
-        sysctl -w net.core.default_qdisc=fq
-        sysctl -w net.ipv4.tcp_congestion_control=bbr
-
-        if ! grep -q "net.core.default_qdisc=fq" /etc/sysctl.conf; then
-            echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
-        fi
-        if ! grep -q "net.ipv4.tcp_congestion_control=bbr" /etc/sysctl.conf; then
-            echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
-        fi
-
-        print_success "BBR 设置完成。"
-    fi
-
-    final_algo=$(sysctl net.ipv4.tcp_congestion_control | awk '{print $3}')
-    if [ "$final_algo" == "bbr" ]; then
-        print_success "BBR 已成功启用。"
-    else
-        print_error "BBR 启用失败，请检查配置。"
+validate_root_privilege() {
+    display_status_info "正在校验 root 权限..."
+    if [[ $EUID -ne 0 ]]; then
+        display_status_error "权限不足：请以 root 身份或使用 sudo 执行此脚本。"
         exit 1
     fi
+    display_status_success "root 权限校验通过。"
 }
 
-# 设置网络性能优化
-setup_network_performance() {
-    print_info "设置网络性能优化配置..."
-    check_and_install tuned
-    systemctl enable tuned.service
-    systemctl start tuned.service
-    tuned-adm profile network-throughput
-
-    if systemctl is-active --quiet tuned.service; then
-        print_success "tuned 服务已成功启动。"
-    else
-        print_error "tuned 服务未启动，请检查日志进行排查。"
+select_vps_profile() {
+    if [ -z "$GLOBAL_PROFILE" ] && [ "$GLOBAL_ASSUME_YES" = true ]; then
+        display_status_error "--yes 模式必须显式传入 --profile public 或 --profile nat。"
         exit 1
     fi
 
-    active_profile=$(tuned-adm active)
-    if [[ "$active_profile" == *"network-throughput"* ]]; then
-        print_success "网络吞吐量优化配置已成功应用。"
-    else
-        print_error "未能应用网络吞吐量优化配置。"
+    while [ -z "$GLOBAL_PROFILE" ]; do
+        echo "请选择 VPS 类型:"
+        echo "  1) public - 独立公网 IP VPS"
+        echo "  2) nat    - NAT VPS / 共享公网出口"
+        read -rp "请输入选项 [1-2]: " selected_profile
+        case "$selected_profile" in
+            1) GLOBAL_PROFILE="public" ;;
+            2) GLOBAL_PROFILE="nat" ;;
+            *) display_status_warning "无效选项，请重新输入。" ;;
+        esac
+    done
+
+    if [[ "$GLOBAL_PROFILE" != "public" && "$GLOBAL_PROFILE" != "nat" ]]; then
+        display_status_error "不支持的 profile: ${GLOBAL_PROFILE}。仅支持 public 或 nat。"
         exit 1
+    fi
+
+    display_status_success "已选择 profile: ${GLOBAL_PROFILE}"
+}
+
+detect_operating_system_environment() {
+    display_status_info "正在探测操作系统与包管理器..."
+    if [[ -f /etc/os-release ]]; then
+        # shellcheck disable=SC1091
+        source /etc/os-release
+        GLOBAL_OS_ID="${ID:-unknown}"
+        GLOBAL_OS_NAME="${NAME:-unknown}"
+        GLOBAL_OS_VERSION="${VERSION_ID:-unknown}"
+        display_status_success "识别到系统: ${GLOBAL_OS_NAME} (${GLOBAL_OS_VERSION})"
+    else
+        display_status_error "无法探测操作系统类型，文件 /etc/os-release 缺失。"
+        exit 1
+    fi
+
+    if command -v apt-get >/dev/null 2>&1; then
+        GLOBAL_PKG_MANAGER="apt-get"
+        GLOBAL_BIND_UTILS="dnsutils"
+    elif command -v dnf >/dev/null 2>&1; then
+        GLOBAL_PKG_MANAGER="dnf"
+        GLOBAL_BIND_UTILS="bind-utils"
+    else
+        display_status_error "不支持当前系统的包管理器，仅支持 apt-get 或 dnf。"
+        exit 1
+    fi
+
+    display_status_success "已绑定主包管理器: ${GLOBAL_PKG_MANAGER}"
+}
+
+run_package_update() {
+    if [[ "$GLOBAL_PKG_MANAGER" == "apt-get" ]]; then
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update >/dev/null
+    elif [[ "$GLOBAL_PKG_MANAGER" == "dnf" ]]; then
+        if ! dnf repolist enabled | grep -q "epel"; then
+            dnf install -y epel-release >/dev/null || true
+        fi
+        dnf makecache -y >/dev/null
     fi
 }
 
-install_docker() {
-    print_info "安装 Docker..."
-    
-    # 检查是否已安装 Docker
-    if command -v docker &> /dev/null; then
-        print_info "Docker 已经安装。版本信息:"
-        docker --version
+install_packages() {
+    if [ $# -eq 0 ]; then
         return 0
     fi
 
-    # 安装 Docker
-    if [ "$PKG_MANAGER" == "dnf" ]; then
-        sudo dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
-        sudo dnf install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-    elif [ "$PKG_MANAGER" == "apt-get" ]; then
-        curl -fsSL https://get.docker.com -o get-docker.sh
-        sudo sh get-docker.sh
-    else
-        print_error "不支持的包管理器: $PKG_MANAGER"
-        return 1
-    fi
-
-    # 启动并启用 Docker 服务
-    sudo systemctl start docker || print_error "无法启动 Docker 服务"
-    sudo systemctl enable docker || print_error "无法启用 Docker 服务"
-
-    # 验证 Docker 安装
-    if docker --version; then
-        print_info "Docker 安装成功。版本信息:"
-        docker --version
-    else
-        print_error "Docker 安装可能不完整。请检查安装日志。"
-    fi
-
-    # 将当前用户添加到 docker 组（可选，需要重新登录生效）
-    sudo usermod -aG docker $USER
-    print_info "已将当前用户添加到 docker 组。请注销并重新登录以应用更改。"
-}
-
-# 安装 Node.js LTS 版本
-install_nodejs() {
-    print_info "安装 Node.js LTS 版本..."
-    case $OS in
-        "Ubuntu"|"Debian GNU/Linux")
-            curl -fsSL https://deb.nodesource.com/setup_lts.x | bash -
-            $PKG_MANAGER install -y nodejs
-            ;;
-        "CentOS Linux"|"AlmaLinux")
-            sudo $PKG_MANAGER install -y epel-release
-            curl -fsSL https://rpm.nodesource.com/setup_lts.x | bash -
-            sudo $PKG_MANAGER install -y nodejs
-            ;;
-        *)
-            print_error "不支持的操作系统: $OS"
-            return 1
-            ;;
-    esac
-    if command -v node &> /dev/null; then
-        print_success "Node.js 安装成功"
-        node -v
-        npm -v
-    else
-        print_error "Node.js 安装失败"
-        return 1
+    if [[ "$GLOBAL_PKG_MANAGER" == "apt-get" ]]; then
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get install -y "$@" >/dev/null
+    elif [[ "$GLOBAL_PKG_MANAGER" == "dnf" ]]; then
+        dnf install -y "$@" >/dev/null
     fi
 }
 
-# 安装路由测试工具
-install_nexttrace() {
-    print_info "安装路由测试工具 nexttrace..."
-    bash -c "$(curl -Ls https://github.com/sjlleo/nexttrace/raw/main/nt_install.sh)"
+upgrade_system_packages() {
+    display_status_info "正在同步软件源并升级系统组件..."
+    run_package_update
+    if [[ "$GLOBAL_PKG_MANAGER" == "apt-get" ]]; then
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get upgrade -y >/dev/null
+    elif [[ "$GLOBAL_PKG_MANAGER" == "dnf" ]]; then
+        dnf update -y >/dev/null
+    fi
+    display_status_success "系统组件升级完毕。"
 }
 
-# 修改 SSH 端口
-change_ssh_port() {
-    local new_port=9399
-    print_info "修改 SSH 端口为 ${new_port}..."
-
-    # 检测 Linux 发行版类型
-    if [ -f /etc/debian_version ]; then
-        distro_family="debian"
-    elif [ -f /etc/almalinux-release ] || [ -f /etc/redhat-release ]; then
-        distro_family="redhat"
-    else
-        print_error "未知的 Linux 发行版，脚本可能无法正常工作。"
-        exit 1
+configure_virtual_memory_swap() {
+    display_status_info "正在配置虚拟内存 (Swap)..."
+    if [[ -f /mnt/swap ]]; then
+        display_status_warning "交换文件 /mnt/swap 已存在，跳过创建。"
+        return
     fi
 
-    # 备份原始 sshd_config 文件
-    cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak
+    local memory_total_mb
+    memory_total_mb=$(awk '/MemTotal:/ {print int($2/1024)}' /proc/meminfo)
 
-    # 修改 SSH 端口
-    sed -i "s/^#*Port .*/Port ${new_port}/" /etc/ssh/sshd_config
-
-    # 验证配置文件修改
-    if ! grep -q "^Port ${new_port}" /etc/ssh/sshd_config; then
-        print_error "SSH 配置文件修改失败。"
-        mv /etc/ssh/sshd_config.bak /etc/ssh/sshd_config
-        exit 1
-    fi
-
-    # 配置防火墙规则
-    if command -v firewall-cmd &> /dev/null && systemctl is-active --quiet firewalld; then
-        print_info "使用 FirewallD 添加新端口..."
-        firewall-cmd --permanent --add-port=${new_port}/tcp
-        firewall-cmd --reload
-    elif command -v ufw &> /dev/null && ufw status | grep -q "active"; then
-        print_info "使用 UFW 添加新端口..."
-        ufw allow ${new_port}/tcp
-    else
-        print_warning "未检测到活跃的防火墙，使用 iptables 添加规则。"
-        if [ "$distro_family" = "debian" ]; then
-            apt-get update
-            apt-get install -y iptables
-        elif [ "$distro_family" = "redhat" ]; then
-            dnf install -y iptables
-        fi
-        iptables -A INPUT -p tcp --dport ${new_port} -j ACCEPT
-        # 保存 iptables 规则
-        if [ "$distro_family" = "debian" ]; then
-            apt-get install -y iptables-persistent
-            netfilter-persistent save
-        elif [ "$distro_family" = "redhat" ]; then
-            service iptables save
-        fi
-    fi
-
-    # SELinux 配置（仅适用于 Red Hat 系统）
-    if [ "$distro_family" = "redhat" ] && command -v semanage &> /dev/null; then
-        print_info "配置 SELinux 允许新的 SSH 端口..."
-        semanage port -a -t ssh_port_t -p tcp ${new_port}
-    fi
-
-    # 测试 sshd 配置
-    if ! sshd -t; then
-        print_error "SSH 配置测试失败，正在回滚更改..."
-        mv /etc/ssh/sshd_config.bak /etc/ssh/sshd_config
-        exit 1
-    fi
-
-    # 重启 SSH 服务
-    if [ "$distro_family" = "debian" ]; then
-        service_command="service ssh restart"
-    elif [ "$distro_family" = "redhat" ]; then
-        service_command="systemctl restart sshd"
-    fi
-
-    if $service_command; then
-        print_success "SSH 服务已重启，新端口 ${new_port} 已生效。"
-    else
-        print_error "SSH 服务重启失败，正在回滚更改..."
-        mv /etc/ssh/sshd_config.bak /etc/ssh/sshd_config
-        $service_command
-        exit 1
-    fi
-
-    print_warning "请确保使用新端口 ${new_port} 进行连接。不要关闭当前会话，直到您确认可以使用新端口成功连接。"
-    print_info "如果无法连接，请使用 'ssh -p ${new_port} user@host' 尝试连接。"
-}
-
-# 清理不需要的包
-clean_system() {
-    print_info "清理系统..."
-    if [ "$PKG_MANAGER" == "dnf" ]; then
-        dnf autoremove -y
-    elif [ "$PKG_MANAGER" == "apt" ]; then
-        apt autoremove -y
-    fi
-
-    if [ $? -eq 0 ]; then
-        print_success "系统清理完成，不需要的包已移除。"
-    else
-        print_error "系统清理失败，请检查错误信息。"
-        exit 1
-    fi
-}
-
-# 安装 Debian Cloud 内核
-install_debian_cloud_kernel() {
-    if [ "$OS" == "Debian GNU/Linux" ]; then
-        print_info "安装 Debian Cloud 内核..."
-        $PKG_MANAGER install -y linux-image-cloud-amd64
-        if [ $? -eq 0 ]; then
-            print_success "Debian Cloud 内核安装成功。"
-            
-            # 设置 Cloud 内核为默认启动项
-            CLOUD_KERNEL_VERSION=$(ls -t /boot/vmlinuz-*-cloud-amd64 | head -n1 | sed 's/\/boot\/vmlinuz-//g')
-            if [ -n "$CLOUD_KERNEL_VERSION" ]; then
-                print_info "设置 Cloud 内核 $CLOUD_KERNEL_VERSION 为默认启动项..."
-                sed -i "s/GRUB_DEFAULT=.*/GRUB_DEFAULT=\"Advanced options for Debian GNU\/Linux>Debian GNU\/Linux, with Linux $CLOUD_KERNEL_VERSION\"/" /etc/default/grub
-            else
-                print_warning "无法找到 Cloud 内核版本,跳过设置默认启动项。"
-            fi
-            
-            print_info "更新 GRUB 配置..."
-            update-grub
-            if [ $? -eq 0 ]; then
-                print_success "GRUB 配置更新成功。"
-            else
-                print_error "GRUB 配置更新失败。"
-                exit 1
-            fi
+    local swap_target_size_mb
+    if [[ "$GLOBAL_PROFILE" == "nat" ]]; then
+        if ((memory_total_mb < 1024)); then
+            swap_target_size_mb=$((memory_total_mb * 2))
         else
-            print_error "Debian Cloud 内核安装失败。"
+            swap_target_size_mb=1024
+        fi
+    else
+        if ((memory_total_mb < 1024)); then
+            swap_target_size_mb=1024
+        elif ((memory_total_mb < 2048)); then
+            swap_target_size_mb="$memory_total_mb"
+        else
+            swap_target_size_mb=2048
+        fi
+    fi
+
+    local available_space_mb
+    available_space_mb=$(df -Pm /mnt | awk 'NR==2 {print $4}')
+    if ((available_space_mb < swap_target_size_mb + 128)); then
+        display_status_warning "/mnt 可用空间不足，跳过 Swap 创建。"
+        return
+    fi
+
+    if command -v fallocate >/dev/null 2>&1; then
+        fallocate -l "${swap_target_size_mb}M" /mnt/swap || true
+    fi
+
+    if [[ ! -f /mnt/swap ]]; then
+        dd if=/dev/zero of=/mnt/swap bs=1M count="$swap_target_size_mb" status=none
+    fi
+
+    chmod 600 /mnt/swap
+
+    if mkswap /mnt/swap >/dev/null 2>&1 && swapon /mnt/swap >/dev/null 2>&1; then
+        if ! grep -q '/mnt/swap' /etc/fstab; then
+            echo "/mnt/swap swap swap defaults 0 0" >> /etc/fstab
+        fi
+        sed -i '/vm.swappiness/d' /etc/sysctl.conf
+        echo "vm.swappiness = 10" >> /etc/sysctl.conf
+        sysctl -w vm.swappiness=10 >/dev/null 2>&1 || true
+        display_status_success "Swap 已挂载并激活，大小: ${swap_target_size_mb}MB。"
+    else
+        display_status_warning "当前虚拟化架构不支持自行挂载 Swap，已清理并跳过。"
+        rm -f /mnt/swap
+    fi
+}
+
+calibrate_system_timezone() {
+    display_status_info "正在校准系统时区为 ${GLOBAL_TIMEZONE}..."
+    if ! command -v timedatectl >/dev/null 2>&1; then
+        display_status_warning "timedatectl 不可用，跳过时区配置。"
+        return
+    fi
+
+    local current_timezone
+    current_timezone=$(timedatectl | awk -F': ' '/Time zone/ {print $2}' | awk '{print $1}')
+
+    if [[ "$current_timezone" == "$GLOBAL_TIMEZONE" ]]; then
+        display_status_success "时区已是 ${GLOBAL_TIMEZONE}。"
+    else
+        timedatectl set-timezone "$GLOBAL_TIMEZONE"
+        display_status_success "系统时区已校准为 ${GLOBAL_TIMEZONE}。"
+    fi
+}
+
+install_essential_utilities() {
+    display_status_info "正在验证并安装必备运维工具箱..."
+
+    local dependencies=("sudo" "curl" "jq" "wget" "unzip" "ca-certificates" "$GLOBAL_BIND_UTILS")
+    if [[ "$GLOBAL_PROFILE" == "public" ]]; then
+        dependencies+=("git" "vim" "net-tools")
+    else
+        dependencies+=("dkms")
+    fi
+
+    install_packages "${dependencies[@]}"
+    display_status_success "运维工具箱安装校验完成。"
+}
+
+optimize_kernel_sysctl_network() {
+    display_status_info "正在注入 ${GLOBAL_PROFILE} VPS 网络调优参数..."
+    local sysctl_config_file="/etc/sysctl.d/99-vps-network.conf"
+
+    if [[ "$GLOBAL_PROFILE" == "nat" ]]; then
+        cat > "$sysctl_config_file" <<'EOF'
+# NAT VPS: 轻量级客户端侧网络调优
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+net.ipv4.tcp_fastopen = 1
+net.ipv4.ip_local_port_range = 10240 65535
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.tcp_fin_timeout = 15
+net.netfilter.nf_conntrack_max = 262144
+EOF
+    else
+        cat > "$sysctl_config_file" <<'EOF'
+# 独立公网 IP VPS: 服务端吞吐与连接性能调优
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+net.ipv4.tcp_fastopen = 3
+net.core.rmem_default = 262144
+net.core.rmem_max = 6291456
+net.core.wmem_default = 262144
+net.core.wmem_max = 4194304
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.tcp_fin_timeout = 15
+EOF
+    fi
+
+    modprobe tcp_bbr >/dev/null 2>&1 || true
+    sysctl --system >/dev/null 2>&1 || true
+
+    local active_congestion_algo
+    active_congestion_algo=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)
+
+    if [[ "$active_congestion_algo" == "bbr" ]]; then
+        display_status_success "网络调优已注入，BBR 已生效。"
+    else
+        display_status_warning "网络调优已注入，但当前内核或虚拟化环境未启用 BBR。"
+    fi
+}
+
+prompt_yes_no() {
+    local prompt_text=$1
+    local default_answer=${2:-n}
+    local reply=""
+
+    if [ "$GLOBAL_ASSUME_YES" = true ]; then
+        [[ "$default_answer" =~ ^[Yy]$ ]]
+        return
+    fi
+
+    read -rp "$prompt_text" reply
+    if [ -z "$reply" ]; then
+        reply="$default_answer"
+    fi
+    [[ "$reply" =~ ^[Yy]$ ]]
+}
+
+configure_public_optional_features() {
+    if [[ "$GLOBAL_PROFILE" != "public" ]]; then
+        return
+    fi
+
+    if [ "$GLOBAL_INSTALL_DOCKER" = false ] && prompt_yes_no "是否安装 Docker 运行时？[y/N] " "n"; then
+        GLOBAL_INSTALL_DOCKER=true
+    fi
+
+    if [ "$GLOBAL_INSTALL_NODEJS" = false ] && prompt_yes_no "是否安装 Node.js/npm？[y/N] " "n"; then
+        GLOBAL_INSTALL_NODEJS=true
+    fi
+
+    if [ "$GLOBAL_INSTALL_CLOUD_KERNEL" = false ] && prompt_yes_no "是否安装 Debian Cloud Kernel？[y/N] " "n"; then
+        GLOBAL_INSTALL_CLOUD_KERNEL=true
+    fi
+}
+
+install_docker_runtime() {
+    if [ "$GLOBAL_INSTALL_DOCKER" = false ]; then
+        return
+    fi
+
+    display_status_info "正在安装 Docker 运行时..."
+    if command -v docker >/dev/null 2>&1; then
+        display_status_success "Docker 已安装，跳过。"
+        return
+    fi
+
+    if [[ "$GLOBAL_PKG_MANAGER" == "apt-get" ]]; then
+        install_packages docker.io docker-compose-plugin || install_packages docker.io docker-compose
+    else
+        install_packages docker || install_packages moby-engine
+    fi
+
+    if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files | grep -q '^docker.service'; then
+        systemctl enable --now docker >/dev/null 2>&1 || true
+    fi
+
+    if command -v docker >/dev/null 2>&1; then
+        display_status_success "Docker 安装完成。"
+    else
+        display_status_warning "Docker 安装未完成，请检查发行版软件源。"
+    fi
+}
+
+install_nodejs_runtime() {
+    if [ "$GLOBAL_INSTALL_NODEJS" = false ]; then
+        return
+    fi
+
+    display_status_info "正在通过系统包管理器安装 Node.js/npm..."
+    install_packages nodejs npm
+
+    if command -v node >/dev/null 2>&1; then
+        display_status_success "Node.js 安装完成: $(node -v)"
+    else
+        display_status_warning "Node.js 安装未完成，请检查发行版软件源。"
+    fi
+}
+
+install_debian_cloud_kernel() {
+    if [ "$GLOBAL_INSTALL_CLOUD_KERNEL" = false ]; then
+        return
+    fi
+
+    if [[ "$GLOBAL_PKG_MANAGER" != "apt-get" || "$GLOBAL_OS_ID" != "debian" ]]; then
+        display_status_warning "Cloud Kernel 仅在 Debian apt 环境下自动安装，当前系统跳过。"
+        return
+    fi
+
+    display_status_info "正在安装 Debian Cloud Kernel..."
+    install_packages linux-image-cloud-amd64
+    if command -v update-grub >/dev/null 2>&1; then
+        update-grub >/dev/null
+    fi
+    display_status_success "Debian Cloud Kernel 安装流程完成，请在维护窗口重启后确认内核。"
+}
+
+validate_port_number() {
+    local port=$1
+    [[ "$port" =~ ^[0-9]+$ ]] && ((port >= 1 && port <= 65535))
+}
+
+configure_ssh_port() {
+    if [ -z "$GLOBAL_SSH_PORT" ]; then
+        return
+    fi
+
+    if [[ "$GLOBAL_PROFILE" != "public" ]]; then
+        display_status_warning "--ssh-port 仅适用于 public profile，当前跳过。"
+        return
+    fi
+
+    if ! validate_port_number "$GLOBAL_SSH_PORT"; then
+        display_status_error "SSH 端口不合法: ${GLOBAL_SSH_PORT}"
+        exit 1
+    fi
+
+    local ssh_config_file="/etc/ssh/sshd_config"
+    if [ ! -f "$ssh_config_file" ]; then
+        display_status_warning "未找到 ${ssh_config_file}，跳过 SSH 端口修改。"
+        return
+    fi
+
+    display_status_info "正在修改 SSH 端口为 ${GLOBAL_SSH_PORT}..."
+    local backup_file="${ssh_config_file}.bak_$(date +%Y%m%d_%H%M%S)"
+    cp "$ssh_config_file" "$backup_file"
+
+    if grep -qE '^[#[:space:]]*Port[[:space:]]+' "$ssh_config_file"; then
+        sed -i -E "s/^[#[:space:]]*Port[[:space:]]+.*/Port ${GLOBAL_SSH_PORT}/" "$ssh_config_file"
+    else
+        echo "Port ${GLOBAL_SSH_PORT}" >> "$ssh_config_file"
+    fi
+
+    if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "active"; then
+        ufw allow "${GLOBAL_SSH_PORT}"/tcp >/dev/null || true
+    elif command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
+        firewall-cmd --permanent --add-port="${GLOBAL_SSH_PORT}"/tcp >/dev/null || true
+        firewall-cmd --reload >/dev/null || true
+    else
+        display_status_warning "未检测到活跃防火墙，未自动写入防火墙规则。请手动确认新 SSH 端口可达。"
+    fi
+
+    if ! sshd -t; then
+        cp "$backup_file" "$ssh_config_file"
+        display_status_error "SSH 配置语法检查失败，已恢复备份。"
+        exit 1
+    fi
+
+    local ssh_service_name="sshd"
+    if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files | grep -q '^ssh.service'; then
+        ssh_service_name="ssh"
+    fi
+
+    if command -v systemctl >/dev/null 2>&1; then
+        if ! systemctl restart "$ssh_service_name"; then
+            cp "$backup_file" "$ssh_config_file"
+            systemctl restart "$ssh_service_name" || true
+            display_status_error "SSH 服务重启失败，已尝试恢复备份。"
             exit 1
         fi
+    else
+        service "$ssh_service_name" restart
     fi
+
+    display_status_success "SSH 端口已更新为 ${GLOBAL_SSH_PORT}。请保持当前会话，确认新端口可登录后再断开。"
 }
 
-# 主函数
-main() {
-    print_info "开始系统优化和配置..."
+remove_orphaned_packages() {
+    display_status_info "正在清理孤立依赖以释放磁盘空间..."
+    if [[ "$GLOBAL_PKG_MANAGER" == "apt-get" ]]; then
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get autoremove -y >/dev/null
+        apt-get clean >/dev/null
+    elif [[ "$GLOBAL_PKG_MANAGER" == "dnf" ]]; then
+        dnf autoremove -y >/dev/null || true
+    fi
+    display_status_success "系统垃圾清理完成。"
+}
 
-    setup_swap
-    set_timezone
-    check_system_load
-    update_system
-    install_debian_cloud_kernel
-    install_epel
-    install_tools
-    enable_tfo
-    setup_bbr
-    setup_network_performance
-    install_docker
-    install_nodejs
-    install_nexttrace
-    change_ssh_port
-    clean_system
-
-    print_success "所有任务完成！"
-
-    read -p "是否现在重启系统？(y/n) " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        print_info "系统将在 10 秒后重启..."
-        sleep 10
+confirm_reboot() {
+    echo ""
+    if prompt_yes_no "是否立即重启系统以全面应用内核变更？[y/N] " "n"; then
+        display_status_info "系统将在 5 秒后执行重启指令..."
+        sleep 5
         reboot
     else
-        print_info "请记得稍后手动重启系统以应用所有更改。"
+        display_status_warning "请在合适的维护窗口手动重启系统。"
     fi
 }
 
-# 执行主函数
-main
+execute_main_lifecycle() {
+    clear || true
+    display_status_info "=== VPS 初始化与优化总线启动 ==="
+
+    validate_root_privilege
+    select_vps_profile
+    detect_operating_system_environment
+    configure_public_optional_features
+    upgrade_system_packages
+    configure_virtual_memory_swap
+    calibrate_system_timezone
+    install_essential_utilities
+    optimize_kernel_sysctl_network
+    install_debian_cloud_kernel
+    install_docker_runtime
+    install_nodejs_runtime
+    configure_ssh_port
+    remove_orphaned_packages
+
+    display_status_success "所有初始化与优化任务执行完毕。"
+    confirm_reboot
+}
+
+parse_arguments "$@"
+execute_main_lifecycle
