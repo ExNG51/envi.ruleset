@@ -5,7 +5,7 @@
 # 作用：
 #   - 安装、更新、配置、查询 Snell Server。
 #   - 支持 v5 / v4 / 手动指定版本安装与更新。
-#   - 兼容迁移旧配置路径与旧 systemd 服务名。
+#   - 兼容安全接管旧配置路径与旧 systemd 服务名。
 #   - 保持中文输出、清晰菜单、状态表格和低侵入系统修改。
 #
 # 使用：
@@ -26,6 +26,7 @@ SNELL_OBFS_HOST_DEFAULT="gateway.icloud.com"
 SNELL_CONFIG_DIR="/etc/snell"
 SNELL_CONFIG_FILE="${SNELL_CONFIG_DIR}/snell-server.conf"
 OLD_SNELL_CONFIG_FILE="/etc/snell/config.conf"
+OLD_SNELL_VERSION_FILE="/etc/snell/ver.txt"
 SNELL_VERSION_FILE="${SNELL_CONFIG_DIR}/version.txt"
 SNELL_BINARY_PATH="/usr/local/bin/snell-server"
 SNELL_SERVICE_FILE="/etc/systemd/system/snell.service"
@@ -45,6 +46,18 @@ PKG_MANAGER=""
 ARCH=""
 PROMPT_FD=0
 COMMAND="menu"
+LEGACY_LISTEN=""
+LEGACY_PORT=""
+LEGACY_PSK=""
+LEGACY_IPV6="false"
+LEGACY_DNS="${SNELL_DNS_DEFAULT}"
+LEGACY_OBFS="off"
+LEGACY_OBFS_HOST=""
+LEGACY_TFO="false"
+LEGACY_PROTOCOL_VERSION="5"
+LEGACY_BINARY_VERSION="unknown"
+LEGACY_SERVICE_STATE="inactive"
+LEGACY_WAS_ACTIVE=false
 
 print_title() {
     clear || true
@@ -79,7 +92,8 @@ Commands:
   validate     运行服务验证
   status       查看服务状态和日志提示
   tune         应用 / 更新网络优化
-  migrate      检测 / 迁移旧 Snell 服务与配置
+  takeover     检测 / 接管旧 Snell 服务与配置
+  migrate      takeover 的兼容别名
   uninstall    卸载 Snell Server
   menu         打开交互式管理菜单（默认）
 
@@ -304,59 +318,212 @@ backup_file() {
     print_success "已备份：${backup_path}"
 }
 
-migrate_legacy_layout() {
-    local migrated=false backup_suffix
-    backup_suffix="$(date +%Y%m%d_%H%M%S)"
-
-    if [ -f "${OLD_SNELL_SERVICE_FILE}" ]; then
-        print_section "旧服务迁移"
-        systemctl disable --now snell-server >/dev/null 2>&1 || true
-        mv "${OLD_SNELL_SERVICE_FILE}" "${OLD_SNELL_SERVICE_FILE}.bak.${backup_suffix}"
-        systemctl daemon-reload >/dev/null 2>&1 || true
-        print_success "已停用旧服务 snell-server，并备份旧服务文件。"
-        migrated=true
-    fi
-
-    if [ -f "${OLD_SNELL_CONFIG_FILE}" ]; then
-        print_section "旧配置迁移"
-        mkdir -p "${SNELL_CONFIG_DIR}"
-        if [ ! -f "${SNELL_CONFIG_FILE}" ]; then
-            cp -a "${OLD_SNELL_CONFIG_FILE}" "${SNELL_CONFIG_FILE}"
-            print_success "已从旧配置生成新配置：${SNELL_CONFIG_FILE}"
-        fi
-        mv "${OLD_SNELL_CONFIG_FILE}" "${OLD_SNELL_CONFIG_FILE}.bak.${backup_suffix}"
-        print_success "已备份并移出旧配置路径，避免后续混淆。"
-        migrated=true
-    fi
-
-    [ "${migrated}" = true ] || return 0
-}
-
 has_legacy_layout() {
     [ -f "${OLD_SNELL_CONFIG_FILE}" ] || [ -f "${OLD_SNELL_SERVICE_FILE}" ]
 }
 
-run_legacy_migration() {
+legacy_service_state() {
+    if systemctl is-active --quiet snell-server 2>/dev/null; then
+        echo "active"
+    elif systemctl is-enabled --quiet snell-server 2>/dev/null; then
+        echo "enabled"
+    else
+        echo "inactive"
+    fi
+}
+
+read_legacy_config() {
+    if [ ! -f "${OLD_SNELL_CONFIG_FILE}" ]; then
+        print_error "未找到旧配置：${OLD_SNELL_CONFIG_FILE}"
+        return 1
+    fi
+
+    LEGACY_LISTEN="$(read_ini_value "listen" "${OLD_SNELL_CONFIG_FILE}" || true)"
+    LEGACY_PSK="$(read_ini_value "psk" "${OLD_SNELL_CONFIG_FILE}" || true)"
+    [ -n "${LEGACY_LISTEN}" ] || { print_error "旧配置缺少 listen 字段。"; return 1; }
+    [ -n "${LEGACY_PSK}" ] || { print_error "旧配置缺少 psk 字段。"; return 1; }
+
+    LEGACY_PORT="${LEGACY_LISTEN##*:}"
+    validate_port "${LEGACY_PORT}" || { print_error "旧配置中的监听端口无效：${LEGACY_LISTEN}"; return 1; }
+
+    LEGACY_IPV6="$(read_ini_value "ipv6" "${OLD_SNELL_CONFIG_FILE}" || echo "false")"
+    LEGACY_DNS="$(read_ini_value "dns" "${OLD_SNELL_CONFIG_FILE}" || echo "${SNELL_DNS_DEFAULT}")"
+    LEGACY_OBFS="$(read_ini_value "obfs" "${OLD_SNELL_CONFIG_FILE}" || echo "off")"
+    LEGACY_OBFS_HOST="$(read_ini_value "obfs-host" "${OLD_SNELL_CONFIG_FILE}" || true)"
+    LEGACY_TFO="$(read_ini_value "tfo" "${OLD_SNELL_CONFIG_FILE}" || echo "false")"
+    LEGACY_PROTOCOL_VERSION="$(read_ini_value "version" "${OLD_SNELL_CONFIG_FILE}" || true)"
+    if [ -z "${LEGACY_PROTOCOL_VERSION}" ] && [ -f "${OLD_SNELL_VERSION_FILE}" ]; then
+        LEGACY_PROTOCOL_VERSION="$(sed 's/^v//' "${OLD_SNELL_VERSION_FILE}" | head -n 1 | cut -d '.' -f 1)"
+    fi
+    LEGACY_PROTOCOL_VERSION="${LEGACY_PROTOCOL_VERSION:-5}"
+
+    if [ "${LEGACY_OBFS}" != "off" ] && [ -z "${LEGACY_OBFS_HOST}" ]; then
+        LEGACY_OBFS_HOST="${SNELL_OBFS_HOST_DEFAULT}"
+    fi
+
+    if [ -f "${OLD_SNELL_VERSION_FILE}" ]; then
+        LEGACY_BINARY_VERSION="$(sed 's/^v//' "${OLD_SNELL_VERSION_FILE}" | head -n 1)"
+    elif [ -f "${SNELL_VERSION_FILE}" ]; then
+        LEGACY_BINARY_VERSION="$(get_installed_binary_version)"
+    else
+        LEGACY_BINARY_VERSION="unknown"
+    fi
+
+    LEGACY_SERVICE_STATE="$(legacy_service_state)"
+    if systemctl is-active --quiet snell-server 2>/dev/null; then
+        LEGACY_WAS_ACTIVE=true
+    else
+        LEGACY_WAS_ACTIVE=false
+    fi
+}
+
+show_legacy_takeover_plan() {
+    print_section "接管计划"
+    printf "%s\n" "------------------------------------------------------------"
+    printf "%-18s %s\n" "旧服务状态" "${LEGACY_SERVICE_STATE}"
+    printf "%-18s %s\n" "旧监听端口" "${LEGACY_PORT}"
+    printf "%-18s %s\n" "协议版本" "${LEGACY_PROTOCOL_VERSION}"
+    printf "%-18s %s\n" "二进制版本" "${LEGACY_BINARY_VERSION}"
+    printf "%-18s %s\n" "IPv6" "${LEGACY_IPV6}"
+    printf "%-18s %s\n" "TFO" "${LEGACY_TFO}"
+    printf "%-18s %s\n" "obfs" "${LEGACY_OBFS}"
+    printf "%s\n" "------------------------------------------------------------"
+    echo
+    echo "将写入新配置：${SNELL_CONFIG_FILE}"
+    echo "将写入新服务：${SNELL_SERVICE_FILE}"
+    echo "旧配置和旧服务会在新服务验证成功后改名备份。"
+    if [ "${LEGACY_WAS_ACTIVE}" = true ]; then
+        print_warn "接管会短暂停止旧 snell-server，再启动新 snell 服务。"
+    fi
+}
+
+write_config_from_legacy() {
+    print_section "生成新配置与服务"
+    write_snell_config \
+        "${LEGACY_PORT}" \
+        "${LEGACY_PSK}" \
+        "${LEGACY_IPV6:-false}" \
+        "${LEGACY_DNS:-${SNELL_DNS_DEFAULT}}" \
+        "${LEGACY_OBFS:-off}" \
+        "${LEGACY_OBFS_HOST:-}" \
+        "${LEGACY_TFO:-false}" \
+        "${LEGACY_PROTOCOL_VERSION:-5}"
+    if [ -n "${LEGACY_BINARY_VERSION}" ] && [ "${LEGACY_BINARY_VERSION}" != "unknown" ]; then
+        echo "${LEGACY_BINARY_VERSION}" > "${SNELL_VERSION_FILE}"
+        chmod 644 "${SNELL_VERSION_FILE}"
+    fi
+    write_systemd_service
+}
+
+start_new_service_for_takeover() {
+    print_section "切换到新服务"
+    systemctl stop snell >/dev/null 2>&1 || true
+    if [ "${LEGACY_WAS_ACTIVE}" = true ]; then
+        systemctl stop snell-server >/dev/null 2>&1 || true
+    fi
+    systemctl enable snell >/dev/null || return 1
+    systemctl restart snell || return 1
+}
+
+verify_takeover() {
+    local failed=0
+    print_section "验证新服务"
+
+    if systemctl is-active --quiet snell 2>/dev/null; then
+        print_success "新 snell 服务 active。"
+    else
+        print_error "新 snell 服务未处于 active。"
+        failed=1
+    fi
+
+    if check_command_exists ss; then
+        if is_tcp_port_listening "${LEGACY_PORT}"; then
+            print_success "检测到 TCP ${LEGACY_PORT} 正在监听。"
+        else
+            print_error "未检测到 TCP ${LEGACY_PORT} 监听。"
+            failed=1
+        fi
+    else
+        print_warn "缺少 ss 命令，跳过端口监听验证。"
+    fi
+
+    if [ -f "${SNELL_CONFIG_FILE}" ] && [ -f "${SNELL_SERVICE_FILE}" ]; then
+        print_success "新配置与新服务文件存在。"
+    else
+        print_error "新配置或新服务文件缺失。"
+        failed=1
+    fi
+
+    [ "${failed}" -eq 0 ]
+}
+
+finalize_legacy_takeover() {
+    local backup_suffix
+    backup_suffix="$(date +%Y%m%d_%H%M%S)"
+    print_section "收敛旧服务"
+
+    systemctl disable snell-server >/dev/null 2>&1 || true
+    [ -f "${OLD_SNELL_SERVICE_FILE}" ] && mv "${OLD_SNELL_SERVICE_FILE}" "${OLD_SNELL_SERVICE_FILE}.bak.${backup_suffix}"
+    [ -f "${OLD_SNELL_CONFIG_FILE}" ] && mv "${OLD_SNELL_CONFIG_FILE}" "${OLD_SNELL_CONFIG_FILE}.bak.${backup_suffix}"
+    [ -f "${OLD_SNELL_VERSION_FILE}" ] && mv "${OLD_SNELL_VERSION_FILE}" "${OLD_SNELL_VERSION_FILE}.bak.${backup_suffix}"
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    print_success "旧服务和旧配置已备份，新 snell 服务已接管。"
+}
+
+rollback_legacy_takeover() {
+    print_section "接管失败，执行回滚"
+    systemctl disable --now snell >/dev/null 2>&1 || true
+    if [ "${LEGACY_WAS_ACTIVE}" = true ] && [ -f "${OLD_SNELL_SERVICE_FILE}" ]; then
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        systemctl start snell-server >/dev/null 2>&1 || true
+        if systemctl is-active --quiet snell-server 2>/dev/null; then
+            print_success "旧 snell-server 服务已恢复运行。"
+        else
+            print_error "旧 snell-server 服务未能自动恢复，请立即手动检查。"
+        fi
+    else
+        print_warn "旧服务原本不是 active，已停止新 snell 服务。"
+    fi
+    journalctl -u snell -n 40 --no-pager 2>/dev/null || true
+}
+
+run_legacy_takeover() {
     print_title
-    print_section "检测 / 迁移旧 Snell 服务与配置"
+    print_section "检测 / 接管旧 Snell 服务与配置"
     if ! has_legacy_layout; then
         print_success "未发现旧配置路径或旧服务文件。"
         pause_screen
         return
     fi
 
-    echo "检测到旧布局："
-    [ -f "${OLD_SNELL_CONFIG_FILE}" ] && echo "  旧配置：${OLD_SNELL_CONFIG_FILE}"
-    [ -f "${OLD_SNELL_SERVICE_FILE}" ] && echo "  旧服务：${OLD_SNELL_SERVICE_FILE}"
+    read_legacy_config || { pause_screen; return 1; }
+    show_legacy_takeover_plan
     echo
-    confirm_yes_no "是否停用旧服务并迁移到当前统一路径？" "n" || {
-        print_warn "已取消迁移。"
+    local answer
+    read_prompt answer "确认接管旧 Snell？输入 TAKEOVER 继续： "
+    [ "${answer}" = "TAKEOVER" ] || { print_warn "已取消接管。"; pause_screen; return 0; }
+
+    ensure_dependencies
+    write_config_from_legacy
+    if ! start_new_service_for_takeover; then
+        rollback_legacy_takeover
         pause_screen
-        return
-    }
-    migrate_legacy_layout
-    print_success "旧布局迁移检查已完成。"
+        return 1
+    fi
+    if ! verify_takeover; then
+        rollback_legacy_takeover
+        pause_screen
+        return 1
+    fi
+
+    finalize_legacy_takeover
+    print_success "旧 Snell 已安全接管到 snell.service。"
+    show_client_config false
     pause_screen
+}
+
+run_legacy_migration() {
+    run_legacy_takeover "$@"
 }
 
 choose_snell_version() {
@@ -611,7 +778,14 @@ enable_and_restart_service() {
 install_or_reinstall_snell() {
     print_title
     print_section "安装 / 覆盖安装 Snell Server"
-    migrate_legacy_layout
+    if has_legacy_layout; then
+        print_warn "检测到旧 Snell 布局。已有旧 VPS 建议优先使用菜单中的“检测 / 接管旧 Snell 服务与配置”。"
+        confirm_yes_no "是否仍然继续执行全新安装 / 覆盖安装？" "n" || {
+            print_warn "已取消安装。"
+            pause_screen
+            return
+        }
+    fi
     ensure_dependencies
 
     if [ -f "${SNELL_CONFIG_FILE}" ] && ! confirm_yes_no "检测到已有配置，是否覆盖安装？" "n"; then
@@ -910,12 +1084,12 @@ show_main_menu() {
         echo "  6) 运行服务验证"
         echo "  7) 查看服务状态与日志提示"
         echo "  8) 应用 / 更新网络优化"
-        echo "  9) 检测 / 迁移旧 Snell 服务与配置"
+        echo "  9) 检测 / 接管旧 Snell 服务与配置"
         echo " 10) 卸载 Snell Server"
         echo "  0) 退出"
         echo
         if has_legacy_layout; then
-            print_dim "Snell 状态: $(service_state) | 二进制版本: $(get_installed_binary_version) | 检测到旧布局"
+            print_dim "Snell 状态: $(service_state) | 二进制版本: $(get_installed_binary_version) | 检测到旧 Snell 布局"
         else
             print_dim "Snell 状态: $(service_state) | 二进制版本: $(get_installed_binary_version)"
         fi
@@ -931,7 +1105,7 @@ show_main_menu() {
             6) validate_snell_service ;;
             7) show_status_and_logs ;;
             8) apply_network_tuning ;;
-            9) run_legacy_migration ;;
+            9) run_legacy_takeover ;;
             10) uninstall_snell ;;
             0) echo; print_info "已退出。"; exit 0 ;;
             *) print_error "无效选项，请重新输入。"; sleep 1 ;;
@@ -947,7 +1121,7 @@ parse_arguments() {
                 show_help
                 exit 0
                 ;;
-            install|view|config|update|service|validate|status|tune|migrate|uninstall|menu)
+            install|view|config|update|service|validate|status|tune|takeover|migrate|uninstall|menu)
                 COMMAND="$1"
                 shift
                 ;;
@@ -975,7 +1149,7 @@ main() {
         validate) validate_snell_service ;;
         status) show_status_and_logs ;;
         tune) apply_network_tuning ;;
-        migrate) run_legacy_migration ;;
+        takeover|migrate) run_legacy_takeover ;;
         uninstall) uninstall_snell ;;
         menu) show_main_menu ;;
     esac
