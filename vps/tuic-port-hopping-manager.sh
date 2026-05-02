@@ -15,7 +15,7 @@
 
 set -u
 
-SCRIPT_VERSION="2026.05.02-r4"
+SCRIPT_VERSION="2026.05.02-r5"
 BASE_DIR="/etc/tuic-port-hopping"
 INSTANCE_DIR="${BASE_DIR}/instances"
 NFT_RULE_DIR="/etc/nftables.d"
@@ -286,7 +286,7 @@ check_instance_range_conflict() {
 prompt_real_port() {
     REAL_PORT=""
     while true; do
-        read_prompt REAL_PORT "请输入真实 TUIC UDP 监听端口，例如 21428： "
+        read_prompt REAL_PORT "请输入当前 TUIC UDP 监听端口： "
         validate_port "${REAL_PORT}" && break
         print_error "端口格式无效，请输入 1-65535 之间的数字。"
     done
@@ -296,7 +296,7 @@ prompt_port_range() {
     local auto_range custom_range
     auto_range="$(calculate_auto_range "${REAL_PORT}")"
     print_info "根据真实端口 ${REAL_PORT} 自动生成的跳跃范围：${auto_range}"
-    print_info "可直接回车使用自动范围，也可输入自定义范围，例如：31000-31099"
+    print_info "可直接回车使用自动范围，也可输入自定义范围，格式为：起始端口-结束端口"
     while true; do
         read_prompt custom_range "请输入跳跃端口范围（回车使用 ${auto_range}）： "
         custom_range="${custom_range:-${auto_range}}"
