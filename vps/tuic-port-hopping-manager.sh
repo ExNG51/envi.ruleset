@@ -15,7 +15,7 @@
 
 set -u
 
-SCRIPT_VERSION="2026.05.02-r3"
+SCRIPT_VERSION="2026.05.02-r4"
 BASE_DIR="/etc/tuic-port-hopping"
 INSTANCE_DIR="${BASE_DIR}/instances"
 NFT_RULE_DIR="/etc/nftables.d"
@@ -48,12 +48,40 @@ print_warn() { echo -e "${COLOR_YELLOW}[提示]${COLOR_RESET} $1"; }
 print_error() { echo -e "${COLOR_RED}[错误]${COLOR_RESET} $1"; }
 print_info() { echo -e "${COLOR_CYAN}[信息]${COLOR_RESET} $1"; }
 print_dim() { echo -e "${COLOR_DIM}$1${COLOR_RESET}"; }
-pause_screen() { echo; read -r -p "按回车键继续..."; }
+
+PROMPT_FD=0
+
+init_prompt_input() {
+    if [ -r /dev/tty ]; then
+        exec 3</dev/tty
+        PROMPT_FD=3
+    else
+        PROMPT_FD=0
+    fi
+}
+
+read_prompt() {
+    local var_name="$1" prompt_text="$2" value
+    if ! IFS= read -r -u "${PROMPT_FD}" -p "${prompt_text}" "${var_name}"; then
+        echo
+        print_error "无法读取交互式输入。请在交互式终端运行脚本。"
+        exit 1
+    fi
+
+    value="${!var_name//$'\r'/}"
+    printf -v "${var_name}" '%s' "${value}"
+}
+
+pause_screen() {
+    local _
+    echo
+    read_prompt _ "按回车键继续..."
+}
 
 confirm_yes_no() {
     local prompt_text="$1" answer=""
     while true; do
-        read -r -p "${prompt_text} [y/n]: " answer
+        read_prompt answer "${prompt_text} [y/n]: "
         case "${answer}" in
             y|Y) return 0 ;;
             n|N) return 1 ;;
@@ -160,7 +188,7 @@ select_instance() {
     echo
     local port
     while true; do
-        read -r -p "请输入要管理的真实 TUIC 端口，或输入 0 返回： " port
+        read_prompt port "请输入要管理的真实 TUIC 端口，或输入 0 返回： "
         [ "${port}" = "0" ] && return 1
         validate_port "${port}" || { print_error "端口格式无效。"; continue; }
         [ -f "$(get_config_file "${port}")" ] || { print_error "未找到端口 ${port} 的实例。"; continue; }
@@ -258,7 +286,7 @@ check_instance_range_conflict() {
 prompt_real_port() {
     REAL_PORT=""
     while true; do
-        read -r -p "请输入真实 TUIC UDP 监听端口，例如 21428： " REAL_PORT
+        read_prompt REAL_PORT "请输入真实 TUIC UDP 监听端口，例如 21428： "
         validate_port "${REAL_PORT}" && break
         print_error "端口格式无效，请输入 1-65535 之间的数字。"
     done
@@ -270,7 +298,7 @@ prompt_port_range() {
     print_info "根据真实端口 ${REAL_PORT} 自动生成的跳跃范围：${auto_range}"
     print_info "可直接回车使用自动范围，也可输入自定义范围，例如：31000-31099"
     while true; do
-        read -r -p "请输入跳跃端口范围（回车使用 ${auto_range}）： " custom_range
+        read_prompt custom_range "请输入跳跃端口范围（回车使用 ${auto_range}）： "
         custom_range="${custom_range:-${auto_range}}"
         validate_port_range "${custom_range}" || { print_error "范围格式无效，请使用 start-end。"; continue; }
         RANGE_START="${custom_range%-*}"
@@ -654,7 +682,7 @@ remove_instance() {
     print_title
     select_instance || { pause_screen; return 0; }
     load_instance_config "${SELECTED_PORT}" || { pause_screen; return 1; }
-    local service cfg
+    local service cfg answer
     service="$(get_service_name "${REAL_PORT}")"
     cfg="$(get_config_file "${REAL_PORT}")"
 
@@ -666,7 +694,7 @@ remove_instance() {
     echo "  systemd 服务：${service}"
     echo "  UFW 规则：${REAL_PORT}/udp 与 ${RANGE_START}:${RANGE_END}/udp"
     echo
-    read -r -p "确认删除该实例？输入 DELETE 继续： " answer
+    read_prompt answer "确认删除该实例？输入 DELETE 继续： "
     [ "${answer}" = "DELETE" ] || { print_warn "已取消删除。"; pause_screen; return 0; }
 
     systemctl disable --now "${service}" >/dev/null 2>&1 || true
@@ -685,7 +713,8 @@ remove_all_instances() {
     print_section "删除全部实例"
     show_instance_table || { pause_screen; return 0; }
     echo
-    read -r -p "确认删除全部实例？输入 DELETE-ALL 继续： " answer
+    local answer
+    read_prompt answer "确认删除全部实例？输入 DELETE-ALL 继续： "
     [ "${answer}" = "DELETE-ALL" ] || { print_warn "已取消删除。"; pause_screen; return 0; }
 
     local port cfg real start end table nft_file service
@@ -738,7 +767,7 @@ show_main_menu() {
             print_dim "当前没有已创建实例。"
         fi
         echo
-        read -r -p "请输入选项编号： " choice
+        read_prompt choice "请输入选项编号： "
         case "${choice}" in
             1) create_or_update_instance ;;
             2) show_all_instances ;;
@@ -757,6 +786,7 @@ show_main_menu() {
 
 main() {
     require_root
+    init_prompt_input
     ensure_directories
     show_main_menu
 }
