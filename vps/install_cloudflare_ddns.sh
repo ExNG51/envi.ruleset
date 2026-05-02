@@ -1,4 +1,6 @@
 #!/bin/bash
+set -Eeuo pipefail
+
 # ==========================================
 # 描述：Cloudflare DDNS 自动化安装与配置分离脚本 (支持双栈 IPv4/IPv6)
 # 规则：遵循意图导向命名法
@@ -17,6 +19,21 @@ Verify_RootAccess() {
     fi
 }
 
+Verify_RuntimeDependencies() {
+    local Missing_CommandList=()
+
+    for command_name in curl crontab; do
+        if ! command -v "$command_name" >/dev/null 2>&1; then
+            Missing_CommandList+=("$command_name")
+        fi
+    done
+
+    if [ ${#Missing_CommandList[@]} -ne 0 ]; then
+        echo "[错误] 缺少运行依赖: ${Missing_CommandList[*]}。请先安装后再运行。"
+        exit 1
+    fi
+}
+
 # 收集用户输入的 Cloudflare 配置信息
 Prompt_UserInput() {
     echo "=========================================="
@@ -25,10 +42,11 @@ Prompt_UserInput() {
     echo "[提示] 脚本将自动检测 VPS 的公网 IPv4 和 IPv6 地址。"
     echo "[提示] 请确保在 Cloudflare 中已为您需要的 IP 类型创建了 A 或 AAAA 记录。"
     echo "------------------------------------------"
-    read -p "请输入 Cloudflare API Token: " Input_ApiToken
-    read -p "请输入 Cloudflare Zone ID: " Input_ZoneId
-    read -p "请输入目标域名 (例如: ddns.example.com): " Input_DomainName
-    read -p "请输入定时任务间隔分钟数 (默认: 5): " Input_CronInterval
+    read -rsp "请输入 Cloudflare API Token: " Input_ApiToken
+    echo ""
+    read -rp "请输入 Cloudflare Zone ID: " Input_ZoneId
+    read -rp "请输入目标域名 (例如: ddns.example.com): " Input_DomainName
+    read -rp "请输入定时任务间隔分钟数 (默认: 5，范围: 1-59): " Input_CronInterval
     
     # 设定定时任务默认值为 5 分钟
     if [ -z "$Input_CronInterval" ]; then
@@ -37,8 +55,8 @@ Prompt_UserInput() {
 
     echo "------------------------------------------"
     echo "[可选配置] Telegram 报警机器人 (不使用请直接回车跳过)"
-    read -p "请输入 Telegram Bot Token: " Input_TgToken
-    read -p "请输入 Telegram Chat ID: " Input_TgChatId
+    read -rp "请输入 Telegram Bot Token: " Input_TgToken
+    read -rp "请输入 Telegram Chat ID: " Input_TgChatId
 
     # ==========================================
     # 输入清洗 (Sanitization)
@@ -52,9 +70,32 @@ Prompt_UserInput() {
     Input_TgChatId="${Input_TgChatId//[[:space:]]/}"
 }
 
+Validate_UserInput() {
+    if [ -z "$Input_ApiToken" ] || [ -z "$Input_ZoneId" ] || [ -z "$Input_DomainName" ]; then
+        echo "[错误] API Token、Zone ID 和目标域名均不能为空。"
+        exit 1
+    fi
+
+    if [[ ! "$Input_CronInterval" =~ ^[0-9]+$ ]] || [ "$Input_CronInterval" -lt 1 ] || [ "$Input_CronInterval" -gt 59 ]; then
+        echo "[错误] 定时任务间隔必须是 1-59 之间的整数。"
+        exit 1
+    fi
+
+    if [[ ! "$Input_ZoneId" =~ ^[A-Za-z0-9_-]+$ ]]; then
+        echo "[错误] Zone ID 包含非法字符。"
+        exit 1
+    fi
+
+    if [[ ! "$Input_DomainName" =~ ^[A-Za-z0-9._-]+$ ]] || [[ "$Input_DomainName" != *.* ]]; then
+        echo "[错误] 目标域名格式不合法。"
+        exit 1
+    fi
+}
+
 # 动态生成配置文件并写入目标路径
 Generate_Configuration() {
     echo "[信息] 正在生成配置文件至 ${Define_ConfigFile}..."
+    mkdir -p "$(dirname "$Define_ConfigFile")"
     
     # 写入独立的配置文件，隔离运行时变量
     cat << EOF > "$Define_ConfigFile"
@@ -71,13 +112,17 @@ EOF
 # 从 GitHub 拉取并部署核心同步脚本
 Deploy_CoreScript() {
     echo "[信息] 正在从 GitHub 下载核心同步脚本..."
-    curl -sL "$Define_CoreScriptUrl" -o "$Define_CoreScriptPath"
+    local Path_TempCoreScript
+    Path_TempCoreScript="$(mktemp)"
     
-    if [ ! -f "$Define_CoreScriptPath" ]; then
-         echo "[错误] 核心脚本下载失败，请检查 URL 是否正确。"
-         exit 1
+    if ! curl -fsSL "$Define_CoreScriptUrl" -o "$Path_TempCoreScript"; then
+        rm -f "$Path_TempCoreScript"
+        echo "[错误] 核心脚本下载失败，请检查网络或 URL。"
+        exit 1
     fi
-    # 赋予执行权限
+
+    mkdir -p "$(dirname "$Define_CoreScriptPath")"
+    mv -f "$Path_TempCoreScript" "$Define_CoreScriptPath"
     chmod +x "$Define_CoreScriptPath"
 }
 
@@ -86,7 +131,7 @@ Configure_CronJob() {
     local Cron_Expression="*/${Input_CronInterval} * * * * ${Define_CoreScriptPath} >/dev/null 2>&1"
     
     echo "[信息] 正在配置系统定时任务..."
-    (crontab -l 2>/dev/null | grep -v "$Define_CoreScriptPath"; echo "$Cron_Expression") | crontab -
+    (crontab -l 2>/dev/null | grep -F -v "$Define_CoreScriptPath"; echo "$Cron_Expression") | crontab -
     
     echo "=========================================="
     echo " 安装完成！                               "
@@ -98,7 +143,9 @@ Configure_CronJob() {
 # 安装向导主执行流
 # ==========================================
 Verify_RootAccess
+Verify_RuntimeDependencies
 Prompt_UserInput
+Validate_UserInput
 Generate_Configuration
 Deploy_CoreScript
 Configure_CronJob
@@ -112,4 +159,4 @@ rm -f /tmp/cf_ddns_ipv4.cache
 rm -f /tmp/cf_ddns_ipv6.cache
 
 echo "[信息] 正在首次运行 DDNS 同步脚本..."
-$Define_CoreScriptPath
+"$Define_CoreScriptPath"

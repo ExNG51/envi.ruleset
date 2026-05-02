@@ -1,9 +1,8 @@
 #!/bin/bash
 
 # --- Configuration (Defaults, can be overridden by --latest) ---
-SS_VERSION="1.23.0" # Shadowsocks Rust Version
+SS_VERSION="1.24.0" # Shadowsocks Rust Version
 SHADOW_TLS_VERSION="v0.2.25" # Shadow-TLS Version
-SHADOW_TLS_FIXED_PASSWORD="dEyss6rg38psKamNstVSpQ==" # Predefined fixed password
 SHADOW_TLS_SNI="gateway.icloud.com" # Shadow-TLS SNI Host
 
 # --- Global Variables (Detected early) ---
@@ -896,7 +895,7 @@ EOF
             echo ""
             echo "Choose Shadow-TLS password generation method:"
             echo "  1) Generate a random password (Recommended)"
-            echo "  2) Use the predefined fixed password (Less Secure: $SHADOW_TLS_FIXED_PASSWORD)"
+            echo "  2) Enter a custom password manually"
             echo ""
 
             local stls_choice=""
@@ -923,8 +922,14 @@ EOF
                         break # Exit loop
                         ;;
                     2)
-                        echo "Using predefined fixed password for Shadow-TLS."
-                        stls_password="$SHADOW_TLS_FIXED_PASSWORD"
+                        read -rsp "Enter Shadow-TLS password: " stls_password
+                        echo ""
+                        if [ -z "$stls_password" ]; then
+                            echo "Error: Shadow-TLS password cannot be empty."
+                            stls_password=""
+                            continue
+                        fi
+                        echo "Using custom Shadow-TLS password."
                         break # Exit loop
                         ;;
                     *)
@@ -1372,4 +1377,3 @@ else
 fi
 
 exit 0 # Exit successfully if a command was executed non-interactively
-

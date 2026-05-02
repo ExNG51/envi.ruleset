@@ -1,12 +1,14 @@
 #!/bin/bash
+set -Eeuo pipefail
+
 # ==========================================
-# 描述：NAT VPS Cloudflare DDNS 自动更新核心脚本 (v1.2.3)
+# 描述：NAT VPS Cloudflare DDNS 自动更新核心脚本 (v1.2.4)
 # 规则：遵循意图导向命名法
 # 特性：支持双栈、自更新、IP防刷、防脏数据注入拦截、原生错误追踪
 # ==========================================
 
 # --- 版本与路径定义 ---
-Define_ScriptVersion="1.2.3" 
+Define_ScriptVersion="1.2.4"
 Define_UpdateUrl="https://raw.githubusercontent.com/ExNG51/envi.ruleset/refs/heads/main/vps/sync_cloudflare_ddns.sh"
 Define_ConfigFile="/usr/local/etc/config_cloudflare_ddns.conf"
 Define_SelfPath="/usr/local/bin/sync_cloudflare_ddns.sh"
@@ -21,19 +23,38 @@ Define_CacheIpv6="/tmp/cf_ddns_ipv6.cache"
 
 Verify_Configuration() {
     if [ -f "$Define_ConfigFile" ]; then
+        # shellcheck disable=SC1090
         source "$Define_ConfigFile"
     else
         echo "[错误] 找不到配置文件 ${Define_ConfigFile}。"
         exit 1
     fi
+
+    Config_TgToken="${Config_TgToken:-}"
+    Config_TgChatId="${Config_TgChatId:-}"
+
+    if [ -z "${Config_ApiToken:-}" ] || [ -z "${Config_ZoneId:-}" ] || [ -z "${Config_DomainName:-}" ]; then
+        echo "[错误] 配置文件缺少 Config_ApiToken、Config_ZoneId 或 Config_DomainName。"
+        exit 1
+    fi
+
+    if [[ ! "$Config_DomainName" =~ ^[A-Za-z0-9._-]+$ ]] || [[ "$Config_DomainName" != *.* ]]; then
+        echo "[错误] 配置文件中的域名格式不合法: ${Config_DomainName}"
+        exit 1
+    fi
 }
 
 Perform_SelfUpdate() {
-    local Path_TempFile="/tmp/sync_cloudflare_ddns_new.sh"
-    curl -sL "$Define_UpdateUrl" -o "$Path_TempFile"
-    if [ ! -f "$Path_TempFile" ]; then return 0; fi
+    local Path_TempFile
+    Path_TempFile="$(mktemp)"
 
-    local String_RemoteVersion=$(grep "^Define_ScriptVersion=" "$Path_TempFile" | cut -d'"' -f2 | head -n 1)
+    if ! curl -fsSL --connect-timeout 5 "$Define_UpdateUrl" -o "$Path_TempFile"; then
+        rm -f "$Path_TempFile"
+        return 0
+    fi
+
+    local String_RemoteVersion
+    String_RemoteVersion=$(grep "^Define_ScriptVersion=" "$Path_TempFile" | cut -d'"' -f2 | head -n 1 || true)
 
     if [ -n "$String_RemoteVersion" ] && [ "$String_RemoteVersion" != "$Define_ScriptVersion" ]; then
         echo "[更新] 发现新版本 ${String_RemoteVersion} (当前: ${Define_ScriptVersion})，正在更新..."
@@ -55,9 +76,9 @@ Notify_Telegram() {
     local Inject_Message=$1
     if [ -n "$Config_TgToken" ] && [ -n "$Config_TgChatId" ]; then
         local Format_Message="🌐 [${Config_DomainName}]%0A${Inject_Message}"
-        curl -s -X POST "https://api.telegram.org/bot${Config_TgToken}/sendMessage" \
+        curl -sS -m 10 -X POST "https://api.telegram.org/bot${Config_TgToken}/sendMessage" \
              -d "chat_id=${Config_TgChatId}" \
-             -d "text=${Format_Message}" >/dev/null 2>&1
+             -d "text=${Format_Message}" >/dev/null 2>&1 || true
     fi
 }
 
@@ -65,16 +86,39 @@ Notify_Telegram() {
 # 网络请求与解析模块
 # ==========================================
 
-Fetch_PublicIpv4() { curl -s -4 -m 5 https://api.ipify.org; }
-Fetch_PublicIpv6() { curl -s -6 -m 5 https://api64.ipify.org || curl -s -6 -m 5 https://ipv6.icanhazip.com; }
+Fetch_PublicIpv4() { curl -fsS -4 -m 5 https://api.ipify.org 2>/dev/null || true; }
+Fetch_PublicIpv6() { curl -fsS -6 -m 5 https://api64.ipify.org 2>/dev/null || curl -fsS -6 -m 5 https://ipv6.icanhazip.com 2>/dev/null || true; }
+
+Validate_Ipv4Address() {
+    local Inject_IpAddress=$1
+    local Octet
+
+    [[ "$Inject_IpAddress" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || return 1
+
+    IFS='.' read -r -a OctetList <<< "$Inject_IpAddress"
+    for Octet in "${OctetList[@]}"; do
+        if ((Octet < 0 || Octet > 255)); then
+            return 1
+        fi
+    done
+}
+
+Validate_Ipv6Address() {
+    local Inject_IpAddress=$1
+    [[ "$Inject_IpAddress" =~ : ]] || return 1
+    [[ ! "$Inject_IpAddress" =~ [[:space:]] ]] || return 1
+    [[ "$Inject_IpAddress" =~ ^[0-9A-Fa-f:.]+$ ]] || return 1
+}
 
 Query_DnsRecordId() {
     local Inject_RecordType=$1
-    local Raw_Response=$(curl -s -m 10 -X GET "https://api.cloudflare.com/client/v4/zones/${Config_ZoneId}/dns_records?type=${Inject_RecordType}&name=${Config_DomainName}" \
+    local Raw_Response
+    Raw_Response=$(curl -sS -m 10 -X GET "https://api.cloudflare.com/client/v4/zones/${Config_ZoneId}/dns_records?type=${Inject_RecordType}&name=${Config_DomainName}" \
          -H "Authorization: Bearer ${Config_ApiToken}" \
-         -H "Content-Type: application/json")
+         -H "Content-Type: application/json" || true)
     
-    local Extracted_Id=$(echo "$Raw_Response" | grep -o '"id":"[^"]*' | head -1 | cut -d'"' -f4)
+    local Extracted_Id
+    Extracted_Id=$(echo "$Raw_Response" | grep -o '"id":"[^"]*' | head -1 | cut -d'"' -f4 || true)
     
     if [ -z "$Extracted_Id" ]; then
         echo "[诊断日志] CF API 返回空或异常: $Raw_Response" >&2
@@ -87,10 +131,10 @@ Commit_DnsRecordUpdate() {
     local Inject_RecordId=$2
     local Inject_RecordType=$3
 
-    curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/${Config_ZoneId}/dns_records/${Inject_RecordId}" \
+    curl -sS -m 10 -X PUT "https://api.cloudflare.com/client/v4/zones/${Config_ZoneId}/dns_records/${Inject_RecordId}" \
          -H "Authorization: Bearer ${Config_ApiToken}" \
          -H "Content-Type: application/json" \
-         --data "{\"type\":\"${Inject_RecordType}\",\"name\":\"${Config_DomainName}\",\"content\":\"${Inject_IpAddress}\",\"ttl\":120,\"proxied\":false}"
+         --data "{\"type\":\"${Inject_RecordType}\",\"name\":\"${Config_DomainName}\",\"content\":\"${Inject_IpAddress}\",\"ttl\":120,\"proxied\":false}" || true
 }
 
 # ==========================================
@@ -106,13 +150,13 @@ Execute_DdnsProcess() {
     # 1. 获取并严格校验公网 IP (防脏数据注入)
     if [ "$Inject_Type" == "IPv4" ]; then
         Fetched_Ip=$(Fetch_PublicIpv4)
-        if [[ ! "$Fetched_Ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+        if ! Validate_Ipv4Address "$Fetched_Ip"; then
             echo "[警告] 获取到的 IPv4 地址格式不合法 (可能遭遇网关阻断): ${Fetched_Ip}，跳过本次同步。"
             return 0
         fi
     else
         Fetched_Ip=$(Fetch_PublicIpv6)
-        if [[ ! "$Fetched_Ip" =~ : ]] || [[ "$Fetched_Ip" =~ " " ]]; then
+        if ! Validate_Ipv6Address "$Fetched_Ip"; then
             echo "[警告] 获取到的 IPv6 地址格式不合法: ${Fetched_Ip}，跳过本次同步。"
             return 0
         fi
@@ -137,7 +181,8 @@ Execute_DdnsProcess() {
     echo "[信息] 检测到 ${Inject_Type} 发生变化：${Cached_Ip:-无} -> ${Fetched_Ip}"
     
     # 3. 拦截空 Record ID 报错
-    local Queried_RecordId=$(Query_DnsRecordId "$Inject_RecordType")
+    local Queried_RecordId
+    Queried_RecordId=$(Query_DnsRecordId "$Inject_RecordType")
     if [ -z "$Queried_RecordId" ]; then
         echo "[错误] 未找到 Cloudflare ${Inject_RecordType} 记录。"
         Notify_Telegram "❌ [前置错误]%0A获取 ${Inject_RecordType} 记录失败！%0A请检查：%0A1. 控制台是否预先创建了该记录%0A2. 域名的拼写是否有误%0A3. API Token 权限"
@@ -145,7 +190,8 @@ Execute_DdnsProcess() {
     fi
 
     # 4. 提交更新并处理反馈
-    local Committed_Result=$(Commit_DnsRecordUpdate "$Fetched_Ip" "$Queried_RecordId" "$Inject_RecordType")
+    local Committed_Result
+    Committed_Result=$(Commit_DnsRecordUpdate "$Fetched_Ip" "$Queried_RecordId" "$Inject_RecordType")
     
     if echo "$Committed_Result" | grep -q '"success":true'; then
         echo "$Fetched_Ip" > "$Inject_CacheFile"
@@ -153,7 +199,8 @@ Execute_DdnsProcess() {
         Notify_Telegram "✅ [状态报告]%0A${Inject_Type} 解析已成功更新！%0A旧 IP: ${Cached_Ip:-无}%0A新 IP: ${Fetched_Ip}"
     else
         # [硬核排障] 截取真实报错并暴露给用户
-        local Truncated_Result=$(echo "$Committed_Result" | cut -c 1-200)
+        local Truncated_Result
+        Truncated_Result=$(echo "$Committed_Result" | cut -c 1-200)
         echo "[错误] ${Inject_Type} 更新失败: ${Committed_Result}"
         Notify_Telegram "❌ [严重错误]%0A${Inject_Type} 更新至 Cloudflare 失败！%0A异常截获IP: ${Fetched_Ip}%0A原生反馈:%0A${Truncated_Result}"
     fi
@@ -162,8 +209,8 @@ Execute_DdnsProcess() {
 # ==========================================
 # 主程序入口 (Main)
 # ==========================================
-Perform_SelfUpdate
 Verify_Configuration
+Perform_SelfUpdate
 
 echo "=== 开始执行 DDNS 同步 (${Config_DomainName}) ==="
 Execute_DdnsProcess "IPv4" "A" "$Define_CacheIpv4"

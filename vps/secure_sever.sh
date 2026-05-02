@@ -463,23 +463,39 @@ install_packages() {
     # 尝试识别包管理器
     local pkg_manager=""
     if command -v apt-get &> /dev/null; then
-        pkg_manager="apt"
-    elif command -v yum &> /dev/null; then
-        pkg_manager="yum"
+        pkg_manager="apt-get"
     elif command -v dnf &> /dev/null; then
         pkg_manager="dnf"
+    elif command -v yum &> /dev/null; then
+        pkg_manager="yum"
     else
-        echo -e "${RED}${BOLD}[✗] 错误:${RESET}${RED} 无法识别的包管理器 (apt/yum/dnf)。${RESET}" >&2
+        echo -e "${RED}${BOLD}[✗] 错误:${RESET}${RED} 无法识别的包管理器 (apt-get/dnf/yum)。${RESET}" >&2
         return 1
     fi
     echo -e "${BLUE}[i] 使用包管理器: ${CYAN}$pkg_manager${RESET}"
 
     # 更新软件包列表
+    local update_status=0
     case "$pkg_manager" in
-        apt) sudo $pkg_manager update -y > /dev/null 2>&1 ;;
-        yum|dnf) sudo $pkg_manager check-update > /dev/null 2>&1 ;; # yum/dnf 没有静默更新列表的直接命令
+        apt-get)
+            $pkg_manager update > /dev/null 2>&1 || update_status=$?
+            ;;
+        dnf)
+            $pkg_manager makecache -y > /dev/null 2>&1 || update_status=$?
+            ;;
+        yum)
+            $pkg_manager check-update > /dev/null 2>&1 || update_status=$?
+            # yum check-update 返回 100 表示存在可用更新，不是失败。
+            if [ "$update_status" -eq 100 ]; then
+                update_status=0
+            fi
+            ;;
     esac
-    check_command_status "软件包列表更新" || return 1
+    if [ "$update_status" -ne 0 ]; then
+        echo -e "${RED}${BOLD}[✗] 错误:${RESET}${RED} 软件包列表更新失败。${RESET}" >&2
+        return 1
+    fi
+    echo -e "${GREEN}${BOLD}[✓] 成功:${RESET}${GREEN} 软件包列表更新完毕。${RESET}"
 
     # 定义不同发行版的包名
     local ufw_pkg="ufw"
@@ -495,7 +511,7 @@ install_packages() {
         # CentOS/RHEL/Fedora 通常需要 EPEL release 来安装 fail2ban
         echo -e "${BLUE}[+] 正在检查并安装 EPEL release (如果需要)...${RESET}"
         if ! rpm -q epel-release &>/dev/null; then
-            sudo $pkg_manager install -y epel-release > /dev/null 2>&1
+            $pkg_manager install -y epel-release > /dev/null 2>&1
             check_command_status "安装 epel-release" || return 1 # Fail2ban 依赖它
         else
             echo -e "${BLUE}[-] EPEL release 已安装。${RESET}"
@@ -505,14 +521,14 @@ install_packages() {
         echo -e "${YELLOW}[!] 注意: 在 RHEL/CentOS 系统上，firewalld 是默认防火墙。此脚本将安装并使用 UFW。${RESET}"
         iproute_pkg="iproute"
         # yum/dnf 通常不需要单独的 fail2ban-action 包
-    elif [ "$pkg_manager" == "apt" ]; then
+    elif [ "$pkg_manager" == "apt-get" ]; then
         iproute_pkg="iproute2"
         # Debian/Ubuntu 可能需要 fail2ban 的 ufw action (虽然通常默认包含)
     fi
 
     # 安装软件包
     echo -e "${BLUE}[+] 正在安装软件包: ${CYAN}${ufw_pkg}, ${fail2ban_pkg}, ${curl_pkg}, ${wget_pkg}, ${net_tools_pkg}, ${iproute_pkg}, ${jq_pkg}${RESET}"
-    sudo $pkg_manager install -y "$ufw_pkg" "$fail2ban_pkg" "$curl_pkg" "$wget_pkg" "$net_tools_pkg" "$iproute_pkg" "$jq_pkg" > /dev/null 2>&1
+    $pkg_manager install -y "$ufw_pkg" "$fail2ban_pkg" "$curl_pkg" "$wget_pkg" "$net_tools_pkg" "$iproute_pkg" "$jq_pkg" > /dev/null 2>&1
     check_command_status "安装核心软件包" || return 1
 
     echo -e "${GREEN}${BOLD}[✓] 软件包安装完成。${RESET}"
