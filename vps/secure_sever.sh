@@ -1,17 +1,33 @@
 #!/bin/bash
-# 安全加固脚本 - 自动配置防火墙、fail2ban 及 SSH 强化
+# Linux security hardening helper for UFW, Fail2ban, and OpenSSH.
 
-# --- 配置变量 ---
-SSH_CONFIG_FILE="/etc/ssh/sshd_config"
-FAIL2BAN_JAIL_LOCAL="/etc/fail2ban/jail.local"
-DETECTED_TCP_PORTS="" # 全局变量存储检测到的TCP端口
-DETECTED_UDP_PORTS="" # 全局变量存储检测到的UDP端口
-DETECTED_SSH_PORT=""  # 全局变量存储检测到的SSH端口
-SSH_LOG_PATH=""       # 全局变量存储检测到的SSH日志路径
-FAIL2BAN_BACKEND="auto" # 全局变量存储检测到的Fail2ban后端
-CURRENT_IP=""         # 全局变量存储当前外部IP
-MANUAL_TCP_PORTS="" # 手动兜底 TCP 端口，默认不启用；示例："443 8443"
-MANUAL_UDP_PORTS="" # 手动兜底 UDP 端口，默认不启用；示例："443 8443"
+set -u
+set -o pipefail
+
+# --- Runtime flags ---
+SECURE_SERVER_TEST_MODE="${SECURE_SERVER_TEST_MODE:-0}"
+SECURE_SERVER_DRY_RUN="${SECURE_SERVER_DRY_RUN:-0}"
+SECURE_SERVER_NONINTERACTIVE="${SECURE_SERVER_NONINTERACTIVE:-0}"
+INPUT_CANCELLED=130
+
+# --- Configuration ---
+SSH_CONFIG_FILE="${SSH_CONFIG_FILE:-/etc/ssh/sshd_config}"
+SSHD_CONFIG_DIR="${SSHD_CONFIG_DIR:-/etc/ssh/sshd_config.d}"
+SSHD_HARDENING_FILE="${SSHD_HARDENING_FILE:-${SSHD_CONFIG_DIR}/99-hardening.conf}"
+FAIL2BAN_JAIL_DIR="${FAIL2BAN_JAIL_DIR:-/etc/fail2ban/jail.d}"
+FAIL2BAN_SSHD_LOCAL="${FAIL2BAN_SSHD_LOCAL:-${FAIL2BAN_JAIL_DIR}/99-sshd-hardening.local}"
+BACKUP_DIR="${BACKUP_DIR:-/root/secure-server-backups}"
+
+# Global runtime state shared by menu actions.
+DETECTED_TCP_PORTS=""
+DETECTED_UDP_PORTS=""
+DETECTED_SSH_PORT=""
+SSH_LOG_PATH=""
+FAIL2BAN_BACKEND="auto"
+CURRENT_IP=""
+MANUAL_TCP_PORTS="${MANUAL_TCP_PORTS:-}"
+MANUAL_UDP_PORTS="${MANUAL_UDP_PORTS:-}"
+
 SINGBOX_CONFIG_FILES=(
     "/etc/sing-box/config.json"
     "/usr/local/etc/sing-box/config.json"
@@ -27,7 +43,7 @@ CADDY_CONFIG_FILES=(
     "/usr/local/etc/caddy/Caddyfile"
 )
 
-# --- 颜色定义 ---
+# --- Colors ---
 RESET='\033[0m'
 BOLD='\033[1m'
 RED='\033[0;31m'
@@ -37,1101 +53,1040 @@ BLUE='\033[0;34m'
 MAGENTA='\033[0;35m'
 CYAN='\033[0;36m'
 
-# --- 辅助函数 ---
-# 检查上一条命令是否成功执行
-# 参数: $1 - 命令描述
+if [[ "${NO_COLOR:-}" == "1" || ! -t 1 ]]; then
+    RESET=""
+    BOLD=""
+    RED=""
+    GREEN=""
+    YELLOW=""
+    BLUE=""
+    MAGENTA=""
+    CYAN=""
+fi
+
+TMP_FILES=()
+
+cleanup_tmp_files() {
+    local file=""
+    local had_nounset=false
+
+    case "$-" in
+        *u*) had_nounset=true; set +u ;;
+    esac
+    for file in "${TMP_FILES[@]}"; do
+        [[ -n "$file" && -e "$file" ]] && rm -f "$file"
+    done
+    $had_nounset && set -u
+}
+trap cleanup_tmp_files EXIT
+
+# --- Message helpers ---
+info() { printf '%b\n' "${BLUE}[i] $*${RESET}"; }
+ok() { printf '%b\n' "${GREEN}[OK] $*${RESET}"; }
+warn() { printf '%b\n' "${YELLOW}[WARN] $*${RESET}" >&2; }
+err() { printf '%b\n' "${RED}[ERROR] $*${RESET}" >&2; }
+section() { printf '%b\n' "${MAGENTA}===== $* =====${RESET}"; }
+
 check_command_status() {
-    local description=$1
-    if [ $? -ne 0 ]; then
-        echo -e "${RED}${BOLD}[✗] 错误:${RESET}${RED} 执行 '${description}' 失败。请检查错误信息并重试。${RESET}" >&2
-        return 1 # 返回失败状态
-    else
-        echo -e "${GREEN}${BOLD}[✓] 成功:${RESET}${GREEN} '${description}' 执行完毕。${RESET}"
-        return 0 # 返回成功状态
+    local description="$1"
+    local status="${2:-$?}"
+    if [[ "$status" -ne 0 ]]; then
+        err "${description} 失败。请检查上方错误信息。"
+        return 1
     fi
-}
-
-# 规范化端口列表
-# 说明：
-# - 只保留 1-65535 范围内的纯数字端口
-# - 自动去重、升序排序，并输出空格分隔格式
-normalize_port_list() {
-    echo "$1" \
-        | tr ' ' '\n' \
-        | grep -E '^[0-9]+$' \
-        | awk '$1 >= 1 && $1 <= 65535' \
-        | sort -un \
-        | tr '\n' ' '
-}
-
-# 获取当前外部 IP 地址
-get_current_ip() {
-    echo -e "${BLUE}${BOLD}[+] 正在获取当前外部 IP 地址...${RESET}"
-    CURRENT_IP=$(curl -s https://api.ipify.org || wget -qO- https://api.ipify.org)
-    if [ -z "$CURRENT_IP" ]; then
-        echo -e "${YELLOW}${BOLD}[!] 警告:${RESET}${YELLOW} 无法自动获取当前 IP 地址。${RESET}"
-        read -p "$(echo -e ${YELLOW}${BOLD}"[?] 请手动输入您当前的外部 IP 地址 (留空则不添加白名单): "${RESET})" CURRENT_IP_INPUT
-        CURRENT_IP=$CURRENT_IP_INPUT # 赋值给全局变量
-        if [ -n "$CURRENT_IP" ]; then
-             echo -e "${GREEN}[✓] 您输入的 IP 地址: ${CYAN}${BOLD}$CURRENT_IP${RESET}"
-        fi
-    else
-        echo -e "${GREEN}${BOLD}[✓] 检测到当前外部 IP 地址: ${CYAN}${BOLD}$CURRENT_IP${RESET}"
-    fi
-    echo "----------------------------------------"
-}
-
-# 尝试自动查找 SSH 日志文件或确定合适的 Fail2ban 后端
-# 设置全局变量: SSH_LOG_PATH 和 FAIL2BAN_BACKEND
-find_ssh_log_or_backend() {
-    echo -e "${BLUE}${BOLD}[+] 正在尝试自动检测 SSH 日志位置或 Fail2ban 后端...${RESET}"
-    SSH_LOG_PATH="" # 重置
-    FAIL2BAN_BACKEND="auto" # 默认值
-    local found=false
-    # 优先检查 systemd journal
-    if command -v journalctl &> /dev/null; then
-        # 检查常见的 SSH 服务单元名称
-        for service_unit in sshd ssh; do
-            if journalctl -u "$service_unit" --no-pager --quiet &> /dev/null; then
-                echo -e "${GREEN}${BOLD}[✓] 检测到 systemd journal 管理 SSH 日志 ($service_unit)。将使用 '${MAGENTA}systemd${GREEN}' 后端。${RESET}"
-                FAIL2BAN_BACKEND="systemd"
-                SSH_LOG_PATH="using systemd backend" # 特殊标记，表示使用systemd
-                found=true
-                break # 找到一个即可
-            fi
-        done
-    fi
-
-    # 如果未使用 systemd 或 journalctl 无法查询，则检查传统日志文件
-    if ! $found; then
-        local potential_logs=("/var/log/auth.log" "/var/log/secure")
-        for log_file in "${potential_logs[@]}"; do
-            if [ -f "$log_file" ]; then
-                 # 使用 head 限制读取量，提高效率，并确保文件包含 sshd 相关日志
-                if head -n 100 "$log_file" | grep -q "sshd" &> /dev/null || tail -n 100 "$log_file" | grep -q "sshd" &> /dev/null ; then
-                     echo -e "${GREEN}${BOLD}[✓] 检测到可能的 SSH 日志文件: ${CYAN}$log_file${RESET}"
-                     SSH_LOG_PATH="$log_file"
-                     FAIL2BAN_BACKEND="auto" # 允许 fail2ban 自动选择 (polling, pyinotify, gamin)
-                     found=true
-                     break
-                fi
-            fi
-        done
-    fi
-
-    if ! $found; then
-        echo -e "${YELLOW}${BOLD}[!] 警告:${RESET}${YELLOW} 无法自动确定 SSH 日志文件路径或 systemd 后端。${RESET}"
-        echo -e "${YELLOW}    Fail2ban 配置将使用默认设置，可能需要您手动调整 '${CYAN}${FAIL2BAN_JAIL_LOCAL}${YELLOW}' 中的 'backend' 和 'logpath'。${RESET}"
-        return 1 # 表示未成功检测到特定路径
-    fi
-    echo "----------------------------------------"
+    ok "${description} 完成。"
     return 0
 }
 
-# 检测 SSH 端口
+require_root() {
+    if [[ "$(id -u)" -ne 0 ]]; then
+        err "此脚本需要以 root 权限运行。"
+        warn "请使用: sudo bash $0"
+        return 1
+    fi
+    return 0
+}
+
+require_command() {
+    command -v "$1" >/dev/null 2>&1 || {
+        err "缺少命令: $1"
+        return 1
+    }
+}
+
+make_tmp_file() {
+    local tmp_file=""
+    tmp_file="$(mktemp)" || return 1
+    TMP_FILES+=("$tmp_file")
+    printf '%s\n' "$tmp_file"
+}
+
+run_cmd() {
+    local description="$1"
+    shift
+
+    if [[ "${SECURE_SERVER_DRY_RUN}" == "1" ]]; then
+        printf '[DRY-RUN] %s:' "$description"
+        printf ' %q' "$@"
+        printf '\n'
+        return 0
+    fi
+
+    "$@"
+}
+
+# --- Interaction helpers ---
+# Interaction contract:
+# - Main menu: 0 exits the script.
+# - Submenus: 0 returns to the parent menu.
+# - Free-form input: q cancels the current operation and returns to the parent menu.
+# - Inputs with defaults must display: "回车使用默认值，q 取消".
+build_free_input_prompt() {
+    local prompt="$1"
+    printf '%s (q 取消): ' "$prompt"
+}
+
+build_default_prompt() {
+    local prompt="$1"
+    local default="$2"
+    printf '%s [默认: %s] (回车使用默认值，q 取消): ' "$prompt" "$default"
+}
+
+prompt_required() {
+    local prompt="$1"
+    local answer=""
+
+    while true; do
+        read -r -p "$(build_free_input_prompt "$prompt")" answer
+        case "$answer" in
+            [Qq]) return "$INPUT_CANCELLED" ;;
+            "") warn "输入不能为空；请输入有效值，或输入 q 取消。" ;;
+            *) printf '%s\n' "$answer"; return 0 ;;
+        esac
+    done
+}
+
+prompt_with_default() {
+    local prompt="$1"
+    local default="$2"
+    local answer=""
+
+    read -r -p "$(build_default_prompt "$prompt" "$default")" answer
+    case "$answer" in
+        [Qq]) return "$INPUT_CANCELLED" ;;
+        "") printf '%s\n' "$default" ;;
+        *) printf '%s\n' "$answer" ;;
+    esac
+}
+
+prompt_yes_no() {
+    local prompt="$1"
+    local default="${2:-N}"
+    local answer=""
+    local suffix="y/N，回车使用默认值，q 取消"
+    [[ "$default" == "Y" ]] && suffix="Y/n，回车使用默认值，q 取消"
+
+    while true; do
+        read -r -p "${prompt} ${suffix}: " answer
+        case "$answer" in
+            [Qq]) return "$INPUT_CANCELLED" ;;
+        esac
+
+        answer="${answer:-$default}"
+        case "$answer" in
+            [Yy]) return 0 ;;
+            [Nn]) return 1 ;;
+            *) warn "请输入 y、n，直接回车使用默认值，或输入 q 取消。" ;;
+        esac
+    done
+}
+
+prompt_exact_yes() {
+    local prompt="$1"
+    local answer=""
+
+    read -r -p "${prompt} 请输入 yes 确认执行，或输入 q 取消: " answer
+    case "$answer" in
+        [Qq]) return "$INPUT_CANCELLED" ;;
+        yes) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+pause_before_menu() {
+    read -r -p "$(printf '%b' "${CYAN}按 Enter 键返回主菜单...${RESET}")" _
+}
+
+is_valid_main_menu_choice() {
+    [[ "$1" =~ ^[0-7]$ ]]
+}
+
+is_valid_submenu_choice() {
+    local max_choice="$1"
+    local value="$2"
+    [[ "$value" =~ ^[0-9]+$ && "$value" -ge 0 && "$value" -le "$max_choice" ]]
+}
+
+# --- Pure helpers ---
+normalize_port_list() {
+    local input="$*"
+    printf '%s\n' "$input" \
+        | tr '[:space:]' '\n' \
+        | awk '
+            /^[0-9]+$/ {
+                port = $1 + 0
+                if (port >= 1 && port <= 65535) ports[port] = 1
+            }
+            END {
+                for (port in ports) print port
+            }
+        ' \
+        | sort -n \
+        | awk '{ printf "%s ", $1 }'
+    return 0
+}
+
+add_detected_tcp_port() {
+    DETECTED_TCP_PORTS="$(normalize_port_list "${DETECTED_TCP_PORTS} $*")"
+}
+
+add_detected_udp_port() {
+    DETECTED_UDP_PORTS="$(normalize_port_list "${DETECTED_UDP_PORTS} $*")"
+}
+
+is_ipv4_or_cidr() {
+    local value="$1"
+    local ip=""
+    local prefix=""
+    local a=""
+    local b=""
+    local c=""
+    local d=""
+    local octet=""
+    local octet_num=0
+    local prefix_num=0
+
+    [[ "$value" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?$ ]] || return 1
+    ip="${value%%/*}"
+    [[ "$value" == */* ]] && prefix="${value##*/}"
+
+    IFS='.' read -r a b c d <<< "$ip"
+    for octet in "$a" "$b" "$c" "$d"; do
+        [[ "$octet" =~ ^[0-9]+$ ]] || return 1
+        octet_num=$((10#$octet))
+        [[ "$octet_num" -ge 0 && "$octet_num" -le 255 ]] || return 1
+    done
+
+    if [[ -n "$prefix" ]]; then
+        [[ "$prefix" =~ ^[0-9]+$ ]] || return 1
+        prefix_num=$((10#$prefix))
+        [[ "$prefix_num" -ge 0 && "$prefix_num" -le 32 ]] || return 1
+    fi
+
+    return 0
+}
+
+detect_ssh_port_from_effective_config() {
+    local config_file="${1:-$SSH_CONFIG_FILE}"
+    local port=""
+
+    if command -v sshd >/dev/null 2>&1; then
+        port="$(sshd -T -f "$config_file" 2>/dev/null | awk '$1 == "port" { print $2; exit }')"
+    fi
+
+    normalize_port_list "$port" | awk '{ print $1 }'
+}
+
+detect_ssh_port_from_file() {
+    local config_file="$1"
+    local port=""
+
+    [[ -f "$config_file" ]] || return 0
+
+    port="$(awk '
+        /^[[:space:]]*#/ { next }
+        /^[[:space:]]*Match[[:space:]]+/ { in_match = 1 }
+        in_match != 1 && /^[[:space:]]*Port[[:space:]]+[0-9]+/ { print $2; exit }
+    ' "$config_file" 2>/dev/null)"
+
+    normalize_port_list "$port" | awk '{ print $1 }'
+}
+
+detect_ssh_port_from_listening() {
+    local port=""
+
+    if command -v ss >/dev/null 2>&1; then
+        port="$(ss -H -ltnp 2>/dev/null | awk '/sshd/ { print $4; exit }' | sed -E 's/.*:([0-9]+)$/\1/')"
+    elif command -v netstat >/dev/null 2>&1; then
+        port="$(netstat -ltnp 2>/dev/null | awk '/sshd/ { print $4; exit }' | sed -E 's/.*:([0-9]+)$/\1/')"
+    fi
+
+    normalize_port_list "$port" | awk '{ print $1 }'
+}
+
+insert_sshd_include_before_match() {
+    local config_file="$1"
+    local include_line="Include /etc/ssh/sshd_config.d/*.conf"
+
+    if grep -Eq '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/\*\.conf' "$config_file"; then
+        cat "$config_file"
+        return 0
+    fi
+
+    awk -v include_line="$include_line" '
+        !inserted && /^[[:space:]]*Match[[:space:]]+/ {
+            print include_line
+            inserted = 1
+        }
+        { print }
+        END {
+            if (!inserted) print include_line
+        }
+    ' "$config_file"
+}
+
+render_fail2ban_sshd_config() {
+    local ssh_port="$1"
+    local ignore_ip="$2"
+    local backend="$3"
+    local logpath="$4"
+    local ignore_line="127.0.0.1/8 ::1"
+
+    [[ -n "$ignore_ip" ]] && ignore_line="${ignore_line} ${ignore_ip}"
+
+    cat <<EOF
+[DEFAULT]
+bantime = 30d
+findtime = 10m
+maxretry = 3
+ignoreip = ${ignore_line}
+backend = ${backend:-auto}
+banaction = ufw
+
+[sshd]
+enabled = true
+port = ${ssh_port:-ssh}
+filter = sshd
+EOF
+
+    if [[ -n "$logpath" ]]; then
+        printf 'logpath = %s\n' "$logpath"
+    fi
+}
+
+render_sshd_hardening_config() {
+    local permit_root_login="$1"
+    local password_auth="$2"
+
+    cat <<EOF
+PermitRootLogin ${permit_root_login}
+PasswordAuthentication ${password_auth}
+KbdInteractiveAuthentication no
+MaxAuthTries 3
+TCPKeepAlive yes
+ClientAliveInterval 300
+ClientAliveCountMax 2
+EOF
+}
+
+create_backup_dir() {
+    if [[ "${SECURE_SERVER_DRY_RUN}" == "1" ]]; then
+        printf '%s\n' "$BACKUP_DIR"
+        return 0
+    fi
+    mkdir -p "$BACKUP_DIR"
+}
+
+backup_file_if_exists() {
+    local file_path="$1"
+    local backup_path=""
+
+    [[ -e "$file_path" ]] || return 0
+    create_backup_dir || return 1
+    backup_path="${BACKUP_DIR}/$(basename "$file_path").bak_$(date +%Y%m%d_%H%M%S)"
+    run_cmd "备份 $file_path" cp "$file_path" "$backup_path" >/dev/null || return 1
+    printf '%s\n' "$backup_path"
+}
+
+restore_file_backup() {
+    local backup_path="$1"
+    local target_path="$2"
+
+    [[ -n "$backup_path" && -f "$backup_path" ]] || return 1
+    run_cmd "恢复 $target_path" cp "$backup_path" "$target_path" >/dev/null
+}
+
+# --- Detection helpers ---
+get_current_ip() {
+    local current_ip_input=""
+    local detected_ip=""
+
+    info "正在获取当前外部 IP 地址..."
+    if command -v curl >/dev/null 2>&1; then
+        detected_ip="$(curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)"
+    fi
+    if [[ -z "$detected_ip" ]] && command -v wget >/dev/null 2>&1; then
+        detected_ip="$(wget -qO- --timeout=5 https://api.ipify.org 2>/dev/null || true)"
+    fi
+
+    if [[ -n "$detected_ip" && "$(is_ipv4_or_cidr "$detected_ip"; printf '%s' "$?")" == "0" ]]; then
+        CURRENT_IP="$detected_ip"
+        ok "检测到当前外部 IP: ${CURRENT_IP}"
+        return 0
+    fi
+
+    warn "无法自动获取当前 IP。"
+    current_ip_input="$(prompt_required "请输入当前外部 IPv4/CIDR")" || return "$INPUT_CANCELLED"
+    if ! is_ipv4_or_cidr "$current_ip_input"; then
+        err "IP/CIDR 格式无效: $current_ip_input"
+        return 1
+    fi
+    CURRENT_IP="$current_ip_input"
+    ok "使用手动输入 IP/CIDR: ${CURRENT_IP}"
+}
+
+find_ssh_log_or_backend() {
+    local found=false
+    local service_unit=""
+    local log_file=""
+    local potential_logs=("/var/log/auth.log" "/var/log/secure")
+
+    info "正在检测 SSH 日志位置或 Fail2ban 后端..."
+    SSH_LOG_PATH=""
+    FAIL2BAN_BACKEND="auto"
+
+    if command -v journalctl >/dev/null 2>&1; then
+        for service_unit in sshd ssh; do
+            if journalctl -u "$service_unit" --no-pager --quiet >/dev/null 2>&1; then
+                FAIL2BAN_BACKEND="systemd"
+                SSH_LOG_PATH="using systemd backend"
+                ok "检测到 systemd journal 管理 SSH 日志: $service_unit"
+                found=true
+                break
+            fi
+        done
+    fi
+
+    if ! $found; then
+        for log_file in "${potential_logs[@]}"; do
+            if [[ -f "$log_file" ]] && { head -n 100 "$log_file" | grep -q "sshd" || tail -n 100 "$log_file" | grep -q "sshd"; }; then
+                SSH_LOG_PATH="$log_file"
+                FAIL2BAN_BACKEND="auto"
+                ok "检测到 SSH 日志文件: $log_file"
+                found=true
+                break
+            fi
+        done
+    fi
+
+    if ! $found; then
+        warn "无法自动确定 SSH 日志路径或 systemd 后端，将使用 Fail2ban 默认机制。"
+        return 1
+    fi
+    return 0
+}
+
 detect_ssh_port() {
-    echo -e "${BLUE}${BOLD}[+] 正在检测当前 SSH 端口...${RESET}"
-    DETECTED_SSH_PORT="" # 重置以防万一
-    # 尝试从 sshd_config 获取
-    if [ -f "$SSH_CONFIG_FILE" ]; then
-        DETECTED_SSH_PORT=$(grep -iE '^\s*Port\s+' "$SSH_CONFIG_FILE" | awk '{print $2}' | head -n 1)
-    fi
+    local port_found=""
 
-    # 如果 sshd_config 中未明确指定或找不到文件，尝试从当前监听端口获取
-    if [ -z "$DETECTED_SSH_PORT" ]; then
-        echo -e "${YELLOW}[!] 未在 ${CYAN}$SSH_CONFIG_FILE${YELLOW} 中找到明确端口，尝试检测监听端口...${RESET}"
-        local port_found=""
-        # 尝试使用 ss (推荐)
-        if command -v ss &> /dev/null; then
-            # 优化 ss 命令，直接查找 sshd 进程并提取端口
-            port_found=$(ss -tlpn 2>/dev/null | grep 'sshd' | awk '{print $4}' | grep -oP ':\K[0-9]+' | head -n 1)
-        # 备选 netstat
-        elif command -v netstat &> /dev/null; then
-             port_found=$(netstat -tlpn 2>/dev/null | grep 'sshd' | awk '{print $4}' | grep -oP ':\K[0-9]+' | head -n 1)
+    info "正在检测当前 SSH 端口..."
+    DETECTED_SSH_PORT=""
+
+    port_found="$(detect_ssh_port_from_effective_config "$SSH_CONFIG_FILE")"
+    [[ -z "$port_found" ]] && port_found="$(detect_ssh_port_from_file "$SSH_CONFIG_FILE")"
+    [[ -z "$port_found" ]] && port_found="$(detect_ssh_port_from_listening)"
+
+    if [[ -z "$port_found" ]]; then
+        warn "无法可靠检测 SSH 端口。"
+        port_found="$(prompt_with_default "请输入当前 SSH 端口" "22")" || return "$INPUT_CANCELLED"
+        port_found="$(normalize_port_list "$port_found" | awk '{ print $1 }')"
+        if [[ -z "$port_found" ]]; then
+            err "SSH 端口无效。"
+            return 1
         fi
-        DETECTED_SSH_PORT=$port_found
     fi
 
-    # 最后确认
-    if [ -z "$DETECTED_SSH_PORT" ]; then
-        echo -e "${YELLOW}${BOLD}[!] 警告:${RESET}${YELLOW} 无法自动检测到 SSH 端口。将假定为标准端口 ${CYAN}22${YELLOW}。${RESET}"
-        DETECTED_SSH_PORT="22"
-    else
-        echo -e "${GREEN}${BOLD}[✓] 检测到 SSH 端口: ${CYAN}${BOLD}$DETECTED_SSH_PORT${RESET}"
-    fi
-    # 将检测到的SSH端口也加入到TCP端口列表，以便后续UFW统一处理（如果它不是标准端口且未被代理检测覆盖）
-    if [[ -n "$DETECTED_SSH_PORT" && ! " ${DETECTED_TCP_PORTS[*]} " =~ " ${DETECTED_SSH_PORT} " ]]; then
-        DETECTED_TCP_PORTS+="$DETECTED_SSH_PORT "
-    fi
-    echo "----------------------------------------"
+    DETECTED_SSH_PORT="$port_found"
+    add_detected_tcp_port "$DETECTED_SSH_PORT"
+    ok "SSH 端口: $DETECTED_SSH_PORT/tcp"
 }
 
-
-# --- Merged & Optimized detect_proxy_ports ---
 detect_proxy_ports() {
-    echo -e "${BLUE}${BOLD}[+] 正在检测常用代理工具端口 (TCP/UDP)...${RESET}"
-    local proxy_ports_tcp=""
-    local proxy_ports_udp=""
     local grep_pattern='snell|snell-server|ssserver|shadow-tls|trojan|hysteria|tuic|sing-box|caddy'
+    local tcp_ports=""
+    local udp_ports=""
 
-    # --- 使用 ss 命令 (优先) ---
-    if command -v ss &> /dev/null; then
-        # TCP 端口检测 (ss)
-        local raw_tcp
-        raw_tcp=$(ss -lntp 2>/dev/null | awk -v pattern="$grep_pattern" '
-            NR > 1 {
-                process_info = ""; proc_name = "";
-                # 提取进程信息 users:(("procname",pid=...,...))
-                if (match($0, /users:\(\("([^"]+)"/)) {
-                    proc_name = substr($0, RSTART + 8, RLENGTH - 9); # 提取引号内的进程名
-                    process_info = proc_name; # 主要用于匹配
-                } else if ($NF ~ /\(.*\)/ && $NF !~ /users:/) { # 尝试从最后一列提取进程名(如果格式不同)
-                     process_info = $NF;
-                } else if (match($0, /users:\(.*\)/)) { # 备用匹配整个 users:() 部分
-                     process_info = substr($0, RSTART);
-                }
+    info "正在检测常用代理工具监听端口..."
 
-                # 如果找到进程信息且匹配模式
-                if (process_info != "" && (process_info ~ pattern || proc_name ~ pattern)) {
-                     addr_port = $4 # 获取本地地址:端口
-                     sub(/.*:/, "", addr_port); # 提取端口号
-                     # 确保是纯数字端口号
-                     if (addr_port ~ /^[0-9]+$/) {
-                        # 排除常见的非代理端口减少误报 (可选，可注释掉)
-                        # if (addr_port != 80 && addr_port != 443 && addr_port != 22) {
-                            ports[addr_port]++; # 存储数字端口并去重
-                        # }
-                     }
-                 }
-            }
-            END {
-                # 按数字排序输出端口
-                PROCINFO["sorted_in"] = "@ind_num_asc";
-                for (port in ports) print port;
-            }' | tr '\n' ' ')
-        proxy_ports_tcp="${raw_tcp% }" # 移除可能的尾随空格
-
-        # UDP 端口检测 (ss)
-        local raw_udp
-        raw_udp=$(ss -lnup 2>/dev/null | awk -v pattern="$grep_pattern" '
-             NR > 1 {
-                process_info = ""; proc_name = "";
-                if (match($0, /users:\(\("([^"]+)"/)) {
-                    proc_name = substr($0, RSTART + 8, RLENGTH - 9);
-                    process_info = proc_name;
-                } else if ($NF ~ /\(.*\)/ && $NF !~ /users:/) {
-                     process_info = $NF;
-                } else if (match($0, /users:\(.*\)/)) {
-                     process_info = substr($0, RSTART);
-                }
-
-                if (process_info != "" && (process_info ~ pattern || proc_name ~ pattern)) {
-                     addr_port = $4;
-                     sub(/.*:/, "", addr_port);
-                     if (addr_port ~ /^[0-9]+$/) {
-                         ports[addr_port]++;
-                     }
-                 }
-            }
-            END {
-                PROCINFO["sorted_in"] = "@ind_num_asc";
-                for (port in ports) print port;
-            }' | tr '\n' ' ')
-        proxy_ports_udp="${raw_udp% }" # 移除可能的尾随空格
-
-    # --- 使用 netstat 命令 (备选) ---
-    elif command -v netstat &> /dev/null; then
-        # TCP 端口检测 (netstat)
-        local raw_tcp
-        raw_tcp=$(netstat -lntp 2>/dev/null | awk -v pattern="$grep_pattern" '
-            # $NF 通常是 PID/Program name 列
-            NR > 2 && $NF ~ /^[0-9]+\// { # 跳过头部，检查最后一列是否包含 PID/
-                prog_field = $NF;
-                sub(/^[0-9]+\//, "", prog_field); # 提取程序名
-                # 检查程序名是否匹配模式
-                if (prog_field ~ pattern) {
-                    addr_port = $4; # 获取本地地址:端口
-                    sub(/.*:/, "", addr_port); # 提取端口号
-                    if (addr_port ~ /^[0-9]+$/) {
-                       ports[addr_port]++;
-                    }
-                 }
-            }
-            END {
-                PROCINFO["sorted_in"] = "@ind_num_asc";
-                for (port in ports) print port;
-            }' | tr '\n' ' ')
-        proxy_ports_tcp="${raw_tcp% }" # 移除可能的尾随空格
-
-        # UDP 端口检测 (netstat)
-        local raw_udp
-        raw_udp=$(netstat -lnup 2>/dev/null | awk -v pattern="$grep_pattern" '
-            NR > 2 && $NF ~ /^[0-9]+\// {
-                prog_field = $NF;
-                sub(/^[0-9]+\//, "", prog_field);
-                if (prog_field ~ pattern) {
-                    addr_port = $4;
-                    sub(/.*:/, "", addr_port);
-                    if (addr_port ~ /^[0-9]+$/) {
-                         ports[addr_port]++;
-                    }
-                 }
-            }
-            END {
-                PROCINFO["sorted_in"] = "@ind_num_asc";
-                for (port in ports) print port;
-            }' | tr '\n' ' ')
-        proxy_ports_udp="${raw_udp% }" # 移除可能的尾随空格
+    if command -v ss >/dev/null 2>&1; then
+        tcp_ports="$(ss -H -lntp 2>/dev/null | awk -v pattern="$grep_pattern" '$0 ~ pattern { print $4 }' | sed -E 's/.*:([0-9]+)$/\1/')"
+        udp_ports="$(ss -H -lnup 2>/dev/null | awk -v pattern="$grep_pattern" '$0 ~ pattern { print $4 }' | sed -E 's/.*:([0-9]+)$/\1/')"
+    elif command -v netstat >/dev/null 2>&1; then
+        tcp_ports="$(netstat -lntp 2>/dev/null | awk -v pattern="$grep_pattern" '$0 ~ pattern { print $4 }' | sed -E 's/.*:([0-9]+)$/\1/')"
+        udp_ports="$(netstat -lnup 2>/dev/null | awk -v pattern="$grep_pattern" '$0 ~ pattern { print $4 }' | sed -E 's/.*:([0-9]+)$/\1/')"
     else
-        echo -e "${YELLOW}${BOLD}[!] 警告:${RESET}${YELLOW} 'ss' 和 'netstat' 命令都不可用，无法自动检测代理端口。${RESET}"
+        warn "ss 和 netstat 都不可用，跳过监听进程端口检测。"
     fi
 
-    # --- 报告结果并将结果存入全局变量 ---
-    if [ -n "$proxy_ports_tcp" ]; then
-        echo -e "${GREEN}${BOLD}[✓] 检测到潜在的代理 TCP 端口: ${CYAN}${proxy_ports_tcp}${RESET}"
-        DETECTED_TCP_PORTS+="$proxy_ports_tcp " # 追加到全局变量
+    tcp_ports="$(normalize_port_list "$tcp_ports")"
+    udp_ports="$(normalize_port_list "$udp_ports")"
+
+    if [[ -n "$tcp_ports" ]]; then
+        info "监听进程检测 TCP 端口（中置信度）: $tcp_ports"
+        add_detected_tcp_port "$tcp_ports"
     else
-        echo -e "${BLUE}[-] 未检测到与模式 (${MAGENTA}$grep_pattern${BLUE}) 匹配的常用代理 TCP 端口。${RESET}"
+        info "未从监听进程检测到代理 TCP 端口。"
     fi
-     if [ -n "$proxy_ports_udp" ]; then
-        echo -e "${GREEN}${BOLD}[✓] 检测到潜在的代理 UDP 端口: ${CYAN}${proxy_ports_udp}${RESET}"
-        DETECTED_UDP_PORTS+="$proxy_ports_udp " # 追加到全局变量
+
+    if [[ -n "$udp_ports" ]]; then
+        info "监听进程检测 UDP 端口（中置信度）: $udp_ports"
+        add_detected_udp_port "$udp_ports"
     else
-        echo -e "${BLUE}[-] 未检测到与模式 (${MAGENTA}$grep_pattern${BLUE}) 匹配的常用代理 UDP 端口。${RESET}"
+        info "未从监听进程检测到代理 UDP 端口。"
     fi
-    # 去重全局变量 (以防万一重复追加)
-    DETECTED_TCP_PORTS=$(normalize_port_list "$DETECTED_TCP_PORTS")
-    DETECTED_UDP_PORTS=$(normalize_port_list "$DETECTED_UDP_PORTS")
-    echo "----------------------------------------"
 }
-# --- End of merged detect_proxy_ports ---
 
-# 检测 sing-box 配置中的监听端口
-# 说明：
-# - 优先使用 jq 解析 JSON
-# - 没有 jq 时使用 grep 作为降级方案
-# - 对检测到的 sing-box 端口默认同时加入 TCP 与 UDP，避免协议类型判断失误导致漏放
-# - 不在这里硬编码任何用户端口
 detect_singbox_ports() {
-    echo -e "${BLUE}${BOLD}[+] 正在检测 sing-box 配置端口...${RESET}"
-
-    local detected_singbox_ports=""
+    local detected_ports=""
     local current_config_file=""
     local current_config_dir=""
+    local current_ports=""
+    local record=""
+    local port=""
+    local network=""
     local singbox_config_candidates=()
 
+    info "正在检测 sing-box 配置端口..."
+
     for current_config_file in "${SINGBOX_CONFIG_FILES[@]}"; do
-        if [ -f "$current_config_file" ]; then
-            singbox_config_candidates+=("$current_config_file")
-        fi
+        [[ -f "$current_config_file" ]] && singbox_config_candidates+=("$current_config_file")
     done
 
     for current_config_dir in "${SINGBOX_CONFIG_DIRS[@]}"; do
-        if [ ! -d "$current_config_dir" ]; then
-            continue
-        fi
-
-        echo -e "${BLUE}[i] 发现 sing-box 配置目录: ${CYAN}$current_config_dir${RESET}"
-
+        [[ -d "$current_config_dir" ]] || continue
         for current_config_file in "$current_config_dir"/*.json; do
-            if [ -f "$current_config_file" ]; then
-                singbox_config_candidates+=("$current_config_file")
-            fi
+            [[ -f "$current_config_file" ]] && singbox_config_candidates+=("$current_config_file")
         done
     done
 
-    if [ ${#singbox_config_candidates[@]} -eq 0 ]; then
-        echo -e "${BLUE}[-] 未发现可读取的 sing-box 配置文件。${RESET}"
+    if [[ "${#singbox_config_candidates[@]}" -eq 0 ]]; then
+        info "未发现可读取的 sing-box 配置文件。"
+        return 0
     fi
 
     for current_config_file in "${singbox_config_candidates[@]}"; do
-        echo -e "${BLUE}[i] 发现 sing-box 配置文件: ${CYAN}$current_config_file${RESET}"
-
-        local current_ports=""
-
-        if command -v jq &> /dev/null; then
-            current_ports=$(jq -r '
-                .. | objects | select(has("listen_port")) | .listen_port
-            ' "$current_config_file" 2>/dev/null)
-            current_ports=$(normalize_port_list "$current_ports")
-        fi
-
-        if [ -z "$current_ports" ]; then
-            # jq 无法解析 JSONC、尾逗号或其他非标准 JSON 时，使用 grep 兜底提取 listen_port
-            current_ports=$(grep -oE '"listen_port"[[:space:]]*:[[:space:]]*"?[0-9]+"?' "$current_config_file" \
-                | grep -oE '[0-9]+')
-            current_ports=$(normalize_port_list "$current_ports")
-        fi
-
-        if [ -n "$current_ports" ]; then
-            detected_singbox_ports+="$current_ports "
+        info "发现 sing-box 配置文件: $current_config_file"
+        if command -v jq >/dev/null 2>&1; then
+            while IFS="$(printf '\t')" read -r port network; do
+                port="$(normalize_port_list "$port" | awk '{ print $1 }')"
+                [[ -n "$port" ]] || continue
+                detected_ports="${detected_ports}${port} "
+                case "$network" in
+                    tcp) add_detected_tcp_port "$port" ;;
+                    udp) add_detected_udp_port "$port" ;;
+                    *) add_detected_tcp_port "$port"; add_detected_udp_port "$port" ;;
+                esac
+            done < <(jq -r '.. | objects | select(has("listen_port")) | [(.listen_port|tostring), (.network // "")] | @tsv' "$current_config_file" 2>/dev/null)
+        else
+            current_ports="$(grep -oE '"listen_port"[[:space:]]*:[[:space:]]*"?[0-9]+"?' "$current_config_file" 2>/dev/null | grep -oE '[0-9]+' || true)"
+            for record in $current_ports; do
+                port="$(normalize_port_list "$record" | awk '{ print $1 }')"
+                [[ -n "$port" ]] || continue
+                detected_ports="${detected_ports}${port} "
+                add_detected_tcp_port "$port"
+                add_detected_udp_port "$port"
+            done
         fi
     done
 
-    detected_singbox_ports=$(normalize_port_list "$detected_singbox_ports")
-
-    if [ -n "$detected_singbox_ports" ]; then
-        echo -e "${GREEN}${BOLD}[✓] 检测到 sing-box 配置端口: ${CYAN}${detected_singbox_ports}${RESET}"
-
-        DETECTED_TCP_PORTS+="$detected_singbox_ports "
-        DETECTED_UDP_PORTS+="$detected_singbox_ports "
-
-        DETECTED_TCP_PORTS=$(normalize_port_list "$DETECTED_TCP_PORTS")
-        DETECTED_UDP_PORTS=$(normalize_port_list "$DETECTED_UDP_PORTS")
+    detected_ports="$(normalize_port_list "$detected_ports")"
+    if [[ -n "$detected_ports" ]]; then
+        info "配置文件检测 sing-box 端口（高置信度）: $detected_ports"
     else
-        echo -e "${BLUE}[-] 未从 sing-box 配置文件中检测到 listen_port。${RESET}"
+        info "未从 sing-box 配置中检测到 listen_port。"
     fi
-
-    echo "----------------------------------------"
 }
 
-# 检测 Caddy 配置中的监听端口
-# 说明：
-# - 233boy 的自动 TLS 配置会在 Caddyfile 中写入 http_port / https_port
-# - Caddy 作为前置 HTTP/HTTPS 服务，仅补充 TCP 放行端口
-# - 不在这里硬编码 80/443，始终以配置文件中的实际端口为准
 detect_caddy_ports() {
-    echo -e "${BLUE}${BOLD}[+] 正在检测 Caddy 配置端口...${RESET}"
-
-    local detected_caddy_ports=""
+    local detected_ports=""
     local current_config_file=""
+    local current_ports=""
+
+    info "正在检测 Caddy 配置端口..."
 
     for current_config_file in "${CADDY_CONFIG_FILES[@]}"; do
-        if [ ! -f "$current_config_file" ]; then
-            continue
-        fi
-
-        echo -e "${BLUE}[i] 发现 Caddy 配置文件: ${CYAN}$current_config_file${RESET}"
-
-        local current_ports=""
-        current_ports=$(grep -E '^[[:space:]]*(http_port|https_port)[[:space:]]+[0-9]+' "$current_config_file" \
-            | grep -oE '[0-9]+')
-        current_ports=$(normalize_port_list "$current_ports")
-
-        if [ -n "$current_ports" ]; then
-            detected_caddy_ports+="$current_ports "
+        [[ -f "$current_config_file" ]] || continue
+        info "发现 Caddy 配置文件: $current_config_file"
+        current_ports="$(grep -E '^[[:space:]]*(http_port|https_port)[[:space:]]+[0-9]+' "$current_config_file" 2>/dev/null | grep -oE '[0-9]+' || true)"
+        current_ports="$(normalize_port_list "$current_ports")"
+        if [[ -n "$current_ports" ]]; then
+            detected_ports="${detected_ports}${current_ports} "
+            add_detected_tcp_port "$current_ports"
         fi
     done
 
-    detected_caddy_ports=$(normalize_port_list "$detected_caddy_ports")
-
-    if [ -n "$detected_caddy_ports" ]; then
-        echo -e "${GREEN}${BOLD}[✓] 检测到 Caddy 配置端口: ${CYAN}${detected_caddy_ports}${RESET}"
-
-        DETECTED_TCP_PORTS+="$detected_caddy_ports "
-        DETECTED_TCP_PORTS=$(normalize_port_list "$DETECTED_TCP_PORTS")
+    detected_ports="$(normalize_port_list "$detected_ports")"
+    if [[ -n "$detected_ports" ]]; then
+        info "配置文件检测 Caddy TCP 端口（高置信度）: $detected_ports"
     else
-        echo -e "${BLUE}[-] 未从 Caddy 配置文件中检测到 http_port / https_port。${RESET}"
+        info "未从 Caddy 配置中检测到 http_port / https_port。"
     fi
-
-    echo "----------------------------------------"
 }
 
-# 应用手动端口兜底配置
-# 说明：
-# - 默认不添加任何端口
-# - 仅当 MANUAL_TCP_PORTS / MANUAL_UDP_PORTS 被用户显式填写时才生效
-# - 不得在默认配置中固化用户临时端口
 apply_manual_ports() {
-    echo -e "${BLUE}${BOLD}[+] 正在检查手动端口兜底配置...${RESET}"
+    local tcp_ports=""
+    local udp_ports=""
 
-    if [ -n "$MANUAL_TCP_PORTS" ]; then
-        echo -e "${GREEN}[✓] 手动 TCP 端口: ${CYAN}$MANUAL_TCP_PORTS${RESET}"
-        DETECTED_TCP_PORTS+="$MANUAL_TCP_PORTS "
+    info "正在检查手动端口兜底配置..."
+    tcp_ports="$(normalize_port_list "$MANUAL_TCP_PORTS")"
+    udp_ports="$(normalize_port_list "$MANUAL_UDP_PORTS")"
+
+    if [[ -n "$tcp_ports" ]]; then
+        info "手动兜底 TCP 端口（用户指定）: $tcp_ports"
+        add_detected_tcp_port "$tcp_ports"
     else
-        echo -e "${BLUE}[-] 未配置手动 TCP 端口。${RESET}"
+        info "未配置手动 TCP 端口。"
     fi
 
-    if [ -n "$MANUAL_UDP_PORTS" ]; then
-        echo -e "${GREEN}[✓] 手动 UDP 端口: ${CYAN}$MANUAL_UDP_PORTS${RESET}"
-        DETECTED_UDP_PORTS+="$MANUAL_UDP_PORTS "
+    if [[ -n "$udp_ports" ]]; then
+        info "手动兜底 UDP 端口（用户指定）: $udp_ports"
+        add_detected_udp_port "$udp_ports"
     else
-        echo -e "${BLUE}[-] 未配置手动 UDP 端口。${RESET}"
+        info "未配置手动 UDP 端口。"
     fi
-
-    DETECTED_TCP_PORTS=$(normalize_port_list "$DETECTED_TCP_PORTS")
-    DETECTED_UDP_PORTS=$(normalize_port_list "$DETECTED_UDP_PORTS")
-
-    echo "----------------------------------------"
 }
 
-# --- 主要功能函数 ---
-# 1. 安装必要的软件包
+# --- Main actions ---
 install_packages() {
-    echo -e "\n${MAGENTA}==================== 步骤 1: 安装软件包 ====================${RESET}"
-    echo -e "${BLUE}${BOLD}[+] 正在更新软件包列表并安装 UFW, Fail2ban 及依赖...${RESET}"
-    # 尝试识别包管理器
     local pkg_manager=""
-    if command -v apt-get &> /dev/null; then
+    local update_status=0
+    local iproute_pkg="iproute"
+
+    section "步骤 1: 安装依赖"
+
+    if command -v apt-get >/dev/null 2>&1; then
         pkg_manager="apt-get"
-    elif command -v dnf &> /dev/null; then
+        iproute_pkg="iproute2"
+    elif command -v dnf >/dev/null 2>&1; then
         pkg_manager="dnf"
-    elif command -v yum &> /dev/null; then
+    elif command -v yum >/dev/null 2>&1; then
         pkg_manager="yum"
     else
-        echo -e "${RED}${BOLD}[✗] 错误:${RESET}${RED} 无法识别的包管理器 (apt-get/dnf/yum)。${RESET}" >&2
+        err "无法识别包管理器，仅支持 apt-get、dnf、yum。"
         return 1
     fi
-    echo -e "${BLUE}[i] 使用包管理器: ${CYAN}$pkg_manager${RESET}"
 
-    # 更新软件包列表
-    local update_status=0
+    info "使用包管理器: $pkg_manager"
+
     case "$pkg_manager" in
-        apt-get)
-            $pkg_manager update > /dev/null 2>&1 || update_status=$?
-            ;;
-        dnf)
-            $pkg_manager makecache -y > /dev/null 2>&1 || update_status=$?
-            ;;
+        apt-get) run_cmd "更新软件包列表" "$pkg_manager" update >/dev/null 2>&1 || update_status=$? ;;
+        dnf) run_cmd "更新软件包缓存" "$pkg_manager" makecache -y >/dev/null 2>&1 || update_status=$? ;;
         yum)
-            $pkg_manager check-update > /dev/null 2>&1 || update_status=$?
-            # yum check-update 返回 100 表示存在可用更新，不是失败。
-            if [ "$update_status" -eq 100 ]; then
-                update_status=0
-            fi
+            run_cmd "检查软件包更新" "$pkg_manager" check-update >/dev/null 2>&1 || update_status=$?
+            [[ "$update_status" -eq 100 ]] && update_status=0
             ;;
     esac
-    if [ "$update_status" -ne 0 ]; then
-        echo -e "${RED}${BOLD}[✗] 错误:${RESET}${RED} 软件包列表更新失败。${RESET}" >&2
-        return 1
-    fi
-    echo -e "${GREEN}${BOLD}[✓] 成功:${RESET}${GREEN} 软件包列表更新完毕。${RESET}"
-
-    # 定义不同发行版的包名
-    local ufw_pkg="ufw"
-    local fail2ban_pkg="fail2ban"
-    local curl_pkg="curl"
-    local wget_pkg="wget"
-    local net_tools_pkg="net-tools"
-    local iproute_pkg="iproute" # 通常是 iproute2 在 apt, iproute 在 yum/dnf
-    local jq_pkg="jq"
-    local fail2ban_ufw_action="" # fail2ban-action for ufw if needed
+    [[ "$update_status" -eq 0 ]] || { err "软件包列表更新失败。"; return 1; }
+    ok "软件包列表已更新。"
 
     if [[ "$pkg_manager" == "yum" || "$pkg_manager" == "dnf" ]]; then
-        # CentOS/RHEL/Fedora 通常需要 EPEL release 来安装 fail2ban
-        echo -e "${BLUE}[+] 正在检查并安装 EPEL release (如果需要)...${RESET}"
-        if ! rpm -q epel-release &>/dev/null; then
-            $pkg_manager install -y epel-release > /dev/null 2>&1
-            check_command_status "安装 epel-release" || return 1 # Fail2ban 依赖它
-        else
-            echo -e "${BLUE}[-] EPEL release 已安装。${RESET}"
+        warn "RHEL/CentOS 默认防火墙通常是 firewalld。本脚本将安装并使用 UFW。"
+        if ! rpm -q epel-release >/dev/null 2>&1; then
+            run_cmd "安装 epel-release" "$pkg_manager" install -y epel-release >/dev/null 2>&1 || return 1
         fi
-        # CentOS 7/RHEL 7 可能默认没有 ufw, CentOS 8+ firewalld 是默认
-        # 脚本目前强制使用 UFW，如果需要支持 firewalld 需要大改动
-        echo -e "${YELLOW}[!] 注意: 在 RHEL/CentOS 系统上，firewalld 是默认防火墙。此脚本将安装并使用 UFW。${RESET}"
-        iproute_pkg="iproute"
-        # yum/dnf 通常不需要单独的 fail2ban-action 包
-    elif [ "$pkg_manager" == "apt-get" ]; then
-        iproute_pkg="iproute2"
-        # Debian/Ubuntu 可能需要 fail2ban 的 ufw action (虽然通常默认包含)
     fi
 
-    # 安装软件包
-    echo -e "${BLUE}[+] 正在安装软件包: ${CYAN}${ufw_pkg}, ${fail2ban_pkg}, ${curl_pkg}, ${wget_pkg}, ${net_tools_pkg}, ${iproute_pkg}, ${jq_pkg}${RESET}"
-    $pkg_manager install -y "$ufw_pkg" "$fail2ban_pkg" "$curl_pkg" "$wget_pkg" "$net_tools_pkg" "$iproute_pkg" "$jq_pkg" > /dev/null 2>&1
-    check_command_status "安装核心软件包" || return 1
-
-    echo -e "${GREEN}${BOLD}[✓] 软件包安装完成。${RESET}"
-    echo -e "${MAGENTA}===========================================================${RESET}"
+    run_cmd "安装核心软件包" "$pkg_manager" install -y ufw fail2ban curl wget net-tools "$iproute_pkg" jq >/dev/null 2>&1 || return 1
+    ok "依赖安装完成。"
 }
 
-# 2. 配置 UFW 防火墙
-configure_ufw() {
-    echo -e "\n${MAGENTA}==================== 步骤 2: 配置 UFW 防火墙 ================${RESET}"
-    echo -e "${BLUE}${BOLD}[+] 开始配置 UFW 防火墙...${RESET}"
-
-    # 确保 ufw 命令可用
-    if ! command -v ufw &> /dev/null; then
-        echo -e "${RED}${BOLD}[✗] 错误:${RESET}${RED} UFW 命令不可用。请先运行安装步骤 (选项 1)。${RESET}"
-        return 1
-    fi
-
-    # 重置 UFW 到默认状态 (先禁用再重置更可靠)
-    echo -e "${YELLOW}${BOLD}[!] 注意:${RESET}${YELLOW} 即将重置 UFW 规则为默认状态...${RESET}"
-    ufw --force disable > /dev/null 2>&1 # 先禁用
-    echo "y" | ufw reset > /dev/null
-    check_command_status "重置 UFW 规则" || return 1
-
-    # 设置默认策略
-    echo -e "${BLUE}[+] 设置默认策略: ${BOLD}拒绝入站${RESET}${BLUE}, ${BOLD}允许出站${RESET}${BLUE}...${RESET}"
-    ufw default deny incoming > /dev/null
-    check_command_status "设置默认入站策略 (deny incoming)" || return 1
-    ufw default allow outgoing > /dev/null
-    check_command_status "设置默认出站策略 (allow outgoing)" || return 1
-
-    # 清空上次检测的端口，重新检测
+collect_firewall_ports() {
     DETECTED_TCP_PORTS=""
     DETECTED_UDP_PORTS=""
     DETECTED_SSH_PORT=""
 
-    # 检测 SSH 和代理端口
-    detect_ssh_port # 这会填充 DETECTED_SSH_PORT 并可能添加到 DETECTED_TCP_PORTS
-    detect_proxy_ports # 这会根据已运行进程填充 DETECTED_TCP_PORTS 和 DETECTED_UDP_PORTS
-    detect_singbox_ports # 这会根据 sing-box 配置文件补充端口
-    detect_caddy_ports # 这会根据 Caddy 配置文件补充前置 HTTP/HTTPS TCP 端口
-    apply_manual_ports # 这会应用用户显式配置的手动兜底端口，默认不添加任何端口
-
-    # 确保 SSH 端口已确定
-    if [ -z "$DETECTED_SSH_PORT" ]; then
-        echo -e "${RED}${BOLD}[✗] 错误:${RESET}${RED} 无法确定 SSH 端口，无法继续配置 UFW。${RESET}" >&2
-        return 1 # SSH 是关键
-    fi
-
-    # 允许 SSH 端口 (应该已包含在 DETECTED_TCP_PORTS 中，但为保险起见单独加一次)
-    echo -e "${BLUE}[+] 允许 SSH 端口 ${CYAN}${BOLD}$DETECTED_SSH_PORT${BLUE}/tcp...${RESET}"
-    ufw allow "$DETECTED_SSH_PORT"/tcp comment 'Allow SSH access' > /dev/null
-    check_command_status "允许 SSH 端口 $DETECTED_SSH_PORT/tcp" || return 1
-
-    # 允许检测到的 TCP 端口 (去重并排除已添加的 SSH 端口)
-    local unique_tcp_ports=$(normalize_port_list "$DETECTED_TCP_PORTS" | tr ' ' '\n' | grep -v "^${DETECTED_SSH_PORT}$" | tr '\n' ' ')
-    unique_tcp_ports=${unique_tcp_ports% } # Remove trailing space
-    if [ -n "$unique_tcp_ports" ]; then
-        echo -e "${BLUE}[+] 允许其他检测到的 TCP 端口: ${CYAN}${unique_tcp_ports}${RESET}"
-        for port in $unique_tcp_ports; do
-            ufw allow "$port"/tcp comment 'Allow detected TCP service' > /dev/null
-            check_command_status "允许 TCP 端口 $port/tcp" || return 1
-        done
-    fi
-
-    # 允许检测到的 UDP 端口 (去重)
-    local unique_udp_ports=$(normalize_port_list "$DETECTED_UDP_PORTS")
-    unique_udp_ports=${unique_udp_ports% } # Remove trailing space
-    if [ -n "$unique_udp_ports" ]; then
-         echo -e "${BLUE}[+] 允许检测到的 UDP 端口: ${CYAN}${unique_udp_ports}${RESET}"
-        for port in $unique_udp_ports; do
-            ufw allow "$port"/udp comment 'Allow detected UDP service' > /dev/null
-            check_command_status "允许 UDP 端口 $port/udp" || return 1
-        done
-    fi
-
-    # 允许本地回环接口
-    echo -e "${BLUE}[+] 允许本地回环 (lo) 接口流量...${RESET}"
-    ufw allow in on lo > /dev/null
-    check_command_status "允许本地回环入站 (lo in)" || return 1
-    ufw allow out on lo > /dev/null
-    check_command_status "允许本地回环出站 (lo out)" || return 1
-
-    # 添加当前 IP 到白名单 (如果获取到)
-    if [ -n "$CURRENT_IP" ]; then
-        echo -e "${BLUE}[+] 将当前 IP ${CYAN}${BOLD}$CURRENT_IP${BLUE} 添加到 SSH 端口 (${CYAN}$DETECTED_SSH_PORT${BLUE}) 白名单...${RESET}"
-        ufw allow from "$CURRENT_IP" to any port "$DETECTED_SSH_PORT" proto tcp comment 'Current IP Whitelist (SSH)' > /dev/null
-        check_command_status "添加当前 IP $CURRENT_IP 到 SSH 白名单" || return 1
-    else
-        echo -e "${YELLOW}[i] 未获取到当前 IP 地址，跳过添加 SSH 白名单。${RESET}"
-    fi
-
-    # 启用 UFW
-    echo -e "${BLUE}${BOLD}[+] 正在启用 UFW 防火墙...${RESET}"
-    echo "y" | ufw enable > /dev/null
-    check_command_status "启用 UFW" || return 1
-
-    echo -e "${GREEN}${BOLD}[✓] UFW 配置完成并已启用。${RESET}"
-    echo -e "${BLUE}${BOLD}[+] 当前 UFW 状态:${RESET}"
-    ufw status verbose # 显示详细状态
-    echo -e "${MAGENTA}===========================================================${RESET}"
+    detect_ssh_port || return $?
+    detect_proxy_ports
+    detect_singbox_ports
+    detect_caddy_ports
+    apply_manual_ports
 }
 
+prompt_ssh_source_mode() {
+    local choice=""
 
-# 3. 配置 Fail2ban
-configure_fail2ban() {
-    echo -e "\n${MAGENTA}==================== 步骤 3: 配置 Fail2ban ==================${RESET}"
-    echo -e "${BLUE}${BOLD}[+] 开始配置 Fail2ban...${RESET}"
-    # 确保 fail2ban 命令可用
-    if ! command -v fail2ban-client &> /dev/null; then
-        echo -e "${RED}${BOLD}[✗] 错误:${RESET}${RED} Fail2ban 命令不可用。请先运行安装步骤 (选项 1)。${RESET}"
-        return 1
-    fi
-     # 确保 SSH 端口已检测 (如果 configure_ufw 没运行过)
-    if [ -z "$DETECTED_SSH_PORT" ]; then
-        echo -e "${YELLOW}${BOLD}[!] 未检测到 SSH 端口，尝试现在检测...${RESET}"
-        detect_ssh_port
-        if [ -z "$DETECTED_SSH_PORT" ]; then
-             echo -e "${RED}${BOLD}[✗] 错误:${RESET}${RED} 无法检测 SSH 端口，无法继续配置 Fail2ban。${RESET}" >&2
-             return 1
-        fi
-    fi
+    while true; do
+        printf '%b\n' "${CYAN}请选择 SSH 来源限制:${RESET}" >&2
+        printf '  1. 保持 SSH 对所有来源开放，避免远程锁定\n' >&2
+        printf '  2. 仅允许当前 IP/CIDR 访问 SSH\n' >&2
+        printf '  0. 返回上一级\n' >&2
+        read -r -p "请输入选项 [0-2]: " choice
 
-    # 自动检测 SSH 日志或后端
-    find_ssh_log_or_backend || echo -e "${YELLOW}[i] 继续使用 Fail2ban 默认日志检测机制。${RESET}" # 如果检测失败，提示一下
-
-    # 创建 jail.local 配置文件
-    echo -e "${BLUE}[+] 正在创建/更新 Fail2ban 配置文件 ${CYAN}${FAIL2BAN_JAIL_LOCAL}${BLUE}...${RESET}"
-    # 使用 cat 和 EOF 创建或覆盖文件，确保权限正确
-    cat > "$FAIL2BAN_JAIL_LOCAL" << EOF
-[DEFAULT]
-# 默认禁止时间 (设置为更长的时间，例如 30 天)
-bantime = 30d
-# 在多少时间内达到最大重试次数则封禁 (例如 10 分钟)
-findtime = 10m
-# 最大重试次数 (可以设置得更严格，例如 3 次)
-maxretry = 3
-# 忽略的 IP 地址，可以是单个 IP、CIDR 或 DNS 主机名
-# 127.0.0.1/8 和 ::1 是本地回环，必须忽略
-# 将当前 IP 加入白名单 (如果获取到)
-ignoreip = 127.0.0.1/8 ::1 ${CURRENT_IP:-}
-# 后端设置 (根据检测结果设置)
-backend = ${FAIL2BAN_BACKEND:-auto}
-# 使用 ufw 作防火墙操作 (确保与 UFW 集成)
-# 如果有多个 action，可以这样写: banaction = ufw[application=...]
-# 但对于 SSH，通常直接用 ufw 即可
-banaction = ufw
-
-[sshd]
-# 启用 SSH 防护
-enabled = true
-# 监听的端口，使用检测到的端口，若未检测到则使用默认 'ssh'
-# 可以指定多个端口，用逗号分隔，例如 port = ssh,2222
-port = ${DETECTED_SSH_PORT:-ssh}
-# 使用内置的 sshd 过滤器
-filter = sshd
-# 日志路径 (如果检测到特定文件路径则使用，否则留空让 fail2ban 使用默认或 systemd 后端)
-EOF
-    # --- 添加 logpath (如果需要) ---
-    local logpath_line="" # 存储要写入文件的 logpath 行
-    local logpath_display="" # 用于后续摘要输出显示
-    if [ -n "$SSH_LOG_PATH" ] && [ "$SSH_LOG_PATH" != "using systemd backend" ]; then
-        # 检测到特定日志文件路径
-        logpath_line="logpath = $SSH_LOG_PATH"
-        logpath_display="${CYAN}$SSH_LOG_PATH${RESET}"
-        echo "$logpath_line" >> "$FAIL2BAN_JAIL_LOCAL"
-        echo -e "${BLUE}[i] 使用检测到的日志路径: $logpath_display"
-    elif [ "$FAIL2BAN_BACKEND" == "systemd" ]; then
-        # 使用 systemd 后端，不需要 logpath
-        echo -e "${BLUE}[i] 使用 systemd 后端，无需在 jail.local 中显式设置 logpath。${RESET}"
-        logpath_display="${MAGENTA}(使用 systemd journal，无需显式设置)${RESET}"
-        # 不需要向 jail.local 添加 logpath 行
-    else # FAIL2BAN_BACKEND != "systemd" 且未检测到 SSH_LOG_PATH
-         # 自动检测失败，添加注释提示用户
-         logpath_line="# logpath = %(sshd_log)s  # 自动检测失败，请根据系统检查并取消注释或修改"
-         logpath_display="${YELLOW}(自动检测失败，使用 Fail2ban 默认或需手动设置)${RESET}"
-         echo "$logpath_line" >> "$FAIL2BAN_JAIL_LOCAL"
-         echo -e "${YELLOW}[i] 未能自动检测日志路径，请在 ${CYAN}${FAIL2BAN_JAIL_LOCAL}${YELLOW} 中检查 'logpath'。${RESET}"
-    fi
-
-    check_command_status "创建/更新 ${CYAN}${FAIL2BAN_JAIL_LOCAL}${RESET}" || return 1
-
-    # --- 显示配置参数 ---
-    echo -e "${BLUE}${BOLD}\n[+] Fail2ban (${CYAN}${FAIL2BAN_JAIL_LOCAL}${BLUE}) 配置摘要:${RESET}"
-    echo -e "  ${MAGENTA}[DEFAULT]${RESET}"
-    echo -e "    ${CYAN}bantime${RESET}  = $(grep -E '^\s*bantime\s*=' "$FAIL2BAN_JAIL_LOCAL" | awk -F= '{print $2}' | xargs)"
-    echo -e "    ${CYAN}findtime${RESET} = $(grep -E '^\s*findtime\s*=' "$FAIL2BAN_JAIL_LOCAL" | awk -F= '{print $2}' | xargs)"
-    echo -e "    ${CYAN}maxretry${RESET} = $(grep -E '^\s*maxretry\s*=' "$FAIL2BAN_JAIL_LOCAL" | awk -F= '{print $2}' | xargs)"
-    local current_ip_display="${CURRENT_IP}"
-    if [ -z "$current_ip_display" ]; then
-        current_ip_display="${YELLOW}(未自动获取或手动输入)${RESET}"
-    else
-        current_ip_display="${CYAN}${BOLD}${current_ip_display}${RESET}"
-    fi
-    echo -e "    ${CYAN}ignoreip${RESET} = 127.0.0.1/8 ::1 ${current_ip_display}"
-    echo -e "    ${CYAN}backend${RESET}  = ${MAGENTA}${FAIL2BAN_BACKEND:-auto}${RESET}"
-    echo -e "    ${CYAN}banaction${RESET}= $(grep -E '^\s*banaction\s*=' "$FAIL2BAN_JAIL_LOCAL" | awk -F= '{print $2}' | xargs)"
-    echo -e "  ${MAGENTA}[sshd]${RESET}"
-    echo -e "    ${CYAN}enabled${RESET}  = $(grep -A 5 '\[sshd\]' "$FAIL2BAN_JAIL_LOCAL" | grep -E '^\s*enabled\s*=' | awk -F= '{print $2}' | xargs)"
-    echo -e "    ${CYAN}port${RESET}     = ${CYAN}$(grep -A 5 '\[sshd\]' "$FAIL2BAN_JAIL_LOCAL" | grep -E '^\s*port\s*=' | awk -F= '{print $2}' | xargs)${RESET}"
-    echo -e "    ${CYAN}filter${RESET}   = $(grep -A 5 '\[sshd\]' "$FAIL2BAN_JAIL_LOCAL" | grep -E '^\s*filter\s*=' | awk -F= '{print $2}' | xargs)"
-    echo -e "    ${CYAN}logpath${RESET}  = ${logpath_display}" # 使用前面处理好的 logpath 显示内容
-    echo "----------------------------------------"
-    # --- 显示结束 ---
-
-    # 重启 Fail2ban 服务
-    echo -e "${BLUE}${BOLD}[+] 正在重启 Fail2ban 服务...${RESET}"
-    systemctl restart fail2ban
-    if ! check_command_status "重启 Fail2ban 服务"; then
-        echo -e "${RED}${BOLD}[!] Fail2ban 服务重启命令失败。请检查服务日志 (${CYAN}journalctl -u fail2ban${RED} 或 ${CYAN}/var/log/fail2ban.log${RED})。${RESET}"
-        return 1
-    fi
-
-    # --- 验证 Fail2ban 服务状态 ---
-    echo -e "${BLUE}[+] 正在验证 Fail2ban 服务状态...${RESET}"
-    sleep 2 # 等待服务启动
-    if systemctl is-active --quiet fail2ban; then
-        echo -e "${GREEN}${BOLD}[✓] Fail2ban 服务处于活动状态。${RESET}"
-        echo -e "${BLUE}[+] 设置 Fail2ban 开机自启...${RESET}"
-        systemctl enable fail2ban > /dev/null 2>&1
-        check_command_status "设置 Fail2ban 开机自启" # 这里如果失败只是警告，不中断
-        echo -e "${GREEN}${BOLD}[✓] Fail2ban 配置完成并已启动。${RESET}"
-        # 显示状态
-        echo -e "${BLUE}${BOLD}[+] 当前 Fail2ban SSH jail 状态:${RESET}"
-        fail2ban-client status sshd
-    else
-        echo -e "${RED}${BOLD}[✗] 错误:${RESET}${RED} Fail2ban 服务未能成功启动！${RESET}" >&2
-        echo -e "${RED}[!] 请检查 Fail2ban 的配置 (${CYAN}${FAIL2BAN_JAIL_LOCAL}${RED}) 和系统日志 (${CYAN}journalctl -u fail2ban${RED} 或 ${CYAN}/var/log/fail2ban.log${RED}) 以获取详细错误信息。${RESET}" >&2
-        # 尝试查看最近的日志帮助调试
-        echo -e "${YELLOW}[i] 显示最近的 Fail2ban 日志: ${RESET}"
-        journalctl -u fail2ban -n 10 --no-pager || tail -n 20 /var/log/fail2ban.log
-        return 1 # 返回失败状态
-    fi
-    # --- 验证结束 ---
-    echo -e "${MAGENTA}===========================================================${RESET}"
+        case "$choice" in
+            1) printf 'open\n'; return 0 ;;
+            2) printf 'restricted\n'; return 0 ;;
+            0) return "$INPUT_CANCELLED" ;;
+            *) warn "无效选项，请输入 0、1 或 2。" ;;
+        esac
+    done
 }
 
+backup_ufw_config() {
+    local backup_path=""
 
-# 4. 强化 SSH 配置
-secure_ssh() {
-    echo -e "\n${MAGENTA}==================== 步骤 4: 强化 SSH 配置 ==================${RESET}"
-    echo -e "${BLUE}${BOLD}[+] 开始强化 SSH 配置 (${CYAN}${SSH_CONFIG_FILE}${BLUE})...${RESET}"
-    # 确保 SSH 配置文件存在
-    if [ ! -f "$SSH_CONFIG_FILE" ]; then
-        echo -e "${RED}${BOLD}[✗] 错误:${RESET}${RED} SSH 配置文件 ${CYAN}$SSH_CONFIG_FILE${RED} 未找到。${RESET}" >&2
-        return 1
+    create_backup_dir >/dev/null || return 1
+    backup_path="${BACKUP_DIR}/ufw-$(date +%Y%m%d_%H%M%S).tar.gz"
+    if [[ "${SECURE_SERVER_DRY_RUN}" == "1" ]]; then
+        printf '[DRY-RUN] backup /etc/ufw -> %s\n' "$backup_path"
+        return 0
     fi
+    [[ -d /etc/ufw ]] || return 0
+    tar -C /etc -czf "$backup_path" ufw
+    ok "UFW 配置已备份到 $backup_path"
+}
 
-    local backup_file="${SSH_CONFIG_FILE}.bak_$(date +%Y%m%d_%H%M%S)"
-    # 备份原始配置文件
-    echo -e "${BLUE}[+] 备份当前 SSH 配置文件到 ${CYAN}${backup_file}${BLUE}...${RESET}"
-    cp "$SSH_CONFIG_FILE" "$backup_file"
-    if ! check_command_status "备份 SSH 配置文件"; then
-        echo -e "${RED}${BOLD}[✗] 错误:${RESET}${RED} 备份 SSH 配置文件失败，中止操作。${RESET}" >&2
+configure_ufw() {
+    local port=""
+    local unique_tcp_ports=""
+    local unique_udp_ports=""
+    local ssh_source_mode=""
+    local confirm_status=0
+
+    section "步骤 2: 配置 UFW 防火墙"
+    require_command ufw || return 1
+
+    collect_firewall_ports || {
+        [[ "$?" -eq "$INPUT_CANCELLED" ]] && { info "已取消当前操作，返回上一级。"; return "$INPUT_CANCELLED"; }
         return 1
-    fi
-
-    # --- 辅助函数：修改或添加 SSH 配置项 ---
-    # 参数: $1=配置项名称, $2=期望值, $3=配置文件路径
-    configure_ssh_option() {
-        local key="$1"
-        local value="$2"
-        local config_file="$3"
-        local change_made_flag=false # 局部变量跟踪此项修改
-        # 检查是否已存在且值正确 (忽略行首空格和注释)
-        if grep -qE "^\s*${key}\s+${value}" "$config_file"; then
-            echo -e "${BLUE}[-] ${key} 已设置为 ${value}，无需修改。${RESET}"
-            return 0 # 0 表示无需修改或修改成功
-        else
-             # 尝试修改现有行 (包括注释掉的行)
-             if grep -qE "^\s*#?\s*${key}\s+" "$config_file"; then
-                 sed -i -E "s/^\s*#?\s*${key}\s+.*/${key} ${value}/" "$config_file"
-             else
-                 # 如果不存在，则追加到文件末尾
-                 echo "${key} ${value}" >> "$config_file"
-             fi
-             # 验证修改是否成功
-             if grep -qE "^\s*${key}\s+${value}" "$config_file"; then
-                check_command_status "设置 ${key} ${value}" || return 1
-                return 2 # 2 表示成功修改
-             else
-                 echo -e "${RED}${BOLD}[✗] 错误:${RESET}${RED} 尝试设置 ${key} ${value} 失败。${RESET}" >&2
-                 return 1 # 1 表示修改失败
-             fi
-        fi
     }
 
-    local overall_success=true # 跟踪整个函数是否成功
-    local any_change_made=false # 跟踪是否有任何实际修改
+    ssh_source_mode="$(prompt_ssh_source_mode)" || {
+        info "已返回上一级。"
+        return "$INPUT_CANCELLED"
+    }
 
-    # 禁用 Root 登录 (交互式)
-    read -p "$(echo -e ${YELLOW}${BOLD}"[?] 是否要尝试禁用 Root 账户通过 SSH 登录? (y/N): "${RESET})" disable_root_login
-    if [[ "$disable_root_login" =~ ^[Yy]$ ]]; then
-        echo -e "${BLUE}[+] 正在检查禁用 Root 登录的安全性...${RESET}"
-        # 查找 sudo 组或 wheel 组中的非 root 用户
-        local sudo_users=""
-        if getent group sudo >/dev/null 2>&1; then
-            sudo_users=$(getent group sudo | cut -d: -f4 | tr ',' '\n' | grep -v '^root$' || true)
-        elif getent group wheel >/dev/null 2>&1; then
-             sudo_users=$(getent group wheel | cut -d: -f4 | tr ',' '\n' | grep -v '^root$' || true)
-        fi
-        # 也可以检查 /etc/sudoers.d/ 文件中的用户，但 getent group 更简单通用
+    if [[ "$ssh_source_mode" == "restricted" && -z "$CURRENT_IP" ]]; then
+        get_current_ip || {
+            [[ "$?" -eq "$INPUT_CANCELLED" ]] && { info "已取消当前操作，返回上一级。"; return "$INPUT_CANCELLED"; }
+            return 1
+        }
+    fi
 
-        if [ -z "$sudo_users" ]; then
-            # 如果没有找到其他 sudo 用户
-            echo -e "${RED}${BOLD}[✗] 安全检查失败!${RESET}${RED} 未找到其他具有 sudo/wheel 权限的用户。${RESET}"
-            echo -e "${RED}    为了防止您被锁定在服务器之外，脚本无法自动禁用 Root 登录。${RESET}"
-            echo -e "${YELLOW}    请先手动创建一个具有 sudo/wheel 权限的新用户，并确保可以使用该用户登录，然后再尝试禁用 Root 登录。${RESET}"
-            # 不设置 overall_success=false，允许用户继续其他配置
-        else
-            # 找到其他 sudo 用户，进行二次确认
-            echo -e "${YELLOW}${BOLD}[!] 安全警告!${RESET}${YELLOW} 检测到以下可能具有 sudo/wheel 权限的用户:${RESET}"
-            echo -e "${CYAN}${sudo_users}${RESET}" # 列出找到的用户
-            echo -e "${YELLOW}    在禁用 Root 登录之前，${BOLD}请务必确认您可以使用上述至少一个用户通过 SSH 成功登录，并且该用户拥有 sudo/wheel 权限${RESET}${YELLOW}，否则您将无法管理服务器！${RESET}"
-            read -p "$(echo -e ${YELLOW}${BOLD}"[?] 您是否已确认并理解风险，确实要继续禁用 Root 登录? (y/N): "${RESET})" confirm_disable_root
-            if [[ "$confirm_disable_root" =~ ^[Yy]$ ]]; then
-                echo -e "${BLUE}[+] 设置 Root 禁止登录 (PermitRootLogin no)...${RESET}"
-                configure_ssh_option "PermitRootLogin" "no" "$SSH_CONFIG_FILE"
-                local config_status=$?
-                if [ $config_status -eq 1 ]; then overall_success=false; fi
-                if [ $config_status -eq 2 ]; then any_change_made=true; fi
-            else
-                echo -e "${YELLOW}[-] 取消禁用 Root 登录。${RESET}"
-            fi
-        fi
+    unique_tcp_ports="$(normalize_port_list "$DETECTED_TCP_PORTS" | tr ' ' '\n' | awk -v ssh="$DETECTED_SSH_PORT" '$1 != "" && $1 != ssh { print }' | tr '\n' ' ')"
+    unique_tcp_ports="${unique_tcp_ports% }"
+    unique_udp_ports="$(normalize_port_list "$DETECTED_UDP_PORTS")"
+    unique_udp_ports="${unique_udp_ports% }"
+
+    printf '%b\n' "${YELLOW}准备执行:${RESET}"
+    printf -- '- 重置现有 UFW 规则\n'
+    printf -- '- 默认拒绝入站，允许出站\n'
+    printf -- '- SSH: %s/tcp\n' "$DETECTED_SSH_PORT"
+    printf -- '- TCP: %s\n' "${unique_tcp_ports:-无}"
+    printf -- '- UDP: %s\n' "${unique_udp_ports:-无}"
+    if [[ "$ssh_source_mode" == "restricted" ]]; then
+        printf -- '- SSH 来源限制: %s\n' "$CURRENT_IP"
     else
-         echo -e "${BLUE}[i] 跳过禁用 Root 登录的设置。${RESET}"
+        printf -- '- SSH 来源限制: 全部来源\n'
     fi
-    echo "---"
+    printf -- '- 备份目录: %s\n' "$BACKUP_DIR"
 
+    prompt_exact_yes "即将重置并启用 UFW。"
+    confirm_status=$?
+    case "$confirm_status" in
+        0) ;;
+        "$INPUT_CANCELLED") info "已取消当前操作，返回上一级。"; return "$INPUT_CANCELLED" ;;
+        *) info "未确认执行，返回上一级。"; return "$INPUT_CANCELLED" ;;
+    esac
 
-    # 禁用密码认证 (交互式)
-    if $overall_success; then # 只有在前面的步骤没有明确失败时才继续
-        read -p "$(echo -e ${YELLOW}${BOLD}"[?] 是否禁用 SSH 密码认证，强制使用密钥登录? (强烈推荐 'y') (y/N): "${RESET})" disable_password_auth
-        if [[ "$disable_password_auth" =~ ^[Yy]$ ]]; then
-            echo -e "${YELLOW}${BOLD}[!] 重要提示:${RESET}${YELLOW} 禁用密码认证前，请确保您已成功设置并测试过 SSH 密钥登录！${RESET}"
-            read -p "$(echo -e ${YELLOW}${BOLD}"[?] 您是否已准备好 SSH 密钥并确认可以无密码登录? (y/N): "${RESET})" confirm_key_ready
-            if [[ "$confirm_key_ready" =~ ^[Yy]$ ]]; then
-                local pw_auth_changed=false
-                local chal_resp_changed=false
+    backup_ufw_config || return 1
+    run_cmd "禁用 UFW" ufw --force disable || return 1
+    printf 'y\n' | run_cmd "重置 UFW 规则" ufw reset || return 1
+    run_cmd "设置默认拒绝入站" ufw default deny incoming || return 1
+    run_cmd "设置默认允许出站" ufw default allow outgoing || return 1
 
-                echo -e "${BLUE}[+] 禁用密码认证 (PasswordAuthentication no)...${RESET}"
-                configure_ssh_option "PasswordAuthentication" "no" "$SSH_CONFIG_FILE"
-                local config_status=$?
-                if [ $config_status -eq 1 ]; then overall_success=false; fi
-                if [ $config_status -eq 2 ]; then any_change_made=true; pw_auth_changed=true; fi
+    if [[ "$ssh_source_mode" == "restricted" ]]; then
+        run_cmd "允许当前 IP/CIDR 访问 SSH" ufw allow from "$CURRENT_IP" to any port "$DETECTED_SSH_PORT" proto tcp comment "Allow SSH from current IP" || return 1
+    else
+        run_cmd "允许 SSH 端口" ufw allow "$DETECTED_SSH_PORT/tcp" comment "Allow SSH access" || return 1
+    fi
 
-                if $overall_success; then
-                     echo -e "${BLUE}[+] 禁用 ChallengeResponseAuthentication (no)...${RESET}"
-                     configure_ssh_option "ChallengeResponseAuthentication" "no" "$SSH_CONFIG_FILE"
-                     config_status=$?
-                     if [ $config_status -eq 1 ]; then overall_success=false; fi
-                     if [ $config_status -eq 2 ]; then any_change_made=true; chal_resp_changed=true; fi
-                fi
-                # KbdInteractiveAuthentication is often linked or replaces ChallengeResponseAuthentication
-                if $overall_success; then
-                     echo -e "${BLUE}[+] 禁用 KbdInteractiveAuthentication (no)...${RESET}"
-                     configure_ssh_option "KbdInteractiveAuthentication" "no" "$SSH_CONFIG_FILE"
-                     config_status=$?
-                     if [ $config_status -eq 1 ]; then overall_success=false; fi
-                     if [ $config_status -eq 2 ]; then any_change_made=true; fi # Don't need a separate flag for this one for the message
-                fi
+    for port in $unique_tcp_ports; do
+        run_cmd "允许 TCP 端口 $port" ufw allow "$port/tcp" comment "Allow detected TCP service" || return 1
+    done
+    for port in $unique_udp_ports; do
+        run_cmd "允许 UDP 端口 $port" ufw allow "$port/udp" comment "Allow detected UDP service" || return 1
+    done
 
-                if $overall_success && ($pw_auth_changed || $chal_resp_changed); then # 只有当真正修改了才提示
-                    echo -e "${GREEN}${BOLD}[✓] 已配置禁用密码/质询认证。${RESET}"
-                elif ! $overall_success; then
-                    echo -e "${RED}[!] 设置密码/质询认证时出错。${RESET}"
-                fi
-            else
-                echo -e "${YELLOW}[-] 取消禁用密码认证，因为 SSH 密钥未确认。${RESET}"
-            fi
+    run_cmd "允许本地回环入站" ufw allow in on lo || return 1
+    run_cmd "允许本地回环出站" ufw allow out on lo || return 1
+    printf 'y\n' | run_cmd "启用 UFW" ufw enable || return 1
+
+    if [[ "${SECURE_SERVER_DRY_RUN}" != "1" ]]; then
+        ufw status verbose
+        ufw status | grep -Eq "${DETECTED_SSH_PORT}/tcp" || {
+            err "UFW 状态中未发现 SSH 端口规则，请立即检查防火墙。"
+            return 1
+        }
+    fi
+    ok "UFW 配置流程完成。"
+}
+
+configure_fail2ban() {
+    local tmp_file=""
+    local backup_path=""
+    local logpath=""
+
+    section "步骤 3: 配置 Fail2ban"
+    require_command fail2ban-client || return 1
+    require_command systemctl || return 1
+
+    if [[ -z "$DETECTED_SSH_PORT" ]]; then
+        detect_ssh_port || {
+            [[ "$?" -eq "$INPUT_CANCELLED" ]] && { info "已取消当前操作，返回上一级。"; return "$INPUT_CANCELLED"; }
+            return 1
+        }
+    fi
+
+    find_ssh_log_or_backend || true
+    if [[ -n "$SSH_LOG_PATH" && "$SSH_LOG_PATH" != "using systemd backend" ]]; then
+        logpath="$SSH_LOG_PATH"
+    fi
+
+    tmp_file="$(make_tmp_file)" || return 1
+    umask 077
+    render_fail2ban_sshd_config "$DETECTED_SSH_PORT" "$CURRENT_IP" "$FAIL2BAN_BACKEND" "$logpath" > "$tmp_file"
+
+    create_backup_dir >/dev/null || return 1
+    if [[ -f "$FAIL2BAN_SSHD_LOCAL" ]]; then
+        backup_path="$(backup_file_if_exists "$FAIL2BAN_SSHD_LOCAL")" || return 1
+        info "Fail2ban 旧配置备份: $backup_path"
+    fi
+
+    if [[ "${SECURE_SERVER_DRY_RUN}" == "1" ]]; then
+        printf '[DRY-RUN] install %s -> %s\n' "$tmp_file" "$FAIL2BAN_SSHD_LOCAL"
+        ok "Fail2ban dry-run 完成。"
+        return 0
+    fi
+
+    mkdir -p "$FAIL2BAN_JAIL_DIR" || return 1
+    install -m 0644 "$tmp_file" "$FAIL2BAN_SSHD_LOCAL" || return 1
+
+    if ! fail2ban-client -t; then
+        err "Fail2ban 配置验证失败，正在恢复。"
+        if [[ -n "$backup_path" ]]; then
+            restore_file_backup "$backup_path" "$FAIL2BAN_SSHD_LOCAL" || true
         else
-            echo -e "${YELLOW}[-] 跳过禁用密码认证。${BOLD}(为了安全，强烈建议使用密钥登录)${RESET}"
-        fi
-    fi
-    echo "---"
-
-    # 限制最大认证尝试次数
-    if $overall_success; then
-        echo -e "${BLUE}[+] 设置最大认证尝试次数 (MaxAuthTries 3)...${RESET}"
-        configure_ssh_option "MaxAuthTries" "3" "$SSH_CONFIG_FILE"
-        local config_status=$?
-        if [ $config_status -eq 1 ]; then overall_success=false; fi
-        if [ $config_status -eq 2 ]; then any_change_made=true; fi
-    fi
-    echo "---"
-
-    # 启用 TCPKeepAlive
-    if $overall_success; then
-         echo -e "${BLUE}[+] 启用 TCPKeepAlive (TCPKeepAlive yes)...${RESET}"
-         configure_ssh_option "TCPKeepAlive" "yes" "$SSH_CONFIG_FILE"
-         local config_status=$?
-         if [ $config_status -eq 1 ]; then overall_success=false; fi
-         if [ $config_status -eq 2 ]; then any_change_made=true; fi
-    fi
-    echo "---"
-
-    # 设置 ClientAliveInterval
-    if $overall_success; then
-        echo -e "${BLUE}[+] 设置客户端存活探测间隔 (ClientAliveInterval 300)...${RESET}"
-        configure_ssh_option "ClientAliveInterval" "300" "$SSH_CONFIG_FILE"
-        local config_status=$?
-        if [ $config_status -eq 1 ]; then overall_success=false; fi
-        if [ $config_status -eq 2 ]; then any_change_made=true; fi
-    fi
-    echo "---"
-
-    # 设置 ClientAliveCountMax
-    if $overall_success; then
-        echo -e "${BLUE}[+] 设置客户端存活探测次数 (ClientAliveCountMax 2)...${RESET}"
-        configure_ssh_option "ClientAliveCountMax" "2" "$SSH_CONFIG_FILE"
-        local config_status=$?
-        if [ $config_status -eq 1 ]; then overall_success=false; fi
-        if [ $config_status -eq 2 ]; then any_change_made=true; fi
-    fi
-    echo "---"
-
-    # 如果任何修改步骤失败，恢复备份并退出
-    if ! $overall_success; then
-        echo -e "${RED}${BOLD}[✗] 错误:${RESET}${RED} 在修改 SSH 配置时发生错误。${RESET}" >&2
-        echo -e "${YELLOW}${BOLD}[!] 正在尝试恢复备份文件 ${CYAN}${backup_file}${YELLOW}...${RESET}"
-        cp "$backup_file" "$SSH_CONFIG_FILE"
-        if [ $? -eq 0 ]; then
-            echo -e "${GREEN}${BOLD}[✓] 备份文件已恢复。 SSH 配置未更改。${RESET}"
-        else
-            echo -e "${RED}${BOLD}[✗] 错误:${RESET}${RED} 恢复备份文件失败！请手动检查 ${CYAN}$SSH_CONFIG_FILE${RED} 和 ${CYAN}$backup_file${RESET}" >&2
+            rm -f "$FAIL2BAN_SSHD_LOCAL"
         fi
         return 1
     fi
 
-    # 只有在实际做出更改后才进行测试和重启
-    if $any_change_made; then
-        # 检查 SSH 配置语法
-        echo -e "${BLUE}${BOLD}[+] 正在检查 SSH 配置语法...${RESET}"
-        sshd -t
-        if [ $? -ne 0 ]; then
-            echo -e "${RED}${BOLD}[✗] 错误:${RESET}${RED} 修改后的 SSH 配置 (${CYAN}$SSH_CONFIG_FILE${RED}) 语法检查失败！${RESET}" >&2
-            echo -e "${YELLOW}${BOLD}[!] 正在尝试恢复备份文件 ${CYAN}${backup_file}${YELLOW}...${RESET}"
-            cp "$backup_file" "$SSH_CONFIG_FILE"
-            if [ $? -eq 0 ]; then
-                echo -e "${GREEN}${BOLD}[✓] 备份文件已恢复。 SSH 配置未更改。${RESET}"
-            else
-                echo -e "${RED}${BOLD}[✗] 错误:${RESET}${RED} 恢复备份文件失败！请手动检查 ${CYAN}$SSH_CONFIG_FILE${RED} 和 ${CYAN}$backup_file${RESET}" >&2
-            fi
-            return 1
-        fi
-        echo -e "${GREEN}${BOLD}[✓] SSH 配置语法检查通过。${RESET}"
-
-        # 重启 SSH 服务
-        echo -e "${BLUE}${BOLD}[+] 正在重启 SSH 服务 (sshd/ssh)...${RESET}"
-        # 确定服务名称
-        local ssh_service_name="sshd"
-        if systemctl list-unit-files | grep -q '^ssh.service'; then
-            ssh_service_name="ssh"
-        fi
-        echo -e "${BLUE}[i] 使用 SSH 服务名: ${CYAN}${ssh_service_name}${RESET}"
-        systemctl restart "$ssh_service_name"
-        if ! check_command_status "重启 SSH 服务 (${ssh_service_name})"; then
-             echo -e "${RED}${BOLD}[!] SSH 服务重启命令失败，尝试恢复备份并再次重启...${RESET}"
-             cp "$backup_file" "$SSH_CONFIG_FILE" && systemctl restart "$ssh_service_name"
-             echo -e "${YELLOW}[!] 已尝试恢复备份配置。请检查 SSH 服务状态 (${CYAN}systemctl status ${ssh_service_name}${YELLOW}) 和日志 (${CYAN}journalctl -u ${ssh_service_name}${YELLOW})。${RESET}" >&2
-             return 1
-        fi
-
-        # --- 验证 SSH 服务状态 ---
-        echo -e "${BLUE}[+] 正在验证 SSH 服务状态...${RESET}"
-        sleep 2 # 等待服务启动
-        if systemctl is-active --quiet "$ssh_service_name"; then
-            echo -e "${GREEN}${BOLD}[✓] SSH 服务 (${ssh_service_name}) 处于活动状态。${RESET}"
-            echo -e "${GREEN}${BOLD}[✓] SSH 配置强化完成并已成功重启服务。${RESET}"
-        else
-            echo -e "${RED}${BOLD}[✗] 错误:${RESET}${RED} SSH 服务 (${ssh_service_name}) 未能成功启动！即使语法检查通过。${RESET}" >&2
-            echo -e "${RED}[!] 这可能由配置中的逻辑错误或权限问题引起。${RESET}"
-            echo -e "${YELLOW}${BOLD}[!] 正在尝试恢复备份文件 ${CYAN}${backup_file}${YELLOW}...${RESET}"
-            cp "$backup_file" "$SSH_CONFIG_FILE"
-            if [ $? -eq 0 ]; then
-                echo -e "${GREEN}${BOLD}[✓] 备份文件已恢复。正在尝试再次重启 SSH 服务...${RESET}"
-                systemctl restart "$ssh_service_name"
-                sleep 2
-                if systemctl is-active --quiet "$ssh_service_name"; then
-                     echo -e "${GREEN}${BOLD}[✓] 使用备份配置成功重启 SSH 服务。${RESET}"
-                else
-                     echo -e "${RED}${BOLD}[✗] 错误:${RESET}${RED} 使用备份配置也无法启动 SSH 服务！请立即手动检查 SSH 配置 (${CYAN}$SSH_CONFIG_FILE${RED}) 和系统日志 (${CYAN}journalctl -u ${ssh_service_name}${RED})。${RESET}" >&2
-                fi
-            else
-                echo -e "${RED}${BOLD}[✗] 错误:${RESET}${RED} 恢复备份文件失败！请手动检查 ${CYAN}$SSH_CONFIG_FILE${RED} 和 ${CYAN}$backup_file${RED} 并尝试启动 SSH 服务。${RESET}" >&2
-            fi
-            return 1 # 返回失败状态
-        fi
-        # --- 验证结束 ---
-    else
-        echo -e "${BLUE}${BOLD}[i] SSH 配置未做任何更改，无需测试或重启服务。${RESET}"
-    fi
-    echo -e "${MAGENTA}===========================================================${RESET}"
+    systemctl restart fail2ban || return 1
+    sleep 2
+    systemctl is-active --quiet fail2ban || {
+        err "Fail2ban 服务未能启动。"
+        return 1
+    }
+    systemctl enable fail2ban >/dev/null 2>&1 || warn "Fail2ban 开机自启设置失败，请手动检查。"
+    fail2ban-client status sshd || warn "无法查询 sshd jail 状态，请检查 Fail2ban 日志。"
+    ok "Fail2ban 配置完成。"
 }
 
-# --- 脚本主逻辑 ---
-# 检查是否以 root 权限运行
-if [ "$(id -u)" -ne 0 ]; then
-    echo -e "${RED}${BOLD}[✗] 错误:${RESET}${RED} 此脚本需要以 root 权限运行。${RESET}" >&2
-    echo -e "${YELLOW}请尝试使用 'sudo bash $0' 来运行。${RESET}"
-    exit 1
-fi
-
-# 获取当前 IP (脚本开始时获取一次)
-get_current_ip
-
-# 主菜单循环
-while true; do
-    # 清除上次菜单循环可能残留的检测结果（如果适用）
-    # 注意：全局变量 DETECTED_*_PORTS 和 DETECTED_SSH_PORT 主要在步骤 2/3 中动态获取和使用
-    # 这里不需要每次循环都清空，因为步骤 2 (configure_ufw) 会在开始时清空它们
-
-    echo -e "\n${BLUE}${BOLD}================= Linux 安全加固脚本 (v2.6 - Optimized Port Detection) =================${RESET}"
-    echo -e "${CYAN}请选择要执行的操作:${RESET}"
-    echo -e " ${YELLOW}1.${RESET} 安装 UFW 和 Fail2ban (及依赖)"
-    echo -e " ${YELLOW}2.${RESET} 配置 UFW 防火墙 (${RED}将重置现有规则${RESET})"
-    echo -e " ${YELLOW}3.${RESET} 配置 Fail2ban (需先配置UFW或已知SSH端口)"
-    echo -e " ${YELLOW}4.${RESET} 强化 SSH 配置 (sshd)"
-    echo -e " ${YELLOW}5.${RESET} ${BOLD}执行所有步骤 (1-4)${RESET}"
-    echo -e " ${YELLOW}6.${RESET} 查看 UFW 状态"
-    echo -e " ${YELLOW}7.${RESET} 查看 Fail2ban SSH jail 状态"
-    echo -e " ${YELLOW}8.${RESET} 退出脚本"
-    echo -e "${BLUE}${BOLD}====================================================================================${RESET}"
-    read -p "$(echo -e ${YELLOW}${BOLD}"请输入选项 [1-8]: "${RESET})" choice
-
-    case $choice in
-        1)
-            install_packages
-            ;;
-        2)
-            configure_ufw
-            ;;
-        3)
-            # 确保 configure_ufw 运行过或 SSH 端口已知
-            if [ -z "$DETECTED_SSH_PORT" ]; then
-                 echo -e "${YELLOW}[!] 尚未配置 UFW 或检测 SSH 端口。建议先运行步骤 2。${RESET}"
-                 read -p "$(echo -e ${YELLOW}${BOLD}"[?] 是否仍要继续配置 Fail2ban? (y/N): "${RESET})" continue_f2b
-                 if [[ ! "$continue_f2b" =~ ^[Yy]$ ]]; then
-                    echo -e "${BLUE}[i] 取消配置 Fail2ban。${RESET}"
-                    continue # 跳回主菜单
-                 fi
-                 # 如果用户坚持，尝试检测 SSH 端口
-                 detect_ssh_port
-                 if [ -z "$DETECTED_SSH_PORT" ]; then
-                     echo -e "${RED}[!] 无法检测 SSH 端口，无法配置 Fail2ban。${RESET}"
-                     continue # 跳回主菜单
-                 fi
-            fi
-            configure_fail2ban
-            ;;
-        4)
-            secure_ssh
-            ;;
-        5)
-            echo -e "\n${MAGENTA}${BOLD}===== 开始执行所有步骤 (1 -> 2 -> 3 -> 4) =====${RESET}"
-            install_packages && \
-            configure_ufw && \
-            configure_fail2ban && \
-            secure_ssh
-            if [ $? -eq 0 ]; then
-                echo -e "\n${GREEN}${BOLD}*********************************************${RESET}"
-                echo -e "${GREEN}${BOLD}*** 所有步骤已成功执行！ 服务器加固完成。 ***${RESET}"
-                echo -e "${GREEN}${BOLD}*********************************************${RESET}"
-            else
-                echo -e "\n${RED}${BOLD}!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!${RESET}"
-                echo -e "${RED}${BOLD}!!! 执行过程中至少有一个步骤失败，请检查上面的输出。 !!!${RESET}"
-                echo -e "${RED}${BOLD}!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!${RESET}"
-            fi
-            ;;
-        6)
-            echo -e "\n${BLUE}${BOLD}--- UFW 状态 ---${RESET}"
-            if command -v ufw &> /dev/null; then
-                ufw status verbose
-            else
-                echo -e "${YELLOW}[!] UFW 未安装或不可用。${RESET}"
-            fi
-            echo -e "${BLUE}${BOLD}----------------${RESET}"
-            ;;
-        7)
-             echo -e "\n${BLUE}${BOLD}--- Fail2ban SSH Jail 状态 ---${RESET}"
-            if command -v fail2ban-client &> /dev/null; then
-                 if systemctl is-active --quiet fail2ban; then
-                    fail2ban-client status sshd
-                 else
-                     echo -e "${YELLOW}[!] Fail2ban 服务当前未运行。${RESET}"
-                 fi
-            else
-                echo -e "${YELLOW}[!] Fail2ban 未安装或不可用。${RESET}"
-            fi
-             echo -e "${BLUE}${BOLD}-----------------------------${RESET}"
-            ;;
-        8)
-            echo -e "\n${BLUE}[-] 退出脚本。祝您服务器安全！${RESET}"
-            exit 0
-            ;;
-        *)
-            echo -e "\n${RED}${BOLD}[!] 无效选项，请输入 1 到 8 之间的数字。${RESET}"
-            ;;
-    esac
-    # 只有在执行了实际操作或查看状态后才暂停
-    if [[ "$choice" =~ ^[1-7]$ ]]; then
-        # 检查脚本是否仍在运行（避免在步骤5失败后还提示按键）
-        # (这里简单处理，只要不是选项8就暂停)
-        read -p "$(echo -e ${CYAN}"\n按 Enter 键返回主菜单..."${RESET})" # 暂停以便用户阅读输出
+detect_ssh_service_name() {
+    if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files 2>/dev/null | grep -q '^ssh.service'; then
+        printf 'ssh\n'
+    else
+        printf 'sshd\n'
     fi
-done
+}
+
+sudo_users_available() {
+    local sudo_users=""
+
+    if getent group sudo >/dev/null 2>&1; then
+        sudo_users="$(getent group sudo | cut -d: -f4 | tr ',' '\n' | grep -v '^root$' || true)"
+    elif getent group wheel >/dev/null 2>&1; then
+        sudo_users="$(getent group wheel | cut -d: -f4 | tr ',' '\n' | grep -v '^root$' || true)"
+    fi
+
+    [[ -n "$sudo_users" ]]
+}
+
+ensure_sshd_include() {
+    local tmp_main=""
+
+    tmp_main="$(make_tmp_file)" || return 1
+    insert_sshd_include_before_match "$SSH_CONFIG_FILE" > "$tmp_main"
+    if cmp -s "$tmp_main" "$SSH_CONFIG_FILE"; then
+        return 0
+    fi
+    run_cmd "写入 sshd_config Include" install -m 0644 "$tmp_main" "$SSH_CONFIG_FILE"
+}
+
+secure_ssh() {
+    local permit_root_login="prohibit-password"
+    local password_auth="yes"
+    local answer_status=0
+    local tmp_hardening=""
+    local main_backup=""
+    local hardening_backup=""
+    local ssh_service_name=""
+
+    section "步骤 4: 强化 SSH 配置"
+    [[ -f "$SSH_CONFIG_FILE" ]] || { err "SSH 配置文件不存在: $SSH_CONFIG_FILE"; return 1; }
+    require_command sshd || return 1
+    require_command systemctl || return 1
+
+    printf '%b\n' "${YELLOW}禁用 root 或密码登录前，请确认:${RESET}"
+    printf -- '- 当前已有一个非 root sudo/wheel 用户\n'
+    printf -- '- 该用户已成功通过 SSH 登录\n'
+    printf -- '- SSH 密钥登录已验证\n'
+
+    prompt_yes_no "是否禁用 root 账户通过 SSH 登录" "N"
+    answer_status=$?
+    case "$answer_status" in
+        0)
+            if sudo_users_available; then
+                permit_root_login="no"
+            else
+                warn "未检测到非 root sudo/wheel 用户，跳过禁用 root 登录。"
+            fi
+            ;;
+        "$INPUT_CANCELLED") info "已取消当前操作，返回上一级。"; return "$INPUT_CANCELLED" ;;
+    esac
+
+    prompt_yes_no "是否禁用 SSH 密码认证并强制使用密钥登录" "N"
+    answer_status=$?
+    case "$answer_status" in
+        0)
+            prompt_exact_yes "请确认已成功测试 SSH 密钥登录。"
+            answer_status=$?
+            case "$answer_status" in
+                0) password_auth="no" ;;
+                "$INPUT_CANCELLED") info "已取消当前操作，返回上一级。"; return "$INPUT_CANCELLED" ;;
+                *) warn "未输入 yes，跳过禁用密码认证。" ;;
+            esac
+            ;;
+        "$INPUT_CANCELLED") info "已取消当前操作，返回上一级。"; return "$INPUT_CANCELLED" ;;
+    esac
+
+    tmp_hardening="$(make_tmp_file)" || return 1
+    render_sshd_hardening_config "$permit_root_login" "$password_auth" > "$tmp_hardening"
+
+    main_backup="$(backup_file_if_exists "$SSH_CONFIG_FILE")" || return 1
+    if [[ -f "$SSHD_HARDENING_FILE" ]]; then
+        hardening_backup="$(backup_file_if_exists "$SSHD_HARDENING_FILE")" || return 1
+    fi
+
+    if [[ "${SECURE_SERVER_DRY_RUN}" == "1" ]]; then
+        printf '[DRY-RUN] install hardening config -> %s\n' "$SSHD_HARDENING_FILE"
+        ok "SSH dry-run 完成。"
+        return 0
+    fi
+
+    mkdir -p "$SSHD_CONFIG_DIR" || return 1
+    ensure_sshd_include || return 1
+    install -m 0644 "$tmp_hardening" "$SSHD_HARDENING_FILE" || return 1
+
+    if ! sshd -t -f "$SSH_CONFIG_FILE"; then
+        err "SSH 配置验证失败，正在恢复。"
+        [[ -n "$main_backup" ]] && restore_file_backup "$main_backup" "$SSH_CONFIG_FILE" || true
+        if [[ -n "$hardening_backup" ]]; then
+            restore_file_backup "$hardening_backup" "$SSHD_HARDENING_FILE" || true
+        else
+            rm -f "$SSHD_HARDENING_FILE"
+        fi
+        return 1
+    fi
+
+    ssh_service_name="$(detect_ssh_service_name)"
+    systemctl restart "$ssh_service_name" || {
+        err "SSH 服务重启失败，正在恢复。"
+        [[ -n "$main_backup" ]] && restore_file_backup "$main_backup" "$SSH_CONFIG_FILE" || true
+        [[ -n "$hardening_backup" ]] && restore_file_backup "$hardening_backup" "$SSHD_HARDENING_FILE" || true
+        systemctl restart "$ssh_service_name" || true
+        return 1
+    }
+
+    sleep 2
+    systemctl is-active --quiet "$ssh_service_name" || {
+        err "SSH 服务未处于 active 状态，请立即检查。"
+        return 1
+    }
+    ok "SSH 配置强化完成。请保持当前会话并用新 SSH 会话验证登录。"
+}
+
+run_all_steps() {
+    section "执行所有步骤"
+    install_packages &&
+        configure_ufw &&
+        configure_fail2ban &&
+        secure_ssh
+}
+
+show_ufw_status() {
+    section "UFW 状态"
+    if command -v ufw >/dev/null 2>&1; then
+        ufw status verbose
+    else
+        warn "UFW 未安装或不可用。"
+    fi
+}
+
+show_fail2ban_status() {
+    section "Fail2ban SSH jail 状态"
+    if ! command -v fail2ban-client >/dev/null 2>&1; then
+        warn "Fail2ban 未安装或不可用。"
+        return 0
+    fi
+    if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet fail2ban; then
+        fail2ban-client status sshd
+    else
+        warn "Fail2ban 服务当前未运行。"
+    fi
+}
+
+show_main_menu_loop() {
+    local choice=""
+
+    while true; do
+        printf '%b\n' "${BLUE}${BOLD}================= Linux 安全加固脚本 =================${RESET}"
+        printf '%b\n' "${CYAN}请选择要执行的操作:${RESET}"
+        printf '  1. 安装 UFW 和 Fail2ban 依赖\n'
+        printf '  2. 配置 UFW 防火墙（将重置现有规则）\n'
+        printf '  3. 配置 Fail2ban\n'
+        printf '  4. 强化 SSH 配置\n'
+        printf '  5. 执行所有步骤 (1-4)\n'
+        printf '  6. 查看 UFW 状态\n'
+        printf '  7. 查看 Fail2ban SSH jail 状态\n'
+        printf '  0. 退出脚本\n'
+        read -r -p "请输入选项 [0-7]: " choice
+
+        if ! is_valid_main_menu_choice "$choice"; then
+            warn "无效选项，请输入 0 到 7。"
+            continue
+        fi
+
+        case "$choice" in
+            1) install_packages ;;
+            2) configure_ufw ;;
+            3) configure_fail2ban ;;
+            4) secure_ssh ;;
+            5) run_all_steps ;;
+            6) show_ufw_status ;;
+            7) show_fail2ban_status ;;
+            0) info "退出脚本。"; exit 0 ;;
+        esac
+
+        pause_before_menu
+    done
+}
+
+main() {
+    require_root || return 1
+    show_main_menu_loop
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" && "${SECURE_SERVER_TEST_MODE}" != "1" ]]; then
+    main "$@"
+fi
