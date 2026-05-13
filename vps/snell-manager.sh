@@ -527,7 +527,7 @@ run_legacy_migration() {
 }
 
 choose_snell_version() {
-    local var_name="$1" choice version
+    local var_name="$1" choice selected_version
     echo "请选择 Snell Server 版本："
     echo "  1) v${SNELL_VERSION_DEFAULT}（默认，v5）"
     echo "  2) v${SNELL_V4_VERSION}（v4）"
@@ -539,10 +539,10 @@ choose_snell_version() {
             1) printf -v "${var_name}" '%s' "${SNELL_VERSION_DEFAULT}"; return 0 ;;
             2) printf -v "${var_name}" '%s' "${SNELL_V4_VERSION}"; return 0 ;;
             3)
-                read_prompt version "请输入版本号（例如 5.0.1）： "
-                version="$(normalize_version "${version}")"
-                validate_version "${version}" || { print_error "版本号格式无效。"; continue; }
-                printf -v "${var_name}" '%s' "${version}"
+                read_prompt selected_version "请输入版本号（例如 5.0.1）： "
+                selected_version="$(normalize_version "${selected_version}")"
+                validate_version "${selected_version}" || { print_error "版本号格式无效。"; continue; }
+                printf -v "${var_name}" '%s' "${selected_version}"
                 return 0
                 ;;
             *) print_error "无效选项，请输入 1、2 或 3。" ;;
@@ -551,7 +551,7 @@ choose_snell_version() {
 }
 
 choose_update_version() {
-    local var_name="$1" current_version choice version current_major
+    local var_name="$1" current_version choice target_input current_major
     current_version="$(get_installed_binary_version)"
     current_major="$(get_config_protocol_version)"
 
@@ -570,10 +570,10 @@ choose_update_version() {
         case "${choice}" in
             1) printf -v "${var_name}" '%s' "${SNELL_VERSION_DEFAULT}"; return 0 ;;
             2)
-                read_prompt version "请输入目标版本号（例如 5.0.1）： "
-                version="$(normalize_version "${version}")"
-                validate_version "${version}" || { print_error "版本号格式无效。"; continue; }
-                printf -v "${var_name}" '%s' "${version}"
+                read_prompt target_input "请输入目标版本号（例如 5.0.1）： "
+                target_input="$(normalize_version "${target_input}")"
+                validate_version "${target_input}" || { print_error "版本号格式无效。"; continue; }
+                printf -v "${var_name}" '%s' "${target_input}"
                 return 0
                 ;;
             3)
