@@ -359,30 +359,35 @@ generate_password_for_method() {
 }
 
 prompt_password() {
-    local var_name="$1" method="$2" expected_len password=""
-    expected_len="$(method_password_length "${method}")"
-    if confirm_yes_no "是否手动指定 Shadowsocks 密码？" "n"; then
-        while true; do
-            read_secret password "请输入 Shadowsocks 密码（${expected_len} 字符 Base64，q 取消）： " || return "$?"
-            if [ "${#password}" -ne "${expected_len}" ]; then
-                print_error "密码长度不符合 ${method} 要求，应为 ${expected_len} 字符。"
-                continue
-            fi
-            if [[ ! "${password}" =~ ^[A-Za-z0-9+/]+={0,2}$ ]]; then
-                print_error "密码必须是 Base64 字符串。"
-                continue
-            fi
-            printf -v "${var_name}" '%s' "${password}"
-            return 0
-        done
-    else
-        local confirm_status=$?
-        [ "${confirm_status}" -eq "${CANCEL_STATUS}" ] && return "${CANCEL_STATUS}"
-    fi
+  local var_name="$1" method="$2" expected_len ss_password=""
 
-    password="$(generate_password_for_method "${method}")"
-    printf -v "${var_name}" '%s' "${password}"
-    print_success "已生成符合 ${method} 要求的随机密码。"
+  expected_len="$(method_password_length "${method}")"
+
+  if confirm_yes_no "是否手动指定 Shadowsocks 密码？" "n"; then
+    while true; do
+      read_secret ss_password "请输入 Shadowsocks 密码（${expected_len} 字符 Base64，q 取消）： " || return "$?"
+
+      if [ "${#ss_password}" -ne "${expected_len}" ]; then
+        print_error "密码长度不符合 ${method} 要求，应为 ${expected_len} 字符。"
+        continue
+      fi
+
+      if [[ ! "${ss_password}" =~ ^[A-Za-z0-9+/]+={0,2}$ ]]; then
+        print_error "密码必须是 Base64 字符串。"
+        continue
+      fi
+
+      printf -v "${var_name}" '%s' "${ss_password}"
+      return 0
+    done
+  else
+    local confirm_status=$?
+    [ "${confirm_status}" -eq "${CANCEL_STATUS}" ] && return "${CANCEL_STATUS}"
+  fi
+
+  ss_password="$(generate_password_for_method "${method}")"
+  printf -v "${var_name}" '%s' "${ss_password}"
+  print_success "已生成符合 ${method} 要求的随机密码。"
 }
 
 get_ss_package_name() {
