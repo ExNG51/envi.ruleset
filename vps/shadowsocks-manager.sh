@@ -47,6 +47,7 @@ FETCH_LATEST=false
 SS_VERSION="${SS_VERSION_DEFAULT}"
 SHADOW_TLS_VERSION="${SHADOW_TLS_VERSION_DEFAULT}"
 PROMPT_FD=0
+CANCEL_STATUS=130
 
 print_title() {
     clear || true
@@ -64,6 +65,11 @@ print_warn() { echo -e "${COLOR_YELLOW}[提示]${COLOR_RESET} $1"; }
 print_error() { echo -e "${COLOR_RED}[错误]${COLOR_RESET} $1"; }
 print_info() { echo -e "${COLOR_CYAN}[信息]${COLOR_RESET} $1"; }
 print_dim() { echo -e "${COLOR_DIM}$1${COLOR_RESET}"; }
+
+cancel_to_previous_menu() {
+    print_warn "已取消，返回上一级菜单。"
+    pause_screen
+}
 
 show_help() {
     cat <<'EOF'
@@ -97,49 +103,48 @@ init_prompt_input() {
 }
 
 read_prompt() {
-    local var_name="$1" prompt_text="$2" value
-    if ! IFS= read -r -u "${PROMPT_FD}" -p "${prompt_text}" "${var_name}"; then
+    local var_name="$1" prompt_text="$2" __read_prompt_value
+    [[ "${var_name}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || { print_error "内部错误：无效变量名 ${var_name}"; return 2; }
+    if ! IFS= read -r -u "${PROMPT_FD}" -p "${prompt_text}" __read_prompt_value; then
         echo
         print_error "无法读取交互式输入。请在交互式终端运行脚本。"
         exit 1
     fi
 
-    value="${!var_name//$'\r'/}"
-    printf -v "${var_name}" '%s' "${value}"
+    __read_prompt_value="${__read_prompt_value//$'\r'/}"
+    if [[ "${__read_prompt_value}" =~ ^[qQ]$ ]]; then
+        return "${CANCEL_STATUS}"
+    fi
+    printf -v "${var_name}" '%s' "${__read_prompt_value}"
 }
 
 read_secret() {
-    local var_name="$1" prompt_text="$2" value
-    if [ "${PROMPT_FD}" -eq 3 ] && [ -r /dev/tty ]; then
-        IFS= read -r -s -u "${PROMPT_FD}" -p "${prompt_text}" "${var_name}" || {
-            echo
-            print_error "无法读取密码输入。"
-            exit 1
-        }
+    local var_name="$1" prompt_text="$2" __read_secret_value
+    [[ "${var_name}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || { print_error "内部错误：无效变量名 ${var_name}"; return 2; }
+    IFS= read -r -s -u "${PROMPT_FD}" -p "${prompt_text}" __read_secret_value || {
         echo
-    else
-        IFS= read -r -s -p "${prompt_text}" "${var_name}" || {
-            echo
-            print_error "无法读取密码输入。"
-            exit 1
-        }
-        echo
-    fi
+        print_error "无法读取密码输入。"
+        exit 1
+    }
+    echo
 
-    value="${!var_name//$'\r'/}"
-    printf -v "${var_name}" '%s' "${value}"
+    __read_secret_value="${__read_secret_value//$'\r'/}"
+    if [[ "${__read_secret_value}" =~ ^[qQ]$ ]]; then
+        return "${CANCEL_STATUS}"
+    fi
+    printf -v "${var_name}" '%s' "${__read_secret_value}"
 }
 
 pause_screen() {
     local _
     echo
-    read_prompt _ "按回车键继续..."
+    read_prompt _ "按回车键继续..." || true
 }
 
 confirm_yes_no() {
     local prompt_text="$1" default_answer="${2:-n}" answer=""
     while true; do
-        read_prompt answer "${prompt_text} [${default_answer}/$( [ "${default_answer}" = "y" ] && echo n || echo y )]: "
+        read_prompt answer "${prompt_text} [${default_answer}/$( [ "${default_answer}" = "y" ] && echo n || echo y )，q 取消]: " || return "$?"
         answer="${answer:-${default_answer}}"
         case "${answer}" in
             y|Y) return 0 ;;
@@ -157,6 +162,19 @@ require_root() {
 }
 
 check_command_exists() { command -v "$1" >/dev/null 2>&1; }
+
+download_file() {
+    local url="$1" output="$2"
+    curl --fail --location --show-error --proto '=https' --tlsv1.2 "${url}" -o "${output}"
+}
+
+print_file_sha256() {
+    local file="$1" digest
+    if check_command_exists sha256sum; then
+        digest="$(sha256sum "${file}" | awk '{print $1}')"
+        print_dim "下载文件 SHA256: ${digest}"
+    fi
+}
 
 detect_service_manager() {
     if check_command_exists systemctl; then
@@ -213,9 +231,9 @@ ensure_dependencies() {
     print_section "检查基础依赖"
     local packages=()
     if [ "${PKG_MANAGER}" = "apt" ]; then
-        packages=(curl wget tar openssl ca-certificates net-tools xz-utils coreutils)
+        packages=(curl wget tar openssl ca-certificates net-tools xz-utils coreutils jq)
     else
-        packages=(curl wget tar openssl ca-certificates net-tools xz coreutils)
+        packages=(curl wget tar openssl ca-certificates net-tools xz coreutils jq)
     fi
     install_packages "${packages[@]}"
     print_success "基础依赖已就绪。"
@@ -261,6 +279,16 @@ validate_port() {
     [ "${port}" -ge 1 ] && [ "${port}" -le 65535 ]
 }
 
+validate_safe_env_value() {
+    local value="$1"
+    [[ "${value}" =~ ^[A-Za-z0-9._:/=@,+-]*$ ]]
+}
+
+validate_sni() {
+    local value="$1"
+    [[ "${value}" =~ ^[A-Za-z0-9.-]+$ ]] && [[ "${value}" == *.* ]]
+}
+
 is_port_in_use() {
     local port="$1"
     if check_command_exists ss; then
@@ -275,7 +303,7 @@ is_port_in_use() {
 prompt_port() {
     local var_name="$1" prompt_text="$2" allow_random="${3:-false}" value=""
     while true; do
-        read_prompt value "${prompt_text}"
+        read_prompt value "${prompt_text}" || return "$?"
         if [ -z "${value}" ] && [ "${allow_random}" = true ]; then
             while true; do
                 value="$(shuf -i 10000-60000 -n 1)"
@@ -301,13 +329,15 @@ choose_method() {
     echo "请选择 Shadowsocks 加密方法："
     echo "  1) 2022-blake3-aes-128-gcm（推荐，24 字符 Base64 密码）"
     echo "  2) 2022-blake3-aes-256-gcm（44 字符 Base64 密码）"
+    echo "  0) 返回上一级"
     while true; do
-        read_prompt choice "请输入选项编号（默认 1）： "
+        read_prompt choice "请输入选项编号（默认 1，0 返回）： " || return "$?"
         choice="${choice:-1}"
         case "${choice}" in
             1) printf -v "${var_name}" '%s' "2022-blake3-aes-128-gcm"; return 0 ;;
             2) printf -v "${var_name}" '%s' "2022-blake3-aes-256-gcm"; return 0 ;;
-            *) print_error "无效选项，请输入 1 或 2。" ;;
+            0) return "${CANCEL_STATUS}" ;;
+            *) print_error "无效选项，请输入 1、2 或 0。" ;;
         esac
     done
 }
@@ -333,14 +363,21 @@ prompt_password() {
     expected_len="$(method_password_length "${method}")"
     if confirm_yes_no "是否手动指定 Shadowsocks 密码？" "n"; then
         while true; do
-            read_secret password "请输入 Shadowsocks 密码（${expected_len} 字符 Base64）： "
+            read_secret password "请输入 Shadowsocks 密码（${expected_len} 字符 Base64，q 取消）： " || return "$?"
             if [ "${#password}" -ne "${expected_len}" ]; then
                 print_error "密码长度不符合 ${method} 要求，应为 ${expected_len} 字符。"
+                continue
+            fi
+            if [[ ! "${password}" =~ ^[A-Za-z0-9+/]+={0,2}$ ]]; then
+                print_error "密码必须是 Base64 字符串。"
                 continue
             fi
             printf -v "${var_name}" '%s' "${password}"
             return 0
         done
+    else
+        local confirm_status=$?
+        [ "${confirm_status}" -eq "${CANCEL_STATUS}" ] && return "${CANCEL_STATUS}"
     fi
 
     password="$(generate_password_for_method "${method}")"
@@ -384,13 +421,18 @@ download_and_install_ss_binary() {
     temp_dir="$(mktemp -d)"
 
     print_info "正在下载 Shadowsocks-Rust v${SS_VERSION}..."
-    if ! curl -fL "${package_url}" -o "${temp_dir}/${package_name}"; then
+    if ! download_file "${package_url}" "${temp_dir}/${package_name}"; then
         rm -rf "${temp_dir}"
         print_error "下载失败：${package_url}"
         return 1
     fi
+    print_file_sha256 "${temp_dir}/${package_name}"
 
-    tar -xf "${temp_dir}/${package_name}" -C "${temp_dir}"
+    if ! tar -xf "${temp_dir}/${package_name}" -C "${temp_dir}"; then
+        rm -rf "${temp_dir}"
+        print_error "解压失败：${package_name}"
+        return 1
+    fi
     if [ ! -f "${temp_dir}/ssserver" ]; then
         rm -rf "${temp_dir}"
         print_error "压缩包中未找到 ssserver。"
@@ -398,29 +440,51 @@ download_and_install_ss_binary() {
     fi
 
     mkdir -p "${INSTALL_DIR}"
-    install -m 0755 "${temp_dir}/ssserver" "${SS_BINARY}"
+    if ! install -m 0755 "${temp_dir}/ssserver" "${SS_BINARY}"; then
+        rm -rf "${temp_dir}"
+        print_error "安装 ssserver 失败：${SS_BINARY}"
+        return 1
+    fi
     rm -rf "${temp_dir}"
     print_success "Shadowsocks-Rust 核心已安装到 ${SS_BINARY}。"
 }
 
 write_ss_config() {
     local port="$1" password="$2" method="$3"
+    local escaped_password escaped_method
+    validate_port "${port}" || { print_error "Shadowsocks 端口无效，未写入配置。"; return 1; }
+    escaped_password="$(json_escape "${password}")"
+    escaped_method="$(json_escape "${method}")"
     mkdir -p "${INSTALL_DIR}"
     cat > "${SS_CONFIG_FILE}" <<EOF
 {
     "server": "::",
     "server_port": ${port},
-    "password": "${password}",
-    "method": "${method}",
+    "password": "${escaped_password}",
+    "method": "${escaped_method}",
     "mode": "tcp_and_udp"
 }
 EOF
     chmod 600 "${SS_CONFIG_FILE}"
 }
 
+json_escape() {
+    local value="$1"
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    value="${value//$'\n'/\\n}"
+    value="${value//$'\r'/\\r}"
+    value="${value//$'\t'/\\t}"
+    printf '%s' "${value}"
+}
+
 read_json_value() {
     local key="$1" file="$2"
     [ -f "${file}" ] || return 1
+    if check_command_exists jq; then
+        jq -er --arg key "${key}" '.[$key] // empty' "${file}" 2>/dev/null
+        return $?
+    fi
     grep -E "\"${key}\"[[:space:]]*:" "${file}" \
         | head -n 1 \
         | sed -E 's/.*:[[:space:]]*"?([^",]+)"?.*/\1/'
@@ -440,12 +504,15 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=nobody
-AmbientCapabilities=CAP_NET_BIND_SERVICE
 ExecStart=${SS_BINARY} -c ${SS_CONFIG_FILE}
 Restart=on-failure
 RestartSec=5s
 LimitNOFILE=51200
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 
 [Install]
 WantedBy=multi-user.target
@@ -457,7 +524,6 @@ EOF
 #!/sbin/openrc-run
 
 name="Shadowsocks Rust Secure Server"
-command_user="nobody"
 command="${SS_BINARY}"
 command_args="-c ${SS_CONFIG_FILE}"
 command_background="yes"
@@ -529,23 +595,26 @@ shadow_tls_service_state() {
 install_or_reinstall_ss() {
     print_title
     print_section "安装 / 覆盖安装 Shadowsocks-Rust"
-    ensure_dependencies
+    ensure_dependencies || { pause_screen; return; }
     fetch_latest_versions_if_needed
 
-    if [ -d "${INSTALL_DIR}" ] && ! confirm_yes_no "检测到已有安装，是否覆盖 Shadowsocks 配置？" "n"; then
-        print_warn "已取消。"
-        pause_screen
-        return
+    if [ -d "${INSTALL_DIR}" ]; then
+        local overwrite_status=0
+        confirm_yes_no "检测到已有安装，是否覆盖 Shadowsocks 配置？" "n" || overwrite_status=$?
+        if [ "${overwrite_status}" -ne 0 ]; then
+            cancel_to_previous_menu
+            return
+        fi
     fi
 
     local port method password
-    prompt_port port "请输入 Shadowsocks 监听端口（回车随机）： " true
-    choose_method method
-    prompt_password password "${method}"
+    prompt_port port "请输入 Shadowsocks 监听端口（回车随机，q 取消）： " true || { cancel_to_previous_menu; return; }
+    choose_method method || { cancel_to_previous_menu; return; }
+    prompt_password password "${method}" || { cancel_to_previous_menu; return; }
 
-    download_and_install_ss_binary
-    write_ss_config "${port}" "${password}" "${method}"
-    write_ss_service
+    download_and_install_ss_binary || { pause_screen; return; }
+    write_ss_config "${port}" "${password}" "${method}" || { pause_screen; return; }
+    write_ss_service || { pause_screen; return; }
 
     print_success "Shadowsocks-Rust 已安装并启动。"
     show_client_config false
@@ -562,19 +631,28 @@ download_and_install_shadow_tls_binary() {
     temp_file="$(mktemp)"
 
     print_info "正在下载 Shadow-TLS ${SHADOW_TLS_VERSION}..."
-    if ! curl -fL "${binary_url}" -o "${temp_file}"; then
+    if ! download_file "${binary_url}" "${temp_file}"; then
         rm -f "${temp_file}"
         print_error "下载失败：${binary_url}"
         return 1
     fi
+    print_file_sha256 "${temp_file}"
 
-    install -m 0755 "${temp_file}" "${SHADOW_TLS_BINARY}"
+    if ! install -m 0755 "${temp_file}" "${SHADOW_TLS_BINARY}"; then
+        rm -f "${temp_file}"
+        print_error "安装 Shadow-TLS 失败：${SHADOW_TLS_BINARY}"
+        return 1
+    fi
     rm -f "${temp_file}"
     print_success "Shadow-TLS 已安装到 ${SHADOW_TLS_BINARY}。"
 }
 
 write_shadow_tls_env() {
     local ss_port="$1" stls_port="$2" stls_sni="$3" stls_password="$4"
+    validate_port "${ss_port}" || { print_error "Shadowsocks 端口无效，未写入 Shadow-TLS 配置。"; return 1; }
+    validate_port "${stls_port}" || { print_error "Shadow-TLS 端口无效，未写入配置。"; return 1; }
+    validate_sni "${stls_sni}" || { print_error "Shadow-TLS SNI 格式无效，未写入配置。"; return 1; }
+    validate_safe_env_value "${stls_password}" || { print_error "Shadow-TLS 密码包含不支持的字符，未写入配置。"; return 1; }
     cat > "${SHADOW_TLS_ENV_FILE}" <<EOF
 SS_PORT="${ss_port}"
 STLS_PORT="${stls_port}"
@@ -600,6 +678,11 @@ ExecStart=${SHADOW_TLS_BINARY} \$STLS_TFO_FLAG --v3 --strict server --wildcard-s
 Restart=on-failure
 RestartSec=5s
 LimitNOFILE=51200
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 
 [Install]
 WantedBy=multi-user.target
@@ -624,39 +707,56 @@ install_or_configure_shadow_tls() {
         return
     fi
 
-    ensure_dependencies
+    ensure_dependencies || { pause_screen; return; }
     fetch_latest_versions_if_needed
 
     local ss_port stls_port stls_sni stls_password
     ss_port="$(get_ss_port)"
     [ -n "${ss_port}" ] || { print_error "无法读取 Shadowsocks 端口。"; pause_screen; return; }
 
-    download_and_install_shadow_tls_binary
-
-    read_prompt stls_port "请输入 Shadow-TLS 监听端口（默认 443）： "
+    read_prompt stls_port "请输入 Shadow-TLS 监听端口（默认 443，q 取消）： " || { cancel_to_previous_menu; return; }
     stls_port="${stls_port:-443}"
     if ! validate_port "${stls_port}"; then
         print_error "Shadow-TLS 端口无效。"
         pause_screen
         return
     fi
+    if is_port_in_use "${stls_port}"; then
+        print_error "端口 ${stls_port} 已被占用，请更换。"
+        pause_screen
+        return
+    fi
 
-    read_prompt stls_sni "请输入 Shadow-TLS SNI（默认 ${SHADOW_TLS_SNI_DEFAULT}）： "
+    read_prompt stls_sni "请输入 Shadow-TLS SNI（默认 ${SHADOW_TLS_SNI_DEFAULT}，q 取消）： " || { cancel_to_previous_menu; return; }
     stls_sni="${stls_sni:-${SHADOW_TLS_SNI_DEFAULT}}"
+    if ! validate_sni "${stls_sni}"; then
+        print_error "SNI 仅支持有效域名字符，并且至少包含一个点。"
+        pause_screen
+        return
+    fi
 
+    local password_confirm_status=0
     if confirm_yes_no "是否手动指定 Shadow-TLS 密码？" "n"; then
         while true; do
-            read_secret stls_password "请输入 Shadow-TLS 密码： "
+            read_secret stls_password "请输入 Shadow-TLS 密码（q 取消）： " || { cancel_to_previous_menu; return; }
             [ -n "${stls_password}" ] && break
             print_error "Shadow-TLS 密码不能为空。"
         done
     else
+        password_confirm_status=$?
+        [ "${password_confirm_status}" -eq "${CANCEL_STATUS}" ] && { cancel_to_previous_menu; return; }
         stls_password="$(openssl rand -base64 16)"
         print_success "已生成随机 Shadow-TLS 密码。"
     fi
+    if ! validate_safe_env_value "${stls_password}"; then
+        print_error "Shadow-TLS 密码包含不支持的字符。请使用字母、数字或 Base64 常见字符。"
+        pause_screen
+        return
+    fi
 
-    write_shadow_tls_env "${ss_port}" "${stls_port}" "${stls_sni}" "${stls_password}"
-    write_shadow_tls_service
+    download_and_install_shadow_tls_binary || { pause_screen; return; }
+    write_shadow_tls_env "${ss_port}" "${stls_port}" "${stls_sni}" "${stls_password}" || { pause_screen; return; }
+    write_shadow_tls_service || { pause_screen; return; }
     print_success "Shadow-TLS 已安装并启动。"
     show_client_config false
     pause_screen
@@ -664,9 +764,39 @@ install_or_configure_shadow_tls() {
 
 load_shadow_tls_env() {
     [ -f "${SHADOW_TLS_ENV_FILE}" ] || return 1
-    # 文件由本脚本生成，权限 600。
-    # shellcheck disable=SC1090
-    . "${SHADOW_TLS_ENV_FILE}"
+
+    local line key raw_value value
+    SS_PORT=""
+    STLS_PORT=""
+    STLS_SNI=""
+    STLS_PASSWORD=""
+    # shellcheck disable=SC2034
+    STLS_TFO_FLAG=""
+
+    while IFS= read -r line || [ -n "${line}" ]; do
+        [[ "${line}" =~ ^[[:space:]]*$ ]] && continue
+        [[ "${line}" =~ ^[[:space:]]*# ]] && continue
+        [[ "${line}" =~ ^([A-Z_]+)=(.*)$ ]] || return 1
+        key="${BASH_REMATCH[1]}"
+        raw_value="${BASH_REMATCH[2]}"
+
+        case "${key}" in
+            SS_PORT|STLS_PORT|STLS_SNI|STLS_PASSWORD|STLS_TFO_FLAG) ;;
+            *) return 1 ;;
+        esac
+
+        value="${raw_value}"
+        if [[ "${value}" =~ ^\"(.*)\"$ ]]; then
+            value="${BASH_REMATCH[1]}"
+        fi
+        validate_safe_env_value "${value}" || return 1
+        printf -v "${key}" '%s' "${value}"
+    done < "${SHADOW_TLS_ENV_FILE}"
+
+    validate_port "${SS_PORT}" || return 1
+    validate_port "${STLS_PORT}" || return 1
+    validate_sni "${STLS_SNI}" || return 1
+    [ -n "${STLS_PASSWORD}" ] || return 1
 }
 
 get_server_ip() {
@@ -726,31 +856,48 @@ modify_ss_config() {
     current_password="$(get_ss_password)"
 
     print_info "当前端口：${current_port}"
-    read_prompt new_port "请输入新端口（回车保持不变）： "
+    read_prompt new_port "请输入新端口（回车保持不变，q 取消）： " || { cancel_to_previous_menu; return; }
     if [ -z "${new_port}" ]; then
         new_port="${current_port}"
     elif ! validate_port "${new_port}"; then
         print_error "端口格式无效。"
         pause_screen
         return
+    elif [ "${new_port}" != "${current_port}" ] && is_port_in_use "${new_port}"; then
+        print_error "端口 ${new_port} 已被占用，请更换。"
+        pause_screen
+        return
     fi
 
+    local method_confirm_status=0 password_confirm_status=0
     if confirm_yes_no "是否修改加密方法？" "n"; then
-        choose_method new_method
-        prompt_password new_password "${new_method}"
-    elif confirm_yes_no "是否修改密码？" "n"; then
-        new_method="${current_method}"
-        prompt_password new_password "${new_method}"
+        choose_method new_method || { cancel_to_previous_menu; return; }
+        prompt_password new_password "${new_method}" || { cancel_to_previous_menu; return; }
     else
-        new_method="${current_method}"
-        new_password="${current_password}"
+        method_confirm_status=$?
+        [ "${method_confirm_status}" -eq "${CANCEL_STATUS}" ] && { cancel_to_previous_menu; return; }
+        if confirm_yes_no "是否修改密码？" "n"; then
+            new_method="${current_method}"
+            prompt_password new_password "${new_method}" || { cancel_to_previous_menu; return; }
+        else
+            password_confirm_status=$?
+            [ "${password_confirm_status}" -eq "${CANCEL_STATUS}" ] && { cancel_to_previous_menu; return; }
+            new_method="${current_method}"
+            new_password="${current_password}"
+        fi
     fi
 
-    write_ss_config "${new_port}" "${new_password}" "${new_method}"
-    restart_ss_service
+    if [ -z "${new_method}" ] || [ -z "${new_password}" ]; then
+        print_error "无法生成新的 Shadowsocks 配置。"
+        pause_screen
+        return
+    fi
+
+    write_ss_config "${new_port}" "${new_password}" "${new_method}" || { pause_screen; return; }
+    restart_ss_service || { pause_screen; return; }
 
     if [ -f "${SHADOW_TLS_ENV_FILE}" ] && load_shadow_tls_env; then
-        write_shadow_tls_env "${new_port}" "${STLS_PORT}" "${STLS_SNI}" "${STLS_PASSWORD}"
+        write_shadow_tls_env "${new_port}" "${STLS_PORT}" "${STLS_SNI}" "${STLS_PASSWORD}" || { pause_screen; return; }
         systemctl restart shadow-tls >/dev/null 2>&1 || true
     fi
 
@@ -762,21 +909,21 @@ modify_ss_config() {
 update_components() {
     print_title
     print_section "更新核心组件"
-    ensure_dependencies
+    ensure_dependencies || { pause_screen; return; }
     FETCH_LATEST=true
     fetch_latest_versions_if_needed
 
     if [ -f "${SS_BINARY}" ]; then
-        download_and_install_ss_binary
-        restart_ss_service
+        download_and_install_ss_binary || { pause_screen; return; }
+        restart_ss_service || { pause_screen; return; }
         print_success "Shadowsocks-Rust 已更新并重启。"
     else
         print_warn "未检测到 Shadowsocks-Rust 安装，跳过。"
     fi
 
     if [ "${SERVICE_MANAGER}" = "systemd" ] && [ -f "${SYSTEMD_SHADOW_TLS_SERVICE}" ]; then
-        download_and_install_shadow_tls_binary
-        systemctl restart shadow-tls
+        download_and_install_shadow_tls_binary || { pause_screen; return; }
+        systemctl restart shadow-tls || { pause_screen; return; }
         print_success "Shadow-TLS 已更新并重启。"
     else
         print_warn "未检测到 Shadow-TLS 服务，跳过。"
@@ -786,53 +933,58 @@ update_components() {
 }
 
 manage_services() {
-    print_title
-    print_section "服务控制"
-    echo "  1) 启动 Shadowsocks"
-    echo "  2) 停止 Shadowsocks"
-    echo "  3) 重启 Shadowsocks"
-    if [ "${SERVICE_MANAGER}" = "systemd" ]; then
-        echo "  4) 启动 Shadow-TLS"
-        echo "  5) 停止 Shadow-TLS"
-        echo "  6) 重启 Shadow-TLS"
-    fi
-    echo "  0) 返回"
-    echo
-    local choice action_done=true
-    read_prompt choice "请输入选项编号： "
-    case "${choice}" in
-        1) start_ss_service || action_done=false ;;
-        2) stop_ss_service ;;
-        3) restart_ss_service || action_done=false ;;
-        4)
-            if [ "${SERVICE_MANAGER}" = "systemd" ]; then
-                systemctl start shadow-tls || action_done=false
-            else
-                print_error "Shadow-TLS 管理仅支持 systemd。"
-                action_done=false
-            fi
-            ;;
-        5)
-            if [ "${SERVICE_MANAGER}" = "systemd" ]; then
-                systemctl stop shadow-tls || action_done=false
-            else
-                print_error "Shadow-TLS 管理仅支持 systemd。"
-                action_done=false
-            fi
-            ;;
-        6)
-            if [ "${SERVICE_MANAGER}" = "systemd" ]; then
-                systemctl restart shadow-tls || action_done=false
-            else
-                print_error "Shadow-TLS 管理仅支持 systemd。"
-                action_done=false
-            fi
-            ;;
-        0) return ;;
-        *) print_error "无效选项。"; action_done=false ;;
-    esac
-    [ "${action_done}" = true ] && print_success "服务操作已执行。"
-    pause_screen
+    while true; do
+        print_title
+        print_section "服务控制"
+        echo "  1) 启动 Shadowsocks"
+        echo "  2) 停止 Shadowsocks"
+        echo "  3) 重启 Shadowsocks"
+        if [ "${SERVICE_MANAGER}" = "systemd" ]; then
+            echo "  4) 启动 Shadow-TLS"
+            echo "  5) 停止 Shadow-TLS"
+            echo "  6) 重启 Shadow-TLS"
+        fi
+        echo "  0) 返回上一级"
+        echo
+        print_dim "SS 状态: $(ss_service_state) | Shadow-TLS: $(shadow_tls_service_state)"
+        echo
+
+        local choice action_done=true
+        read_prompt choice "请输入选项编号（0 返回）： " || return 0
+        case "${choice}" in
+            1) start_ss_service || action_done=false ;;
+            2) stop_ss_service ;;
+            3) restart_ss_service || action_done=false ;;
+            4)
+                if [ "${SERVICE_MANAGER}" = "systemd" ]; then
+                    systemctl start shadow-tls || action_done=false
+                else
+                    print_error "Shadow-TLS 管理仅支持 systemd。"
+                    action_done=false
+                fi
+                ;;
+            5)
+                if [ "${SERVICE_MANAGER}" = "systemd" ]; then
+                    systemctl stop shadow-tls || action_done=false
+                else
+                    print_error "Shadow-TLS 管理仅支持 systemd。"
+                    action_done=false
+                fi
+                ;;
+            6)
+                if [ "${SERVICE_MANAGER}" = "systemd" ]; then
+                    systemctl restart shadow-tls || action_done=false
+                else
+                    print_error "Shadow-TLS 管理仅支持 systemd。"
+                    action_done=false
+                fi
+                ;;
+            0) return ;;
+            *) print_error "无效选项。"; action_done=false ;;
+        esac
+        [ "${action_done}" = true ] && print_success "服务操作已执行。"
+        pause_screen
+    done
 }
 
 show_status_and_logs() {
@@ -900,7 +1052,11 @@ show_main_menu() {
         print_dim "SS 状态: $(ss_service_state) | Shadow-TLS: $(shadow_tls_service_state)"
         echo
         local choice
-        read_prompt choice "请输入选项编号： "
+        if ! read_prompt choice "请输入选项编号（0 退出）： "; then
+            print_warn "主菜单请使用 0 退出脚本。"
+            sleep 1
+            continue
+        fi
         case "${choice}" in
             1) install_or_reinstall_ss ;;
             2) install_or_configure_shadow_tls ;;
@@ -959,4 +1115,6 @@ main() {
     esac
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi
