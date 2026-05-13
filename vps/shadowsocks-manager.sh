@@ -359,25 +359,28 @@ generate_password_for_method() {
 }
 
 prompt_password() {
-  local var_name="$1" method="$2" expected_len ss_password=""
+  local -n output_password_ref="$1"
+  local method="$2"
+  local expected_len=""
+  local input_password=""
 
   expected_len="$(method_password_length "${method}")"
 
   if confirm_yes_no "是否手动指定 Shadowsocks 密码？" "n"; then
     while true; do
-      read_secret ss_password "请输入 Shadowsocks 密码（${expected_len} 字符 Base64，q 取消）： " || return "$?"
+      read_secret input_password "请输入 Shadowsocks 密码（${expected_len} 字符 Base64，q 取消）： " || return "$?"
 
-      if [ "${#ss_password}" -ne "${expected_len}" ]; then
+      if [ "${#input_password}" -ne "${expected_len}" ]; then
         print_error "密码长度不符合 ${method} 要求，应为 ${expected_len} 字符。"
         continue
       fi
 
-      if [[ ! "${ss_password}" =~ ^[A-Za-z0-9+/]+={0,2}$ ]]; then
+      if [[ ! "${input_password}" =~ ^[A-Za-z0-9+/]+={0,2}$ ]]; then
         print_error "密码必须是 Base64 字符串。"
         continue
       fi
 
-      printf -v "${var_name}" '%s' "${ss_password}"
+      output_password_ref="${input_password}"
       return 0
     done
   else
@@ -385,8 +388,7 @@ prompt_password() {
     [ "${confirm_status}" -eq "${CANCEL_STATUS}" ] && return "${CANCEL_STATUS}"
   fi
 
-  ss_password="$(generate_password_for_method "${method}")"
-  printf -v "${var_name}" '%s' "${ss_password}"
+  output_password_ref="$(generate_password_for_method "${method}")"
   print_success "已生成符合 ${method} 要求的随机密码。"
 }
 
