@@ -42,6 +42,7 @@ UI_COLOR_BLUE=""
 UI_COLOR_CYAN=""
 UI_COLOR_BOLD=""
 UI_COLOR_DIM=""
+UI_KV_LABEL_WIDTH=18
 
 PKG_MANAGER=""
 ARCH=""
@@ -112,6 +113,34 @@ ui_warn() { printf '%b\n' "${UI_COLOR_YELLOW}[WARN]${UI_COLOR_RESET} $*" >&2; }
 ui_error() { printf '%b\n' "${UI_COLOR_RED}[ERROR]${UI_COLOR_RESET} $*" >&2; }
 ui_dim() { printf '%b\n' "${UI_COLOR_DIM}$*${UI_COLOR_RESET}"; }
 ui_section() { printf '\n%b\n' "${UI_COLOR_BLUE}${UI_COLOR_BOLD}>>> $*${UI_COLOR_RESET}"; }
+
+ui_text_width() {
+    local text="$1" width=0 i char byte
+    local LC_ALL=C
+    for ((i = 0; i < ${#text}; i++)); do
+        char="${text:i:1}"
+        printf -v byte '%d' "'${char}"
+        ((byte < 0)) && byte=$((byte + 256))
+        if ((byte < 128)); then
+            ((width += 1))
+        elif ((byte >= 192)); then
+            ((width += 2))
+        fi
+    done
+    printf '%s' "${width}"
+}
+
+ui_kv() {
+    local label="$1" value="${2:-}" width padding
+    width="$(ui_text_width "${label}")"
+    padding=$((UI_KV_LABEL_WIDTH - width))
+    ((padding < 1)) && padding=1
+    printf '%s%*s%s\n' "${label}" "${padding}" "" "${value}"
+}
+
+ui_rule() {
+    printf '%s\n' "------------------------------------------------------------"
+}
 
 ui_clear() {
     [[ -t 1 ]] && clear 2>/dev/null || true
@@ -686,15 +715,15 @@ read_legacy_config() {
 
 show_legacy_takeover_plan() {
     ui_section "接管计划"
-    printf "%s\n" "------------------------------------------------------------"
-    printf "%-18s %s\n" "旧服务状态" "${LEGACY_SERVICE_STATE}"
-    printf "%-18s %s\n" "旧监听端口" "${LEGACY_PORT}"
-    printf "%-18s %s\n" "协议版本" "${LEGACY_PROTOCOL_VERSION}"
-    printf "%-18s %s\n" "二进制版本" "${LEGACY_BINARY_VERSION}"
-    printf "%-18s %s\n" "IPv6" "${LEGACY_IPV6}"
-    printf "%-18s %s\n" "TFO" "${LEGACY_TFO}"
-    printf "%-18s %s\n" "obfs" "${LEGACY_OBFS}"
-    printf "%s\n" "------------------------------------------------------------"
+    ui_rule
+    ui_kv "旧服务状态" "${LEGACY_SERVICE_STATE}"
+    ui_kv "旧监听端口" "${LEGACY_PORT}"
+    ui_kv "协议版本" "${LEGACY_PROTOCOL_VERSION}"
+    ui_kv "二进制版本" "${LEGACY_BINARY_VERSION}"
+    ui_kv "IPv6" "${LEGACY_IPV6}"
+    ui_kv "TFO" "${LEGACY_TFO}"
+    ui_kv "obfs" "${LEGACY_OBFS}"
+    ui_rule
     echo
     echo "将写入新配置：${SNELL_CONFIG_FILE}"
     echo "将写入新服务：${SNELL_SERVICE_FILE}"
@@ -1001,15 +1030,15 @@ show_config_change_summary() {
     local title="$1" version_label="$2" port="$3" ipv6="$4" dns="$5" tfo="$6" obfs="$7" obfs_host="$8"
     ui_section "${title}"
     if [ -n "${version_label}" ]; then
-        printf "%-18s %s\n" "版本" "${version_label}"
+        ui_kv "版本" "${version_label}"
     fi
-    printf "%-18s %s\n" "监听端口" "${port}"
-    printf "%-18s %s\n" "IPv6" "${ipv6}"
-    printf "%-18s %s\n" "DNS" "${dns}"
-    printf "%-18s %s\n" "TFO" "${tfo}"
-    printf "%-18s %s\n" "obfs" "${obfs}"
+    ui_kv "监听端口" "${port}"
+    ui_kv "IPv6" "${ipv6}"
+    ui_kv "DNS" "${dns}"
+    ui_kv "TFO" "${tfo}"
+    ui_kv "obfs" "${obfs}"
     if [ "${obfs}" != "off" ]; then
-        printf "%-18s %s\n" "obfs-host" "${obfs_host}"
+        ui_kv "obfs-host" "${obfs_host}"
     fi
     ui_warn "确认后将写入配置并重启 snell 服务；PSK 不会在摘要中显示。"
 }
@@ -1261,16 +1290,16 @@ show_client_config() {
     server_ip="$(get_server_ip)"
     host="$(hostname 2>/dev/null || echo snell)"
 
-    printf "%s\n" "------------------------------------------------------------"
-    printf "%-18s %s\n" "服务状态" "$(service_state)"
-    printf "%-18s %s\n" "监听端口" "${port}"
-    printf "%-18s %s\n" "协议版本" "${protocol_version:-未知}"
-    printf "%-18s %s\n" "二进制版本" "${binary_version}"
-    printf "%-18s %s\n" "IPv6" "${ipv6:-false}"
-    printf "%-18s %s\n" "TFO" "${tfo:-false}"
-    printf "%-18s %s\n" "obfs" "${obfs:-off}"
-    printf "%-18s %s\n" "DNS" "${dns:-未设置}"
-    printf "%s\n" "------------------------------------------------------------"
+    ui_rule
+    ui_kv "服务状态" "$(service_state)"
+    ui_kv "监听端口" "${port}"
+    ui_kv "协议版本" "${protocol_version:-未知}"
+    ui_kv "二进制版本" "${binary_version}"
+    ui_kv "IPv6" "${ipv6:-false}"
+    ui_kv "TFO" "${tfo:-false}"
+    ui_kv "obfs" "${obfs:-off}"
+    ui_kv "DNS" "${dns:-未设置}"
+    ui_rule
     echo
     ui_warn "下面会显示包含敏感凭据的客户端配置，请避免在共享屏幕、日志或工单中泄露。"
     ui_info "Surge 配置片段："
@@ -1483,11 +1512,11 @@ show_status_and_logs() {
     ui_render_title
     ui_section "服务状态"
     local pause_after="${1:-false}"
-    printf "%-18s %s\n" "包管理器" "${PKG_MANAGER}"
-    printf "%-18s %s\n" "系统架构" "${ARCH}"
-    printf "%-18s %s\n" "Snell" "$(service_state)"
-    printf "%-18s %s\n" "二进制版本" "$(get_installed_binary_version)"
-    printf "%-18s %s\n" "协议版本" "$(get_config_protocol_version || echo "未知")"
+    ui_kv "包管理器" "${PKG_MANAGER}"
+    ui_kv "系统架构" "${ARCH}"
+    ui_kv "Snell" "$(service_state)"
+    ui_kv "二进制版本" "$(get_installed_binary_version)"
+    ui_kv "协议版本" "$(get_config_protocol_version || echo "未知")"
     echo
     ui_info "日志查看命令："
     echo "journalctl -u snell -n 80 --no-pager"
@@ -1510,11 +1539,11 @@ uninstall_snell() {
     ui_render_title
     ui_section "卸载 Snell Server"
     echo "即将删除："
-    echo "  服务：${SNELL_SERVICE_FILE}"
-    echo "  旧服务：${OLD_SNELL_SERVICE_FILE}"
-    echo "  二进制：${SNELL_BINARY_PATH}"
-    echo "  配置目录：${SNELL_CONFIG_DIR}"
-    echo "  网络优化：${SNELL_SYSCTL_FILE}"
+    ui_kv "服务" "${SNELL_SERVICE_FILE}"
+    ui_kv "旧服务" "${OLD_SNELL_SERVICE_FILE}"
+    ui_kv "二进制" "${SNELL_BINARY_PATH}"
+    ui_kv "配置目录" "${SNELL_CONFIG_DIR}"
+    ui_kv "网络优化" "${SNELL_SYSCTL_FILE}"
     echo
     ui_confirm_token "确认卸载 Snell Server？" "DELETE" || { ui_warn "已取消卸载。"; pause_screen; return 0; }
 
