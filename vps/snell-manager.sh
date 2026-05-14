@@ -99,7 +99,7 @@ ui_init_colors() {
 }
 
 ui_init_prompt_input() {
-    if [[ -r /dev/tty ]] && exec 3</dev/tty; then
+    if [[ -r /dev/tty ]] && { exec 3</dev/tty; } 2>/dev/null; then
         UI_PROMPT_FD=3
     else
         UI_PROMPT_FD=0
@@ -239,6 +239,23 @@ ui_confirm() {
             *) ui_error "请输入 y、n 或 q。" ;;
         esac
     done
+}
+
+ui_confirm_or_default() {
+    local prompt="$1" default_answer="${2:-n}" noninteractive="${3:-false}"
+    if [[ "${noninteractive}" == "true" ]]; then
+        [[ "${default_answer}" =~ ^[Yy]$ ]]
+        return
+    fi
+    ui_confirm "${prompt}" "${default_answer}"
+}
+
+ui_confirm_or_yes() {
+    local prompt="$1" default_answer="${2:-n}" assume_yes="${3:-false}"
+    if [[ "${assume_yes}" == "true" ]]; then
+        return 0
+    fi
+    ui_confirm "${prompt}" "${default_answer}"
 }
 
 ui_confirm_token() {
@@ -1015,6 +1032,7 @@ prompt_obfs() {
             1) printf -v "${obfs_var}" '%s' "off"; printf -v "${host_var}" '%s' ""; return 0 ;;
             2) printf -v "${obfs_var}" '%s' "http"; break ;;
             3) printf -v "${obfs_var}" '%s' "tls"; break ;;
+            q|Q) return "${RETURN_TO_MENU}" ;;
             *) ui_error "无效选项，请输入 1、2 或 3。" ;;
         esac
     done
@@ -1620,9 +1638,9 @@ parse_arguments() {
 
 main() {
     ui_init_colors
+    init_prompt_input
     parse_arguments "$@"
     require_root
-    init_prompt_input
     detect_system_info
 
     case "${COMMAND}" in
