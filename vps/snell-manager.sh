@@ -148,14 +148,14 @@ ui_clear() {
 
 ui_title() {
     local title="$1" version="${2:-}"
-    printf '%b\n' "${UI_COLOR_CYAN}${UI_COLOR_BOLD}"
+    printf '%b' "${UI_COLOR_CYAN}${UI_COLOR_BOLD}"
     printf '%s\n' "============================================================"
     printf '        %s\n' "${title}"
     if [[ -n "${version}" ]]; then
         printf '        Version: %s\n' "${version}"
     fi
     printf '%s\n' "============================================================"
-    printf '%b\n' "${UI_COLOR_RESET}"
+    printf '%b' "${UI_COLOR_RESET}"
 }
 
 ui_render_title() {
@@ -1658,6 +1658,6 @@ main() {
     esac
 }
 
-if [[ "${BASH_SOURCE[0]:-}" == "$0" ]]; then
+if [[ -z "${BASH_SOURCE[0]:-}" || "${BASH_SOURCE[0]:-}" == "$0" ]]; then
     main "$@"
 fi
