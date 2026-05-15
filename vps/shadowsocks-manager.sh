@@ -30,14 +30,15 @@ SHADOW_TLS_BINARY="/usr/local/bin/shadow-tls"
 SHADOW_TLS_ENV_FILE="${INSTALL_DIR}/shadow-tls.env"
 SYSTEMD_SHADOW_TLS_SERVICE="/etc/systemd/system/shadow-tls.service"
 
-COLOR_RESET="\033[0m"
-COLOR_RED="\033[31m"
-COLOR_GREEN="\033[32m"
-COLOR_YELLOW="\033[33m"
-COLOR_BLUE="\033[34m"
-COLOR_CYAN="\033[36m"
-COLOR_BOLD="\033[1m"
-COLOR_DIM="\033[2m"
+UI_COLOR_RESET=""
+UI_COLOR_RED=""
+UI_COLOR_GREEN=""
+UI_COLOR_YELLOW=""
+UI_COLOR_BLUE=""
+UI_COLOR_CYAN=""
+UI_COLOR_BOLD=""
+UI_COLOR_DIM=""
+UI_KV_LABEL_WIDTH=18
 
 SERVICE_MANAGER=""
 PKG_MANAGER=""
@@ -46,28 +47,246 @@ IS_ALPINE=false
 FETCH_LATEST=false
 SS_VERSION="${SS_VERSION_DEFAULT}"
 SHADOW_TLS_VERSION="${SHADOW_TLS_VERSION_DEFAULT}"
+UI_PROMPT_FD=0
 PROMPT_FD=0
-CANCEL_STATUS=130
+UI_PAUSE_ENABLED=false
+UI_RETURN_TO_MENU=130
+CANCEL_STATUS="${UI_RETURN_TO_MENU}"
 
-print_title() {
-    clear || true
-    echo -e "${COLOR_CYAN}${COLOR_BOLD}"
-    echo "============================================================"
-    echo "        Shadowsocks-Rust 统一管理脚本"
-    echo "        Version: ${SCRIPT_VERSION}"
-    echo "============================================================"
-    echo -e "${COLOR_RESET}"
+ui_init_colors() {
+    UI_COLOR_RESET='\033[0m'
+    UI_COLOR_RED='\033[31m'
+    UI_COLOR_GREEN='\033[32m'
+    UI_COLOR_YELLOW='\033[33m'
+    UI_COLOR_BLUE='\033[34m'
+    UI_COLOR_CYAN='\033[36m'
+    UI_COLOR_BOLD='\033[1m'
+    UI_COLOR_DIM='\033[2m'
+
+    if [[ -n "${NO_COLOR:-}" || "${TERM:-}" == "dumb" || ! -t 1 ]]; then
+        UI_COLOR_RESET=""
+        UI_COLOR_RED=""
+        UI_COLOR_GREEN=""
+        UI_COLOR_YELLOW=""
+        UI_COLOR_BLUE=""
+        UI_COLOR_CYAN=""
+        UI_COLOR_BOLD=""
+        UI_COLOR_DIM=""
+    fi
+
+    if [[ "${FORCE_COLOR:-}" == "1" ]]; then
+        UI_COLOR_RESET='\033[0m'
+        UI_COLOR_RED='\033[31m'
+        UI_COLOR_GREEN='\033[32m'
+        UI_COLOR_YELLOW='\033[33m'
+        UI_COLOR_BLUE='\033[34m'
+        UI_COLOR_CYAN='\033[36m'
+        UI_COLOR_BOLD='\033[1m'
+        UI_COLOR_DIM='\033[2m'
+    fi
 }
 
-print_section() { echo; echo -e "${COLOR_BLUE}${COLOR_BOLD}>>> $1${COLOR_RESET}"; }
-print_success() { echo -e "${COLOR_GREEN}[成功]${COLOR_RESET} $1"; }
-print_warn() { echo -e "${COLOR_YELLOW}[提示]${COLOR_RESET} $1"; }
-print_error() { echo -e "${COLOR_RED}[错误]${COLOR_RESET} $1"; }
-print_info() { echo -e "${COLOR_CYAN}[信息]${COLOR_RESET} $1"; }
-print_dim() { echo -e "${COLOR_DIM}$1${COLOR_RESET}"; }
+ui_init_prompt_input() {
+    if [[ -r /dev/tty ]] && { exec 3</dev/tty; } 2>/dev/null; then
+        UI_PROMPT_FD=3
+    else
+        UI_PROMPT_FD=0
+    fi
+    PROMPT_FD="${UI_PROMPT_FD}"
+}
+
+ui_info() { printf '%b\n' "${UI_COLOR_CYAN}[i]${UI_COLOR_RESET} $*"; }
+ui_ok() { printf '%b\n' "${UI_COLOR_GREEN}[OK]${UI_COLOR_RESET} $*"; }
+ui_warn() { printf '%b\n' "${UI_COLOR_YELLOW}[WARN]${UI_COLOR_RESET} $*" >&2; }
+ui_error() { printf '%b\n' "${UI_COLOR_RED}[ERROR]${UI_COLOR_RESET} $*" >&2; }
+ui_dim() { printf '%b\n' "${UI_COLOR_DIM}$*${UI_COLOR_RESET}"; }
+ui_section() { printf '\n%b\n' "${UI_COLOR_BLUE}${UI_COLOR_BOLD}>>> $*${UI_COLOR_RESET}"; }
+
+ui_text_width() {
+    local text="$1" width=0 i char byte
+    local LC_ALL=C
+    for ((i = 0; i < ${#text}; i++)); do
+        char="${text:i:1}"
+        printf -v byte '%d' "'${char}"
+        ((byte < 0)) && byte=$((byte + 256))
+        if ((byte < 128)); then
+            ((width += 1))
+        elif ((byte >= 192)); then
+            ((width += 2))
+        fi
+    done
+    printf '%s' "${width}"
+}
+
+ui_kv() {
+    local label="$1" value="${2:-}" width padding
+    width="$(ui_text_width "${label}")"
+    padding=$((UI_KV_LABEL_WIDTH - width))
+    ((padding < 1)) && padding=1
+    printf '%s%*s%s\n' "${label}" "${padding}" "" "${value}"
+}
+
+ui_rule() {
+    printf '%s\n' "------------------------------------------------------------"
+}
+
+ui_clear() {
+    [[ -t 1 ]] && clear 2>/dev/null || true
+}
+
+ui_title() {
+    local title="$1" version="${2:-}"
+    printf '%b' "${UI_COLOR_CYAN}${UI_COLOR_BOLD}"
+    printf '%s\n' "============================================================"
+    printf '        %s\n' "${title}"
+    if [[ -n "${version}" ]]; then
+        printf '        Version: %s\n' "${version}"
+    fi
+    printf '%s\n' "============================================================"
+    printf '%b' "${UI_COLOR_RESET}"
+}
+
+ui_render_title() {
+    ui_clear
+    ui_title "Shadowsocks-Rust 统一管理脚本" "${SCRIPT_VERSION}"
+}
+
+ui_menu_item() {
+    local number="$1" label="$2"
+    printf ' %2s. %s\n' "${number}" "${label}"
+}
+
+ui_read_raw() {
+    local __target="$1" __prompt="$2" __value
+    if ! IFS= read -r -u "${UI_PROMPT_FD}" -p "${__prompt}" __value; then
+        printf '\n' >&2
+        ui_error "无法读取交互式输入。请在交互式终端运行脚本。"
+        exit 1
+    fi
+    __value="${__value//$'\r'/}"
+    printf -v "${__target}" '%s' "${__value}"
+}
+
+ui_is_cancel() {
+    case "${1:-}" in
+        q|Q) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+ui_read_or_cancel() {
+    local __target="$1" __prompt="$2"
+    ui_read_raw "${__target}" "${__prompt}"
+    if ui_is_cancel "${!__target}"; then
+        return "${UI_RETURN_TO_MENU}"
+    fi
+}
+
+ui_read_secret_or_cancel() {
+    local __target="$1" __prompt="$2" __value
+    if ! IFS= read -r -s -u "${UI_PROMPT_FD}" -p "${__prompt}" __value; then
+        printf '\n' >&2
+        ui_error "无法读取密码输入。"
+        exit 1
+    fi
+    printf '\n'
+    __value="${__value//$'\r'/}"
+    if ui_is_cancel "${__value}"; then
+        return "${UI_RETURN_TO_MENU}"
+    fi
+    printf -v "${__target}" '%s' "${__value}"
+}
+
+ui_read_main_menu_choice() {
+    local __target="$1"
+    ui_read_raw "${__target}" "请输入选项编号（0 退出）： "
+}
+
+ui_read_submenu_choice() {
+    local __target="$1"
+    ui_read_raw "${__target}" "请输入选项编号（0 返回）： "
+    [[ "${!__target}" == "0" ]] && return "${UI_RETURN_TO_MENU}"
+}
+
+ui_confirm() {
+    local prompt="$1" default_answer="${2:-n}" answer label
+    if [[ "${default_answer}" =~ ^[Yy]$ ]]; then
+        label="Y/n"
+        default_answer="y"
+    else
+        label="y/N"
+        default_answer="n"
+    fi
+
+    while true; do
+        ui_read_or_cancel answer "${prompt} [${label}，q 取消]: " || return "$?"
+        answer="${answer:-${default_answer}}"
+        case "${answer}" in
+            y|Y|yes|YES|Yes) return 0 ;;
+            n|N|no|NO|No) return 1 ;;
+            *) ui_error "请输入 y、n 或 q。" ;;
+        esac
+    done
+}
+
+ui_confirm_token() {
+    local prompt="$1" token="$2" answer
+    ui_read_raw answer "${prompt} 输入 ${token} 继续： "
+    [[ "${answer}" == "${token}" ]]
+}
+
+ui_pause() {
+    local _
+    [[ "${UI_PAUSE_ENABLED}" == "true" ]] || return 0
+    printf '\n'
+    ui_read_raw _ "按回车键继续..."
+}
+
+ui_run_menu_action() {
+    local __action_name="$1" __rc=0 __previous_pause="${UI_PAUSE_ENABLED}"
+    shift
+
+    UI_PAUSE_ENABLED=true
+    "$@" || __rc=$?
+    UI_PAUSE_ENABLED="${__previous_pause}"
+    case "${__rc}" in
+        0) return 0 ;;
+        "${UI_RETURN_TO_MENU}")
+            ui_warn "${__action_name} 已取消，已返回上一级菜单。"
+            return 0
+            ;;
+        *)
+            ui_error "${__action_name} 执行失败，退出码：${__rc}。"
+            ui_warn "脚本将保留在菜单中，请根据上方错误信息处理后重试。"
+            return 0
+            ;;
+    esac
+}
+
+ui_input_hint() {
+    ui_dim "普通输入：q 取消当前操作并返回上一级。"
+}
+
+ui_default_hint() {
+    ui_dim "回车使用默认值，q 取消。"
+}
+
+ui_menu_footer() {
+    echo
+    ui_dim "主菜单：输入 0 退出脚本。子菜单：输入 0 返回上一级。"
+    ui_dim "普通输入：输入 q 取消当前操作。"
+}
+
+print_title() { ui_render_title; }
+print_section() { ui_section "$@"; }
+print_success() { ui_ok "$@"; }
+print_warn() { ui_warn "$@"; }
+print_error() { ui_error "$@"; }
+print_info() { ui_info "$@"; }
+print_dim() { ui_dim "$@"; }
 
 cancel_to_previous_menu() {
-    print_warn "已取消，返回上一级菜单。"
+    ui_warn "已取消，返回上一级菜单。"
     pause_screen
 }
 
@@ -94,64 +313,27 @@ EOF
 }
 
 init_prompt_input() {
-    if [ -r /dev/tty ]; then
-        exec 3</dev/tty
-        PROMPT_FD=3
-    else
-        PROMPT_FD=0
-    fi
+    ui_init_prompt_input
 }
 
 read_prompt() {
-    local var_name="$1" prompt_text="$2" __read_prompt_value
-    [[ "${var_name}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || { print_error "内部错误：无效变量名 ${var_name}"; return 2; }
-    if ! IFS= read -r -u "${PROMPT_FD}" -p "${prompt_text}" __read_prompt_value; then
-        echo
-        print_error "无法读取交互式输入。请在交互式终端运行脚本。"
-        exit 1
-    fi
-
-    __read_prompt_value="${__read_prompt_value//$'\r'/}"
-    if [[ "${__read_prompt_value}" =~ ^[qQ]$ ]]; then
-        return "${CANCEL_STATUS}"
-    fi
-    printf -v "${var_name}" '%s' "${__read_prompt_value}"
+    UI_PROMPT_FD="${PROMPT_FD}"
+    ui_read_or_cancel "$@"
 }
 
 read_secret() {
-    local var_name="$1" prompt_text="$2" __read_secret_value
-    [[ "${var_name}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || { print_error "内部错误：无效变量名 ${var_name}"; return 2; }
-    IFS= read -r -s -u "${PROMPT_FD}" -p "${prompt_text}" __read_secret_value || {
-        echo
-        print_error "无法读取密码输入。"
-        exit 1
-    }
-    echo
-
-    __read_secret_value="${__read_secret_value//$'\r'/}"
-    if [[ "${__read_secret_value}" =~ ^[qQ]$ ]]; then
-        return "${CANCEL_STATUS}"
-    fi
-    printf -v "${var_name}" '%s' "${__read_secret_value}"
+    UI_PROMPT_FD="${PROMPT_FD}"
+    ui_read_secret_or_cancel "$@"
 }
 
 pause_screen() {
-    local _
-    echo
-    read_prompt _ "按回车键继续..." || true
+    UI_PROMPT_FD="${PROMPT_FD}"
+    ui_pause
 }
 
 confirm_yes_no() {
-    local prompt_text="$1" default_answer="${2:-n}" answer=""
-    while true; do
-        read_prompt answer "${prompt_text} [${default_answer}/$( [ "${default_answer}" = "y" ] && echo n || echo y )，q 取消]: " || return "$?"
-        answer="${answer:-${default_answer}}"
-        case "${answer}" in
-            y|Y) return 0 ;;
-            n|N) return 1 ;;
-            *) print_error "请输入 y 或 n。" ;;
-        esac
-    done
+    UI_PROMPT_FD="${PROMPT_FD}"
+    ui_confirm "$@"
 }
 
 require_root() {
@@ -327,9 +509,10 @@ prompt_port() {
 choose_method() {
     local var_name="$1" choice=""
     echo "请选择 Shadowsocks 加密方法："
-    echo "  1) 2022-blake3-aes-128-gcm（推荐，24 字符 Base64 密码）"
-    echo "  2) 2022-blake3-aes-256-gcm（44 字符 Base64 密码）"
-    echo "  0) 返回上一级"
+    ui_menu_item 1 "2022-blake3-aes-128-gcm（推荐，24 字符 Base64 密码）"
+    ui_menu_item 2 "2022-blake3-aes-256-gcm（44 字符 Base64 密码）"
+    ui_menu_item 0 "返回上一级"
+    ui_default_hint
     while true; do
         read_prompt choice "请输入选项编号（默认 1，0 返回）： " || return "$?"
         choice="${choice:-1}"
@@ -337,6 +520,7 @@ choose_method() {
             1) printf -v "${var_name}" '%s' "2022-blake3-aes-128-gcm"; return 0 ;;
             2) printf -v "${var_name}" '%s' "2022-blake3-aes-256-gcm"; return 0 ;;
             0) return "${CANCEL_STATUS}" ;;
+            q|Q) return "${CANCEL_STATUS}" ;;
             *) print_error "无效选项，请输入 1、2 或 0。" ;;
         esac
     done
@@ -380,6 +564,7 @@ prompt_password() {
         continue
       fi
 
+      # shellcheck disable=SC2034 # nameref output assigned for caller.
       output_password_ref="${input_password}"
       return 0
     done
@@ -388,6 +573,7 @@ prompt_password() {
     [ "${confirm_status}" -eq "${CANCEL_STATUS}" ] && return "${CANCEL_STATUS}"
   fi
 
+  # shellcheck disable=SC2034 # nameref output assigned for caller.
   output_password_ref="$(generate_password_for_method "${method}")"
   print_success "已生成符合 ${method} 要求的随机密码。"
 }
@@ -599,10 +785,33 @@ shadow_tls_service_state() {
     fi
 }
 
+build_status_line() {
+    local manager="${SERVICE_MANAGER:-unknown}" arch="${ARCH:-unknown}"
+    printf 'SS: %s | Shadow-TLS: %s | Manager: %s | Arch: %s' \
+        "$(ss_service_state)" "$(shadow_tls_service_state)" "${manager:-unknown}" "${arch:-unknown}"
+}
+
+show_ss_config_change_summary() {
+    local title="$1" port="$2" method="$3" action="${4:-写入配置并重启 ss-rust 服务}"
+    ui_section "${title}"
+    ui_kv "监听端口" "${port}"
+    ui_kv "加密方法" "${method}"
+    ui_warn "确认后将${action}；Shadowsocks 密码不会在摘要中显示。"
+}
+
+show_shadow_tls_change_summary() {
+    local title="$1" ss_port="$2" stls_port="$3" stls_sni="$4"
+    ui_section "${title}"
+    ui_kv "后端 SS 端口" "${ss_port}"
+    ui_kv "Shadow-TLS 端口" "${stls_port}"
+    ui_kv "Shadow-TLS SNI" "${stls_sni}"
+    ui_warn "确认后将写入 Shadow-TLS 配置并重启服务；Shadow-TLS 密码不会在摘要中显示。"
+}
+
 install_or_reinstall_ss() {
     print_title
     print_section "安装 / 覆盖安装 Shadowsocks-Rust"
-    ensure_dependencies || { pause_screen; return; }
+    ensure_dependencies || { pause_screen; return 1; }
     fetch_latest_versions_if_needed
 
     if [ -d "${INSTALL_DIR}" ]; then
@@ -619,9 +828,22 @@ install_or_reinstall_ss() {
     choose_method method || { cancel_to_previous_menu; return; }
     prompt_password password "${method}" || { cancel_to_previous_menu; return; }
 
-    download_and_install_ss_binary || { pause_screen; return; }
-    write_ss_config "${port}" "${password}" "${method}" || { pause_screen; return; }
-    write_ss_service || { pause_screen; return; }
+    show_ss_config_change_summary "确认安装参数" "${port}" "${method}" "安装核心、写入配置并启动 ss-rust 服务"
+    local install_confirm_status=0
+    confirm_yes_no "确认写入配置并启动服务？" "y" || install_confirm_status=$?
+    if [ "${install_confirm_status}" -eq "${CANCEL_STATUS}" ]; then
+        cancel_to_previous_menu
+        return
+    fi
+    if [ "${install_confirm_status}" -ne 0 ]; then
+        ui_warn "已取消安装。"
+        pause_screen
+        return
+    fi
+
+    download_and_install_ss_binary || { pause_screen; return 1; }
+    write_ss_config "${port}" "${password}" "${method}" || { pause_screen; return 1; }
+    write_ss_service || { pause_screen; return 1; }
 
     print_success "Shadowsocks-Rust 已安装并启动。"
     show_client_config false
@@ -705,33 +927,33 @@ install_or_configure_shadow_tls() {
     if [ "${SERVICE_MANAGER}" != "systemd" ]; then
         print_error "Shadow-TLS 管理目前仅支持 systemd 系统。"
         pause_screen
-        return
+        return 1
     fi
 
     if [ ! -f "${SS_CONFIG_FILE}" ]; then
         print_error "请先安装 Shadowsocks-Rust。"
         pause_screen
-        return
+        return 1
     fi
 
-    ensure_dependencies || { pause_screen; return; }
+    ensure_dependencies || { pause_screen; return 1; }
     fetch_latest_versions_if_needed
 
     local ss_port stls_port stls_sni stls_password
     ss_port="$(get_ss_port)"
-    [ -n "${ss_port}" ] || { print_error "无法读取 Shadowsocks 端口。"; pause_screen; return; }
+    [ -n "${ss_port}" ] || { print_error "无法读取 Shadowsocks 端口。"; pause_screen; return 1; }
 
     read_prompt stls_port "请输入 Shadow-TLS 监听端口（默认 443，q 取消）： " || { cancel_to_previous_menu; return; }
     stls_port="${stls_port:-443}"
     if ! validate_port "${stls_port}"; then
         print_error "Shadow-TLS 端口无效。"
         pause_screen
-        return
+        return 1
     fi
     if is_port_in_use "${stls_port}"; then
         print_error "端口 ${stls_port} 已被占用，请更换。"
         pause_screen
-        return
+        return 1
     fi
 
     read_prompt stls_sni "请输入 Shadow-TLS SNI（默认 ${SHADOW_TLS_SNI_DEFAULT}，q 取消）： " || { cancel_to_previous_menu; return; }
@@ -739,7 +961,7 @@ install_or_configure_shadow_tls() {
     if ! validate_sni "${stls_sni}"; then
         print_error "SNI 仅支持有效域名字符，并且至少包含一个点。"
         pause_screen
-        return
+        return 1
     fi
 
     local password_confirm_status=0
@@ -758,12 +980,25 @@ install_or_configure_shadow_tls() {
     if ! validate_safe_env_value "${stls_password}"; then
         print_error "Shadow-TLS 密码包含不支持的字符。请使用字母、数字或 Base64 常见字符。"
         pause_screen
+        return 1
+    fi
+
+    show_shadow_tls_change_summary "确认 Shadow-TLS 参数" "${ss_port}" "${stls_port}" "${stls_sni}"
+    local stls_confirm_status=0
+    confirm_yes_no "确认写入配置并启动 Shadow-TLS？" "y" || stls_confirm_status=$?
+    if [ "${stls_confirm_status}" -eq "${CANCEL_STATUS}" ]; then
+        cancel_to_previous_menu
+        return
+    fi
+    if [ "${stls_confirm_status}" -ne 0 ]; then
+        ui_warn "已取消 Shadow-TLS 配置。"
+        pause_screen
         return
     fi
 
-    download_and_install_shadow_tls_binary || { pause_screen; return; }
-    write_shadow_tls_env "${ss_port}" "${stls_port}" "${stls_sni}" "${stls_password}" || { pause_screen; return; }
-    write_shadow_tls_service || { pause_screen; return; }
+    download_and_install_shadow_tls_binary || { pause_screen; return 1; }
+    write_shadow_tls_env "${ss_port}" "${stls_port}" "${stls_sni}" "${stls_password}" || { pause_screen; return 1; }
+    write_shadow_tls_service || { pause_screen; return 1; }
     print_success "Shadow-TLS 已安装并启动。"
     show_client_config false
     pause_screen
@@ -817,7 +1052,9 @@ show_client_config() {
     print_section "当前配置"
     if [ ! -f "${SS_CONFIG_FILE}" ]; then
         print_warn "尚未安装 Shadowsocks-Rust。"
-        [ "${pause_after}" = true ] && pause_screen
+        if [ "${pause_after}" = true ]; then
+            pause_screen
+        fi
         return
     fi
 
@@ -828,13 +1065,14 @@ show_client_config() {
     host="$(hostname 2>/dev/null || echo ss-rust)"
     stls_state="$(shadow_tls_service_state)"
 
-    printf "%s\n" "------------------------------------------------------------"
-    printf "%-18s %s\n" "SS 状态" "$(ss_service_state)"
-    printf "%-18s %s\n" "SS 端口" "${ss_port}"
-    printf "%-18s %s\n" "SS 加密" "${ss_method}"
-    printf "%-18s %s\n" "Shadow-TLS" "${stls_state}"
-    printf "%s\n" "------------------------------------------------------------"
+    ui_rule
+    ui_kv "SS 状态" "$(ss_service_state)"
+    ui_kv "SS 端口" "${ss_port:-unknown}"
+    ui_kv "SS 加密" "${ss_method:-unknown}"
+    ui_kv "Shadow-TLS" "${stls_state}"
+    ui_rule
     echo
+    ui_warn "下面会显示包含敏感凭据的客户端配置，请避免在共享屏幕、日志或工单中泄露。"
     print_info "Shadowsocks 直连配置："
     echo "${host} = ss, ${server_ip}, ${ss_port}, encrypt-method=${ss_method}, password=${ss_password}, udp-relay=true"
 
@@ -844,7 +1082,10 @@ show_client_config() {
         echo "${host}-stls = ss, ${server_ip}, ${STLS_PORT}, encrypt-method=${ss_method}, password=${ss_password}, shadow-tls-password=${STLS_PASSWORD}, shadow-tls-sni=${STLS_SNI}, shadow-tls-version=3, udp-relay=true, udp-port=${ss_port}"
     fi
 
-    [ "${pause_after}" = true ] && pause_screen
+    if [ "${pause_after}" = true ]; then
+        pause_screen
+    fi
+    return 0
 }
 
 modify_ss_config() {
@@ -854,7 +1095,7 @@ modify_ss_config() {
     if [ ! -f "${SS_CONFIG_FILE}" ]; then
         print_error "尚未安装 Shadowsocks-Rust。"
         pause_screen
-        return
+        return 1
     fi
 
     local current_port current_method current_password new_port new_method new_password
@@ -869,11 +1110,11 @@ modify_ss_config() {
     elif ! validate_port "${new_port}"; then
         print_error "端口格式无效。"
         pause_screen
-        return
+        return 1
     elif [ "${new_port}" != "${current_port}" ] && is_port_in_use "${new_port}"; then
         print_error "端口 ${new_port} 已被占用，请更换。"
         pause_screen
-        return
+        return 1
     fi
 
     local method_confirm_status=0 password_confirm_status=0
@@ -897,14 +1138,27 @@ modify_ss_config() {
     if [ -z "${new_method}" ] || [ -z "${new_password}" ]; then
         print_error "无法生成新的 Shadowsocks 配置。"
         pause_screen
+        return 1
+    fi
+
+    show_ss_config_change_summary "确认修改参数" "${new_port}" "${new_method}"
+    local modify_confirm_status=0
+    confirm_yes_no "确认写入配置并重启服务？" "y" || modify_confirm_status=$?
+    if [ "${modify_confirm_status}" -eq "${CANCEL_STATUS}" ]; then
+        cancel_to_previous_menu
+        return
+    fi
+    if [ "${modify_confirm_status}" -ne 0 ]; then
+        ui_warn "已取消修改。"
+        pause_screen
         return
     fi
 
-    write_ss_config "${new_port}" "${new_password}" "${new_method}" || { pause_screen; return; }
-    restart_ss_service || { pause_screen; return; }
+    write_ss_config "${new_port}" "${new_password}" "${new_method}" || { pause_screen; return 1; }
+    restart_ss_service || { pause_screen; return 1; }
 
     if [ -f "${SHADOW_TLS_ENV_FILE}" ] && load_shadow_tls_env; then
-        write_shadow_tls_env "${new_port}" "${STLS_PORT}" "${STLS_SNI}" "${STLS_PASSWORD}" || { pause_screen; return; }
+        write_shadow_tls_env "${new_port}" "${STLS_PORT}" "${STLS_SNI}" "${STLS_PASSWORD}" || { pause_screen; return 1; }
         systemctl restart shadow-tls >/dev/null 2>&1 || true
     fi
 
@@ -916,21 +1170,21 @@ modify_ss_config() {
 update_components() {
     print_title
     print_section "更新核心组件"
-    ensure_dependencies || { pause_screen; return; }
+    ensure_dependencies || { pause_screen; return 1; }
     FETCH_LATEST=true
     fetch_latest_versions_if_needed
 
     if [ -f "${SS_BINARY}" ]; then
-        download_and_install_ss_binary || { pause_screen; return; }
-        restart_ss_service || { pause_screen; return; }
+        download_and_install_ss_binary || { pause_screen; return 1; }
+        restart_ss_service || { pause_screen; return 1; }
         print_success "Shadowsocks-Rust 已更新并重启。"
     else
         print_warn "未检测到 Shadowsocks-Rust 安装，跳过。"
     fi
 
     if [ "${SERVICE_MANAGER}" = "systemd" ] && [ -f "${SYSTEMD_SHADOW_TLS_SERVICE}" ]; then
-        download_and_install_shadow_tls_binary || { pause_screen; return; }
-        systemctl restart shadow-tls || { pause_screen; return; }
+        download_and_install_shadow_tls_binary || { pause_screen; return 1; }
+        systemctl restart shadow-tls || { pause_screen; return 1; }
         print_success "Shadow-TLS 已更新并重启。"
     else
         print_warn "未检测到 Shadow-TLS 服务，跳过。"
@@ -943,21 +1197,21 @@ manage_services() {
     while true; do
         print_title
         print_section "服务控制"
-        echo "  1) 启动 Shadowsocks"
-        echo "  2) 停止 Shadowsocks"
-        echo "  3) 重启 Shadowsocks"
+        ui_dim "$(build_status_line)"
+        echo
+        ui_menu_item 1 "启动 Shadowsocks"
+        ui_menu_item 2 "停止 Shadowsocks"
+        ui_menu_item 3 "重启 Shadowsocks"
         if [ "${SERVICE_MANAGER}" = "systemd" ]; then
-            echo "  4) 启动 Shadow-TLS"
-            echo "  5) 停止 Shadow-TLS"
-            echo "  6) 重启 Shadow-TLS"
+            ui_menu_item 4 "启动 Shadow-TLS"
+            ui_menu_item 5 "停止 Shadow-TLS"
+            ui_menu_item 6 "重启 Shadow-TLS"
         fi
-        echo "  0) 返回上一级"
-        echo
-        print_dim "SS 状态: $(ss_service_state) | Shadow-TLS: $(shadow_tls_service_state)"
-        echo
+        ui_menu_item 0 "返回上一级"
+        ui_menu_footer
 
         local choice action_done=true
-        read_prompt choice "请输入选项编号（0 返回）： " || return 0
+        ui_read_submenu_choice choice || return "$?"
         case "${choice}" in
             1) start_ss_service || action_done=false ;;
             2) stop_ss_service ;;
@@ -986,7 +1240,8 @@ manage_services() {
                     action_done=false
                 fi
                 ;;
-            0) return ;;
+            0) return "${CANCEL_STATUS}" ;;
+            q|Q) print_warn "子菜单请使用 0 返回上一级。"; action_done=false ;;
             *) print_error "无效选项。"; action_done=false ;;
         esac
         [ "${action_done}" = true ] && print_success "服务操作已执行。"
@@ -997,11 +1252,12 @@ manage_services() {
 show_status_and_logs() {
     print_title
     print_section "服务状态"
-    printf "%-18s %s\n" "服务管理器" "${SERVICE_MANAGER}"
-    printf "%-18s %s\n" "包管理器" "${PKG_MANAGER}"
-    printf "%-18s %s\n" "系统架构" "${ARCH}"
-    printf "%-18s %s\n" "Shadowsocks" "$(ss_service_state)"
-    printf "%-18s %s\n" "Shadow-TLS" "$(shadow_tls_service_state)"
+    local pause_after="${1:-false}"
+    ui_kv "服务管理器" "${SERVICE_MANAGER}"
+    ui_kv "包管理器" "${PKG_MANAGER}"
+    ui_kv "系统架构" "${ARCH}"
+    ui_kv "Shadowsocks" "$(ss_service_state)"
+    ui_kv "Shadow-TLS" "$(shadow_tls_service_state)"
     echo
     if [ "${SERVICE_MANAGER}" = "systemd" ]; then
         print_info "日志查看命令："
@@ -1012,14 +1268,24 @@ show_status_and_logs() {
         echo "/var/log/ss-rust.log"
         echo "/var/log/ss-rust-error.log"
     fi
-    pause_screen
+    if [ "${pause_after}" = true ]; then
+        pause_screen
+    fi
+    return 0
 }
 
 uninstall_all() {
     print_title
     print_section "卸载 Shadowsocks / Shadow-TLS"
-    confirm_yes_no "确认卸载 Shadowsocks-Rust 与 Shadow-TLS？" "n" || {
-        print_warn "已取消卸载。"
+    echo "即将删除："
+    ui_kv "Shadowsocks 服务" "${SYSTEMD_SS_SERVICE}"
+    ui_kv "OpenRC 服务" "${OPENRC_SS_SERVICE}"
+    ui_kv "Shadow-TLS 服务" "${SYSTEMD_SHADOW_TLS_SERVICE}"
+    ui_kv "Shadow-TLS 二进制" "${SHADOW_TLS_BINARY}"
+    ui_kv "安装目录" "${INSTALL_DIR}"
+    echo
+    ui_confirm_token "确认卸载 Shadowsocks-Rust 与 Shadow-TLS？" "DELETE" || {
+        ui_warn "已取消卸载。"
         pause_screen
         return
     }
@@ -1044,36 +1310,34 @@ uninstall_all() {
 show_main_menu() {
     while true; do
         print_title
+        ui_dim "$(build_status_line)"
+        echo
         echo "请选择操作："
         echo
-        echo "  1) 安装 / 覆盖安装 Shadowsocks-Rust"
-        echo "  2) 安装 / 配置 Shadow-TLS"
-        echo "  3) 查看当前配置与客户端连接信息"
-        echo "  4) 修改 Shadowsocks 端口 / 密码 / 加密方法"
-        echo "  5) 更新 Shadowsocks-Rust / Shadow-TLS"
-        echo "  6) 启动 / 停止 / 重启服务"
-        echo "  7) 卸载 Shadowsocks / Shadow-TLS"
-        echo "  8) 查看服务状态与日志提示"
-        echo "  0) 退出"
-        echo
-        print_dim "SS 状态: $(ss_service_state) | Shadow-TLS: $(shadow_tls_service_state)"
+        ui_menu_item 1 "安装 / 覆盖安装 Shadowsocks-Rust"
+        ui_menu_item 2 "安装 / 配置 Shadow-TLS"
+        ui_menu_item 3 "查看当前配置与客户端连接信息"
+        ui_menu_item 4 "修改 Shadowsocks 端口 / 密码 / 加密方法"
+        ui_menu_item 5 "更新 Shadowsocks-Rust / Shadow-TLS"
+        ui_menu_item 6 "启动 / 停止 / 重启服务"
+        ui_menu_item 7 "卸载 Shadowsocks / Shadow-TLS"
+        ui_menu_item 8 "查看服务状态与日志提示"
+        ui_menu_item 0 "退出"
+        ui_menu_footer
         echo
         local choice
-        if ! read_prompt choice "请输入选项编号（0 退出）： "; then
-            print_warn "主菜单请使用 0 退出脚本。"
-            sleep 1
-            continue
-        fi
+        ui_read_main_menu_choice choice
         case "${choice}" in
-            1) install_or_reinstall_ss ;;
-            2) install_or_configure_shadow_tls ;;
-            3) show_client_config true ;;
-            4) modify_ss_config ;;
-            5) update_components ;;
-            6) manage_services ;;
-            7) uninstall_all ;;
-            8) show_status_and_logs ;;
+            1) ui_run_menu_action "安装 / 覆盖安装" install_or_reinstall_ss ;;
+            2) ui_run_menu_action "安装 / 配置 Shadow-TLS" install_or_configure_shadow_tls ;;
+            3) ui_run_menu_action "查看当前配置" show_client_config true ;;
+            4) ui_run_menu_action "修改 Shadowsocks 配置" modify_ss_config ;;
+            5) ui_run_menu_action "更新核心组件" update_components ;;
+            6) ui_run_menu_action "服务控制" manage_services ;;
+            7) ui_run_menu_action "卸载 Shadowsocks / Shadow-TLS" uninstall_all ;;
+            8) ui_run_menu_action "查看服务状态" show_status_and_logs true ;;
             0) echo; print_info "已退出。"; exit 0 ;;
+            q|Q) print_warn "主菜单请使用 0 退出脚本。"; sleep 1 ;;
             *) print_error "无效选项，请重新输入。"; sleep 1 ;;
         esac
     done
@@ -1105,6 +1369,7 @@ parse_arguments() {
 }
 
 main() {
+    ui_init_colors
     parse_arguments "$@"
     require_root
     init_prompt_input
@@ -1114,7 +1379,7 @@ main() {
     case "${COMMAND}" in
         install) install_or_reinstall_ss ;;
         stls) install_or_configure_shadow_tls ;;
-        view) show_client_config true ;;
+        view) show_client_config false ;;
         update) update_components ;;
         uninstall) uninstall_all ;;
         status) show_status_and_logs ;;
