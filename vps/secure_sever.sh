@@ -13,6 +13,7 @@ UI_RETURN_TO_MENU=130
 INPUT_CANCELLED="${UI_RETURN_TO_MENU}"
 UI_PROMPT_FD=0
 PROMPT_FD=0
+COMMAND="menu"
 
 # --- Configuration ---
 SSH_CONFIG_FILE="${SSH_CONFIG_FILE:-/etc/ssh/sshd_config}"
@@ -325,6 +326,37 @@ require_command() {
     }
 }
 
+show_help() {
+    cat <<EOF
+用法:
+  bash secure_sever.sh [选项]
+
+选项:
+  -h, --help    显示帮助并退出
+
+说明:
+  该脚本用于交互式执行 Linux 安全加固流程，包括 UFW、Fail2ban 与 SSH 加固。
+EOF
+}
+
+parse_arguments() {
+    COMMAND="menu"
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help)
+                COMMAND="help"
+                shift
+                ;;
+            *)
+                ui_error "未知参数：$1"
+                show_help
+                return 1
+                ;;
+        esac
+    done
+}
+
 make_tmp_file() {
     local tmp_file=""
     tmp_file="$(mktemp)" || return 1
@@ -394,6 +426,9 @@ prompt_yes_no() {
     ui_confirm "$prompt" "$default"
 }
 
+# Deprecated:
+# High-risk actions must use ui_confirm_token with action-specific tokens.
+# Do not use prompt_exact_yes for new flows.
 prompt_exact_yes() {
     local prompt="$1"
     local answer=""
@@ -1347,10 +1382,24 @@ show_main_menu_loop() {
 main() {
     ui_init_colors
     ui_init_prompt_input
-    require_root || return 1
-    show_main_menu_loop
+    parse_arguments "$@" || return 1
+
+    case "${COMMAND}" in
+        help)
+            show_help
+            return 0
+            ;;
+        menu)
+            require_root || return 1
+            show_main_menu_loop
+            ;;
+        *)
+            ui_error "未知命令：${COMMAND}"
+            return 1
+            ;;
+    esac
 }
 
-if [[ "${BASH_SOURCE[0]}" == "$0" && "${SECURE_SERVER_TEST_MODE}" != "1" ]]; then
+if [[ "${SECURE_SERVER_TEST_MODE:-0}" != "1" ]] && [[ -z "${BASH_SOURCE[0]:-}" || "${BASH_SOURCE[0]:-}" == "$0" ]]; then
     main "$@"
 fi
