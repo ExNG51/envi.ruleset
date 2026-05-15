@@ -9,17 +9,162 @@ set -Eeuo pipefail
 #   bash vps_setup.sh --profile public --install-docker --ssh-port 2222
 # ==============================================================================
 
-readonly COLOR_TEXT_RED='\033[0;31m'
-readonly COLOR_TEXT_GREEN='\033[0;32m'
-readonly COLOR_TEXT_YELLOW='\033[1;33m'
-readonly COLOR_TEXT_BLUE='\033[1;34m'
-readonly FORMAT_TEXT_BOLD='\033[1m'
-readonly STYLE_RESET='\033[0m'
+readonly SCRIPT_DISPLAY_NAME="VPS 初始化向导"
+readonly SCRIPT_VERSION="2026.05.15-r1"
 
-display_status_info() { printf '%b\n' "${COLOR_TEXT_BLUE}${FORMAT_TEXT_BOLD}[信息] $1${STYLE_RESET}"; }
-display_status_success() { printf '%b\n' "${COLOR_TEXT_GREEN}${FORMAT_TEXT_BOLD}[成功] $1${STYLE_RESET}"; }
-display_status_warning() { printf '%b\n' "${COLOR_TEXT_YELLOW}${FORMAT_TEXT_BOLD}[提示] $1${STYLE_RESET}"; }
-display_status_error() { printf '%b\n' "${COLOR_TEXT_RED}${FORMAT_TEXT_BOLD}[错误] $1${STYLE_RESET}" >&2; }
+UI_COLOR_RESET=''
+UI_COLOR_RED=''
+UI_COLOR_GREEN=''
+UI_COLOR_YELLOW=''
+UI_COLOR_BLUE=''
+UI_COLOR_CYAN=''
+UI_COLOR_BOLD=''
+UI_COLOR_DIM=''
+UI_PROMPT_FD=0
+UI_RETURN_TO_MENU=130
+
+ui_init_colors() {
+    UI_COLOR_RESET='\033[0m'
+    UI_COLOR_RED='\033[31m'
+    UI_COLOR_GREEN='\033[32m'
+    UI_COLOR_YELLOW='\033[33m'
+    UI_COLOR_BLUE='\033[34m'
+    UI_COLOR_CYAN='\033[36m'
+    UI_COLOR_BOLD='\033[1m'
+    UI_COLOR_DIM='\033[2m'
+
+    if [[ -n "${NO_COLOR:-}" || "${TERM:-}" == "dumb" || ! -t 1 ]]; then
+        UI_COLOR_RESET=''
+        UI_COLOR_RED=''
+        UI_COLOR_GREEN=''
+        UI_COLOR_YELLOW=''
+        UI_COLOR_BLUE=''
+        UI_COLOR_CYAN=''
+        UI_COLOR_BOLD=''
+        UI_COLOR_DIM=''
+    fi
+
+    if [[ "${FORCE_COLOR:-}" == "1" ]]; then
+        UI_COLOR_RESET='\033[0m'
+        UI_COLOR_RED='\033[31m'
+        UI_COLOR_GREEN='\033[32m'
+        UI_COLOR_YELLOW='\033[33m'
+        UI_COLOR_BLUE='\033[34m'
+        UI_COLOR_CYAN='\033[36m'
+        UI_COLOR_BOLD='\033[1m'
+        UI_COLOR_DIM='\033[2m'
+    fi
+}
+
+ui_info() { printf '%b\n' "${UI_COLOR_CYAN}[i]${UI_COLOR_RESET} $*"; }
+ui_ok() { printf '%b\n' "${UI_COLOR_GREEN}[OK]${UI_COLOR_RESET} $*"; }
+ui_warn() { printf '%b\n' "${UI_COLOR_YELLOW}[WARN]${UI_COLOR_RESET} $*" >&2; }
+ui_error() { printf '%b\n' "${UI_COLOR_RED}[ERROR]${UI_COLOR_RESET} $*" >&2; }
+ui_dim() { printf '%b\n' "${UI_COLOR_DIM}$*${UI_COLOR_RESET}"; }
+ui_section() { printf '\n%b\n' "${UI_COLOR_BLUE}${UI_COLOR_BOLD}>>> $*${UI_COLOR_RESET}"; }
+
+ui_title() {
+    local title="$1" version="${2:-}"
+
+    printf '%b' "${UI_COLOR_CYAN}${UI_COLOR_BOLD}"
+    printf '%s\n' "============================================================"
+    printf '        %s\n' "${title}"
+    if [[ -n "${version}" ]]; then
+        printf '        Version: %s\n' "${version}"
+    fi
+    printf '%s\n' "============================================================"
+    printf '%b' "${UI_COLOR_RESET}"
+}
+
+ui_init_prompt_input() {
+    if [[ -r /dev/tty ]] && { exec 3</dev/tty; } 2>/dev/null; then
+        UI_PROMPT_FD=3
+    else
+        UI_PROMPT_FD=0
+    fi
+    PROMPT_FD="${UI_PROMPT_FD}"
+}
+
+ui_read_raw() {
+    local __target="$1" __prompt="$2" __value __fd
+    __fd="${UI_PROMPT_FD:-0}"
+    if [[ "${__fd}" == "0" && "${PROMPT_FD:-0}" != "0" ]]; then
+        __fd="${PROMPT_FD}"
+    fi
+
+    if ! IFS= read -r -u "${__fd}" -p "${__prompt}" __value; then
+        printf '\n' >&2
+        ui_error "无法读取交互式输入。请在交互式终端运行脚本，或使用 --yes 配合必要参数。"
+        exit 1
+    fi
+
+    __value="${__value//$'\r'/}"
+    printf -v "${__target}" '%s' "${__value}"
+}
+
+ui_is_cancel() {
+    case "${1:-}" in
+        q|Q) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+ui_read_or_cancel() {
+    local __target="$1" __prompt="$2"
+    ui_read_raw "${__target}" "${__prompt}"
+    if ui_is_cancel "${!__target}"; then
+        return "${UI_RETURN_TO_MENU}"
+    fi
+}
+
+ui_confirm() {
+    local prompt="$1" default_answer="${2:-n}" answer label
+
+    if [[ "${default_answer}" =~ ^[Yy]$ ]]; then
+        label="Y/n"
+        default_answer="y"
+    else
+        label="y/N"
+        default_answer="n"
+    fi
+
+    while true; do
+        ui_read_or_cancel answer "${prompt} [${label}，q 取消]: " || return "$?"
+        answer="${answer:-${default_answer}}"
+        case "${answer}" in
+            y|Y|yes|YES|Yes) return 0 ;;
+            n|N|no|NO|No) return 1 ;;
+            *) ui_error "请输入 y、n 或 q。" ;;
+        esac
+    done
+}
+
+ui_confirm_or_default() {
+    local prompt="$1" default_answer="${2:-n}" noninteractive="${3:-false}"
+    if [[ "${noninteractive}" == "true" ]]; then
+        [[ "${default_answer}" =~ ^[Yy]$ ]]
+        return
+    fi
+    ui_confirm "${prompt}" "${default_answer}"
+}
+
+ui_confirm_or_yes() {
+    local prompt="$1" default_answer="${2:-n}" assume_yes="${3:-false}"
+    if [[ "${assume_yes}" == "true" ]]; then
+        return 0
+    fi
+    ui_confirm "${prompt}" "${default_answer}"
+}
+
+ui_cancel_script() {
+    ui_warn "用户取消操作，脚本已退出。"
+    exit "${UI_RETURN_TO_MENU}"
+}
+
+display_status_info() { ui_info "$@"; }
+display_status_success() { ui_ok "$@"; }
+display_status_warning() { ui_warn "$@"; }
+display_status_error() { ui_error "$@"; }
 
 GLOBAL_PROFILE="${VPS_PROFILE:-}"
 GLOBAL_TIMEZONE="${VPS_TIMEZONE:-Asia/Singapore}"
@@ -38,9 +183,12 @@ PROMPT_FD=0
 
 show_usage() {
     cat <<'EOF'
-用法: bash vps_setup.sh [选项]
+VPS 初始化向导
 
-选项:
+用法：
+  sudo bash vps_setup.sh [options]
+
+Options:
   --profile public|nat       VPS 类型。public=独立公网 IP，nat=NAT VPS。
   --timezone Zone/Name       设置时区，默认 Asia/Singapore。
   --yes                      非交互执行，公共可选组件默认不安装，并跳过执行前确认。
@@ -59,8 +207,7 @@ die_usage() {
 }
 
 cancel_script() {
-    display_status_warning "用户取消操作，脚本已退出。"
-    exit 130
+    ui_cancel_script
 }
 
 handle_unexpected_error() {
@@ -75,56 +222,15 @@ handle_unexpected_error() {
 }
 
 init_prompt_input() {
-    if [ -r /dev/tty ] && exec 3</dev/tty; then
-        PROMPT_FD=3
-    else
-        PROMPT_FD=0
-    fi
+    ui_init_prompt_input
 }
 
 read_prompt() {
-    local var_name="$1"
-    local prompt_text="$2"
-    local value
-
-    # shellcheck disable=SC2229
-    if ! IFS= read -r -u "${PROMPT_FD}" -p "${prompt_text}" "${var_name}"; then
-        echo
-        display_status_error "无法读取交互式输入。请在交互式终端运行脚本，或使用 --yes 配合必要参数。"
-        exit 1
-    fi
-
-    value="${!var_name//$'\r'/}"
-    printf -v "${var_name}" '%s' "${value}"
+    ui_read_raw "$@"
 }
 
 prompt_yes_no() {
-    local prompt_text="$1"
-    local default_answer="${2:-n}"
-    local answer=""
-    local default_label
-
-    if [ "${GLOBAL_ASSUME_YES}" = true ]; then
-        [[ "${default_answer}" =~ ^[Yy]$ ]]
-        return
-    fi
-
-    if [[ "${default_answer}" =~ ^[Yy]$ ]]; then
-        default_label="Y/n"
-    else
-        default_label="y/N"
-    fi
-
-    while true; do
-        read_prompt answer "${prompt_text} [${default_label}，0/q 取消]: "
-        answer="${answer:-${default_answer}}"
-        case "${answer}" in
-            y|Y|yes|YES|Yes) return 0 ;;
-            n|N|no|NO|No) return 1 ;;
-            0|q|Q|quit|QUIT|Quit) return 130 ;;
-            *) display_status_error "请输入 y 或 n；输入 0 或 q 可取消。" ;;
-        esac
-    done
+    ui_confirm "$@"
 }
 
 init_log_file() {
@@ -138,7 +244,7 @@ init_log_file() {
     fi
 
     chmod 600 "${GLOBAL_LOG_FILE}" 2>/dev/null || true
-    display_status_info "详细日志将写入: ${GLOBAL_LOG_FILE}"
+    ui_info "Log file: ${GLOBAL_LOG_FILE}"
 }
 
 run_logged() {
@@ -264,15 +370,15 @@ select_vps_profile() {
 
     while [ -z "${GLOBAL_PROFILE}" ]; do
         echo "请选择 VPS 类型:"
-        echo "  1) public - 独立公网 IP VPS"
-        echo "  2) nat    - NAT VPS / 共享公网出口"
-        echo "  0) 取消并退出"
-        read_prompt selected_profile "请输入选项 [1-2/0]: "
+        echo "  1. public - 独立公网 IP VPS"
+        echo "  2. nat    - NAT VPS / 共享公网出口"
+        read_prompt selected_profile "请输入 VPS 类型编号（1-2，q 取消）： "
         case "${selected_profile}" in
             1) GLOBAL_PROFILE="public" ;;
             2) GLOBAL_PROFILE="nat" ;;
-            0|q|Q) cancel_script ;;
-            *) display_status_warning "无效选项，请重新输入。" ;;
+            q|Q) cancel_script ;;
+            0) display_status_warning "一次性向导请使用 q 取消。" ;;
+            *) display_status_warning "无效选项，请输入 1、2 或 q。" ;;
         esac
     done
 
@@ -284,14 +390,34 @@ select_vps_profile() {
     display_status_success "已选择 profile: ${GLOBAL_PROFILE}"
 }
 
+format_bool_cn() {
+    if [ "${1:-false}" = true ]; then
+        printf '%s\n' "是"
+    else
+        printf '%s\n' "否"
+    fi
+}
+
+get_run_mode() {
+    if [ "${GLOBAL_ASSUME_YES}" = true ]; then
+        printf '%s\n' "noninteractive (--yes)"
+    else
+        printf '%s\n' "interactive"
+    fi
+}
+
+show_startup_context() {
+    ui_dim "Profile: ${GLOBAL_PROFILE:-pending} | Mode: $(get_run_mode) | Timezone: ${GLOBAL_TIMEZONE} | Log: pending"
+}
+
 show_execution_summary() {
-    echo
-    display_status_info "即将执行 VPS 初始化流水线:"
+    ui_section "执行摘要"
     printf '  - VPS 类型: %s\n' "${GLOBAL_PROFILE}"
+    printf '  - 运行模式: %s\n' "$(get_run_mode)"
     printf '  - 系统时区: %s\n' "${GLOBAL_TIMEZONE}"
-    printf '  - 安装 Docker: %s\n' "$([ "${GLOBAL_INSTALL_DOCKER}" = true ] && echo "是" || echo "否")"
-    printf '  - 安装 Node.js/npm: %s\n' "$([ "${GLOBAL_INSTALL_NODEJS}" = true ] && echo "是" || echo "否")"
-    printf '  - 安装 Debian Cloud Kernel: %s\n' "$([ "${GLOBAL_INSTALL_CLOUD_KERNEL}" = true ] && echo "是" || echo "否")"
+    printf '  - 安装 Docker: %s\n' "$(format_bool_cn "${GLOBAL_INSTALL_DOCKER}")"
+    printf '  - 安装 Node.js/npm: %s\n' "$(format_bool_cn "${GLOBAL_INSTALL_NODEJS}")"
+    printf '  - 安装 Debian Cloud Kernel: %s\n' "$(format_bool_cn "${GLOBAL_INSTALL_CLOUD_KERNEL}")"
     if [ -n "${GLOBAL_SSH_PORT}" ]; then
         printf '  - SSH 端口: 新增监听 %s，并保留已有端口\n' "${GLOBAL_SSH_PORT}"
     else
@@ -303,16 +429,12 @@ show_execution_summary() {
 confirm_execution_plan() {
     local status
 
-    if [ "${GLOBAL_ASSUME_YES}" = true ]; then
-        return 0
-    fi
-
-    if prompt_yes_no "确认继续执行以上任务？" "n"; then
+    if ui_confirm_or_yes "确认继续执行以上任务？" "n" "${GLOBAL_ASSUME_YES}"; then
         return 0
     fi
 
     status=$?
-    if [ "${status}" -eq 130 ]; then
+    if [ "${status}" -eq "${UI_RETURN_TO_MENU}" ]; then
         cancel_script
     fi
 
@@ -565,13 +687,13 @@ set_optional_flag_from_prompt() {
         return
     fi
 
-    if prompt_yes_no "${prompt_text}" "n"; then
+    if ui_confirm_or_default "${prompt_text}" "n" "${GLOBAL_ASSUME_YES}"; then
         printf -v "${flag_var}" '%s' "true"
         return
     fi
 
     status=$?
-    if [ "${status}" -eq 130 ]; then
+    if [ "${status}" -eq "${UI_RETURN_TO_MENU}" ]; then
         cancel_script
     fi
 }
@@ -852,7 +974,7 @@ confirm_reboot() {
     local status
 
     echo
-    if prompt_yes_no "是否立即重启系统以全面应用内核变更？" "n"; then
+    if ui_confirm_or_default "是否立即重启系统以全面应用内核变更？" "n" "${GLOBAL_ASSUME_YES}"; then
         display_status_info "系统将在 5 秒后执行重启指令..."
         sleep 5
         run_logged reboot
@@ -860,7 +982,7 @@ confirm_reboot() {
     fi
 
     status=$?
-    if [ "${status}" -eq 130 ]; then
+    if [ "${status}" -eq "${UI_RETURN_TO_MENU}" ]; then
         display_status_warning "已取消立即重启。请在合适的维护窗口手动重启系统。"
         return
     fi
@@ -869,10 +991,11 @@ confirm_reboot() {
 }
 
 execute_main_lifecycle() {
-    display_status_info "=== VPS 初始化流程启动 ==="
+    ui_title "${SCRIPT_DISPLAY_NAME}" "${SCRIPT_VERSION}"
+    show_startup_context
+    printf '\n'
 
     validate_root_privilege
-    init_prompt_input
     select_vps_profile
     configure_public_optional_features
     show_execution_summary
@@ -896,6 +1019,8 @@ execute_main_lifecycle() {
 
 main() {
     trap 'handle_unexpected_error "$LINENO"' ERR
+    ui_init_colors
+    ui_init_prompt_input
     parse_arguments "$@"
     validate_static_configuration
     execute_main_lifecycle
