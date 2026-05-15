@@ -5,10 +5,14 @@ set -u
 set -o pipefail
 
 # --- Runtime flags ---
+SCRIPT_VERSION="2026.05.15-r1"
 SECURE_SERVER_TEST_MODE="${SECURE_SERVER_TEST_MODE:-0}"
 SECURE_SERVER_DRY_RUN="${SECURE_SERVER_DRY_RUN:-0}"
 SECURE_SERVER_NONINTERACTIVE="${SECURE_SERVER_NONINTERACTIVE:-0}"
-INPUT_CANCELLED=130
+UI_RETURN_TO_MENU=130
+INPUT_CANCELLED="${UI_RETURN_TO_MENU}"
+UI_PROMPT_FD=0
+PROMPT_FD=0
 
 # --- Configuration ---
 SSH_CONFIG_FILE="${SSH_CONFIG_FILE:-/etc/ssh/sshd_config}"
@@ -43,26 +47,233 @@ CADDY_CONFIG_FILES=(
     "/usr/local/etc/caddy/Caddyfile"
 )
 
-# --- Colors ---
-RESET='\033[0m'
-BOLD='\033[1m'
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-BLUE='\033[0;34m'
-MAGENTA='\033[0;35m'
-CYAN='\033[0;36m'
+# --- UI helpers ---
+UI_COLOR_RESET=""
+UI_COLOR_RED=""
+UI_COLOR_GREEN=""
+UI_COLOR_YELLOW=""
+UI_COLOR_BLUE=""
+UI_COLOR_CYAN=""
+UI_COLOR_BOLD=""
+UI_COLOR_DIM=""
+UI_KV_LABEL_WIDTH=18
 
-if [[ "${NO_COLOR:-}" == "1" || ! -t 1 ]]; then
-    RESET=""
-    BOLD=""
-    RED=""
-    GREEN=""
-    YELLOW=""
-    BLUE=""
-    MAGENTA=""
-    CYAN=""
-fi
+# Legacy color variable names kept as compatibility aliases while the script
+# migrates to the ui_* interaction API.
+RESET=""
+BOLD=""
+RED=""
+GREEN=""
+YELLOW=""
+BLUE=""
+MAGENTA=""
+CYAN=""
+
+ui_init_colors() {
+    UI_COLOR_RESET='\033[0m'
+    UI_COLOR_RED='\033[31m'
+    UI_COLOR_GREEN='\033[32m'
+    UI_COLOR_YELLOW='\033[33m'
+    UI_COLOR_BLUE='\033[34m'
+    UI_COLOR_CYAN='\033[36m'
+    UI_COLOR_BOLD='\033[1m'
+    UI_COLOR_DIM='\033[2m'
+
+    if [[ -n "${NO_COLOR:-}" || "${TERM:-}" == "dumb" || ! -t 1 ]]; then
+        UI_COLOR_RESET=""
+        UI_COLOR_RED=""
+        UI_COLOR_GREEN=""
+        UI_COLOR_YELLOW=""
+        UI_COLOR_BLUE=""
+        UI_COLOR_CYAN=""
+        UI_COLOR_BOLD=""
+        UI_COLOR_DIM=""
+    fi
+
+    if [[ "${FORCE_COLOR:-}" == "1" ]]; then
+        UI_COLOR_RESET='\033[0m'
+        UI_COLOR_RED='\033[31m'
+        UI_COLOR_GREEN='\033[32m'
+        UI_COLOR_YELLOW='\033[33m'
+        UI_COLOR_BLUE='\033[34m'
+        UI_COLOR_CYAN='\033[36m'
+        UI_COLOR_BOLD='\033[1m'
+        UI_COLOR_DIM='\033[2m'
+    fi
+
+    RESET="${UI_COLOR_RESET}"
+    BOLD="${UI_COLOR_BOLD}"
+    RED="${UI_COLOR_RED}"
+    GREEN="${UI_COLOR_GREEN}"
+    YELLOW="${UI_COLOR_YELLOW}"
+    BLUE="${UI_COLOR_BLUE}"
+    MAGENTA="${UI_COLOR_BLUE}"
+    CYAN="${UI_COLOR_CYAN}"
+}
+
+ui_init_prompt_input() {
+    if [[ -r /dev/tty ]] && { exec 3</dev/tty; } 2>/dev/null; then
+        UI_PROMPT_FD=3
+    else
+        UI_PROMPT_FD=0
+    fi
+    PROMPT_FD="${UI_PROMPT_FD}"
+}
+
+ui_info() { printf '%b\n' "${UI_COLOR_CYAN}[i]${UI_COLOR_RESET} $*"; }
+ui_ok() { printf '%b\n' "${UI_COLOR_GREEN}[OK]${UI_COLOR_RESET} $*"; }
+ui_warn() { printf '%b\n' "${UI_COLOR_YELLOW}[WARN]${UI_COLOR_RESET} $*" >&2; }
+ui_error() { printf '%b\n' "${UI_COLOR_RED}[ERROR]${UI_COLOR_RESET} $*" >&2; }
+ui_dim() { printf '%b\n' "${UI_COLOR_DIM}$*${UI_COLOR_RESET}"; }
+ui_section() { printf '\n%b\n' "${UI_COLOR_BLUE}${UI_COLOR_BOLD}>>> $*${UI_COLOR_RESET}"; }
+
+ui_text_width() {
+    local text="$1" width=0 i char byte
+    local LC_ALL=C
+    for ((i = 0; i < ${#text}; i++)); do
+        char="${text:i:1}"
+        printf -v byte '%d' "'${char}"
+        ((byte < 0)) && byte=$((byte + 256))
+        if ((byte < 128)); then
+            ((width += 1))
+        elif ((byte >= 192)); then
+            ((width += 2))
+        fi
+    done
+    printf '%s' "${width}"
+}
+
+ui_kv() {
+    local label="$1" value="${2:-}" width padding
+    width="$(ui_text_width "${label}")"
+    padding=$((UI_KV_LABEL_WIDTH - width))
+    ((padding < 1)) && padding=1
+    printf '%s%*s%s\n' "${label}" "${padding}" "" "${value}"
+}
+
+ui_rule() {
+    printf '%s\n' "------------------------------------------------------------"
+}
+
+ui_clear() {
+    [[ -t 1 ]] && clear 2>/dev/null || true
+}
+
+ui_title() {
+    local title="$1" version="${2:-}"
+    printf '%b' "${UI_COLOR_CYAN}${UI_COLOR_BOLD}"
+    printf '%s\n' "============================================================"
+    printf '        %s\n' "$title"
+    if [[ -n "$version" ]]; then
+        printf '        Version: %s\n' "$version"
+    fi
+    printf '%s\n' "============================================================"
+    printf '%b' "${UI_COLOR_RESET}"
+}
+
+ui_render_title() {
+    ui_clear
+    ui_title "Linux 安全加固脚本" "${SCRIPT_VERSION}"
+}
+
+ui_menu_item() {
+    local number="$1" label="$2"
+    printf ' %2s. %s\n' "$number" "$label"
+}
+
+ui_read_raw() {
+    local __target="$1" __prompt="$2" __value
+    if ! IFS= read -r -u "${UI_PROMPT_FD}" -p "${__prompt}" __value; then
+        printf '\n' >&2
+        ui_error "无法读取交互式输入。请在交互式终端运行脚本。"
+        exit 1
+    fi
+    __value="${__value//$'\r'/}"
+    printf -v "${__target}" '%s' "${__value}"
+}
+
+ui_is_cancel() {
+    case "${1:-}" in
+        q|Q) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+ui_read_or_cancel() {
+    local __target="$1" __prompt="$2"
+    ui_read_raw "${__target}" "${__prompt}"
+    if ui_is_cancel "${!__target}"; then
+        return "${UI_RETURN_TO_MENU}"
+    fi
+}
+
+ui_read_main_menu_choice() {
+    local __target="$1"
+    ui_read_raw "${__target}" "请输入选项编号（0 退出）： "
+}
+
+ui_read_submenu_choice() {
+    local __target="$1"
+    ui_read_raw "${__target}" "请输入选项编号（0 返回）： "
+    if [[ "${!__target}" == "0" ]]; then
+        return "${UI_RETURN_TO_MENU}"
+    fi
+    return 0
+}
+
+ui_confirm() {
+    local prompt="$1" default_answer="${2:-n}" answer label
+    if [[ "${default_answer}" =~ ^[Yy]$ ]]; then
+        label="Y/n"
+        default_answer="y"
+    else
+        label="y/N"
+        default_answer="n"
+    fi
+
+    while true; do
+        ui_read_or_cancel answer "${prompt} [${label}，q 取消]: " || return "$?"
+        answer="${answer:-${default_answer}}"
+        case "$answer" in
+            y|Y|yes|YES|Yes) return 0 ;;
+            n|N|no|NO|No) return 1 ;;
+            *) ui_error "请输入 y、n 或 q。" ;;
+        esac
+    done
+}
+
+ui_confirm_token() {
+    local prompt="$1" token="$2" answer
+    ui_read_raw answer "${prompt} 输入 ${token} 继续： "
+    [[ "$answer" == "$token" ]]
+}
+
+ui_pause() {
+    local _
+    printf '\n'
+    ui_read_raw _ "按回车键继续..."
+}
+
+ui_run_menu_action() {
+    local action_name="$1" rc=0
+    shift
+
+    "$@" || rc=$?
+    case "$rc" in
+        0) return 0 ;;
+        "$UI_RETURN_TO_MENU")
+            ui_warn "${action_name} 已取消，已返回上一级菜单。"
+            return 0
+            ;;
+        *)
+            ui_error "${action_name} 执行失败，退出码：${rc}。"
+            ui_warn "脚本将保留在菜单中，请根据上方错误信息处理后重试。"
+            return 0
+            ;;
+    esac
+}
+
+ui_init_colors
 
 TMP_FILES=()
 
@@ -81,11 +292,11 @@ cleanup_tmp_files() {
 trap cleanup_tmp_files EXIT
 
 # --- Message helpers ---
-info() { printf '%b\n' "${BLUE}[i] $*${RESET}"; }
-ok() { printf '%b\n' "${GREEN}[OK] $*${RESET}"; }
-warn() { printf '%b\n' "${YELLOW}[WARN] $*${RESET}" >&2; }
-err() { printf '%b\n' "${RED}[ERROR] $*${RESET}" >&2; }
-section() { printf '%b\n' "${MAGENTA}===== $* =====${RESET}"; }
+info() { ui_info "$@"; }
+ok() { ui_ok "$@"; }
+warn() { ui_warn "$@"; }
+err() { ui_error "$@"; }
+section() { ui_section "$@"; }
 
 check_command_status() {
     local description="$1"
@@ -157,9 +368,8 @@ prompt_required() {
     local answer=""
 
     while true; do
-        read -r -p "$(build_free_input_prompt "$prompt")" answer
+        ui_read_or_cancel answer "$(build_free_input_prompt "$prompt")" || return "$?"
         case "$answer" in
-            [Qq]) return "$INPUT_CANCELLED" ;;
             "") warn "输入不能为空；请输入有效值，或输入 q 取消。" ;;
             *) printf '%s\n' "$answer"; return 0 ;;
         esac
@@ -171,9 +381,8 @@ prompt_with_default() {
     local default="$2"
     local answer=""
 
-    read -r -p "$(build_default_prompt "$prompt" "$default")" answer
+    ui_read_or_cancel answer "$(build_default_prompt "$prompt" "$default")" || return "$?"
     case "$answer" in
-        [Qq]) return "$INPUT_CANCELLED" ;;
         "") printf '%s\n' "$default" ;;
         *) printf '%s\n' "$answer" ;;
     esac
@@ -182,39 +391,23 @@ prompt_with_default() {
 prompt_yes_no() {
     local prompt="$1"
     local default="${2:-N}"
-    local answer=""
-    local suffix="y/N，回车使用默认值，q 取消"
-    [[ "$default" == "Y" ]] && suffix="Y/n，回车使用默认值，q 取消"
-
-    while true; do
-        read -r -p "${prompt} ${suffix}: " answer
-        case "$answer" in
-            [Qq]) return "$INPUT_CANCELLED" ;;
-        esac
-
-        answer="${answer:-$default}"
-        case "$answer" in
-            [Yy]) return 0 ;;
-            [Nn]) return 1 ;;
-            *) warn "请输入 y、n，直接回车使用默认值，或输入 q 取消。" ;;
-        esac
-    done
+    ui_confirm "$prompt" "$default"
 }
 
 prompt_exact_yes() {
     local prompt="$1"
     local answer=""
 
-    read -r -p "${prompt} 请输入 yes 确认执行，或输入 q 取消: " answer
+    ui_read_raw answer "${prompt} 输入 yes 继续，或输入 q 取消： "
     case "$answer" in
-        [Qq]) return "$INPUT_CANCELLED" ;;
+        q|Q) return "$INPUT_CANCELLED" ;;
         yes) return 0 ;;
         *) return 1 ;;
     esac
 }
 
 pause_before_menu() {
-    read -r -p "$(printf '%b' "${CYAN}按 Enter 键返回主菜单...${RESET}")" _
+    ui_pause
 }
 
 is_valid_main_menu_choice() {
@@ -713,20 +906,21 @@ collect_firewall_ports() {
 }
 
 prompt_ssh_source_mode() {
+    local __target="$1"
     local choice=""
 
     while true; do
-        printf '%b\n' "${CYAN}请选择 SSH 来源限制:${RESET}" >&2
-        printf '  1. 保持 SSH 对所有来源开放，避免远程锁定\n' >&2
-        printf '  2. 仅允许当前 IP/CIDR 访问 SSH\n' >&2
-        printf '  0. 返回上一级\n' >&2
-        read -r -p "请输入选项 [0-2]: " choice
+        ui_section "SSH 来源限制"
+        ui_menu_item 1 "保持 SSH 对所有来源开放，避免远程锁定"
+        ui_menu_item 2 "仅允许当前 IP/CIDR 访问 SSH"
+        ui_menu_item 0 "返回上一级"
+        ui_read_submenu_choice choice || return "$?"
 
         case "$choice" in
-            1) printf 'open\n'; return 0 ;;
-            2) printf 'restricted\n'; return 0 ;;
-            0) return "$INPUT_CANCELLED" ;;
-            *) warn "无效选项，请输入 0、1 或 2。" ;;
+            1) printf -v "$__target" 'open'; return 0 ;;
+            2) printf -v "$__target" 'restricted'; return 0 ;;
+            q|Q) warn "子菜单请使用 0 返回上一级。" ;;
+            *) err "无效选项，请输入 0、1 或 2。" ;;
         esac
     done
 }
@@ -750,7 +944,6 @@ configure_ufw() {
     local unique_tcp_ports=""
     local unique_udp_ports=""
     local ssh_source_mode=""
-    local confirm_status=0
 
     section "步骤 2: 配置 UFW 防火墙"
     require_command ufw || return 1
@@ -760,7 +953,7 @@ configure_ufw() {
         return 1
     }
 
-    ssh_source_mode="$(prompt_ssh_source_mode)" || {
+    prompt_ssh_source_mode ssh_source_mode || {
         info "已返回上一级。"
         return "$INPUT_CANCELLED"
     }
@@ -777,26 +970,27 @@ configure_ufw() {
     unique_udp_ports="$(normalize_port_list "$DETECTED_UDP_PORTS")"
     unique_udp_ports="${unique_udp_ports% }"
 
-    printf '%b\n' "${YELLOW}准备执行:${RESET}"
-    printf -- '- 重置现有 UFW 规则\n'
-    printf -- '- 默认拒绝入站，允许出站\n'
-    printf -- '- SSH: %s/tcp\n' "$DETECTED_SSH_PORT"
-    printf -- '- TCP: %s\n' "${unique_tcp_ports:-无}"
-    printf -- '- UDP: %s\n' "${unique_udp_ports:-无}"
+    ui_section "UFW 影响范围"
+    ui_warn "确认后将重置现有 UFW 规则并启用新的默认策略。"
+    ui_rule
+    ui_kv "操作" "重置并启用 UFW"
+    ui_kv "默认入站" "deny"
+    ui_kv "默认出站" "allow"
+    ui_kv "SSH" "${DETECTED_SSH_PORT}/tcp"
+    ui_kv "TCP" "${unique_tcp_ports:-无}"
+    ui_kv "UDP" "${unique_udp_ports:-无}"
     if [[ "$ssh_source_mode" == "restricted" ]]; then
-        printf -- '- SSH 来源限制: %s\n' "$CURRENT_IP"
+        ui_kv "SSH 来源限制" "$CURRENT_IP"
     else
-        printf -- '- SSH 来源限制: 全部来源\n'
+        ui_kv "SSH 来源限制" "全部来源"
     fi
-    printf -- '- 备份目录: %s\n' "$BACKUP_DIR"
+    ui_kv "备份目录" "$BACKUP_DIR"
+    ui_rule
 
-    prompt_exact_yes "即将重置并启用 UFW。"
-    confirm_status=$?
-    case "$confirm_status" in
-        0) ;;
-        "$INPUT_CANCELLED") info "已取消当前操作，返回上一级。"; return "$INPUT_CANCELLED" ;;
-        *) info "未确认执行，返回上一级。"; return "$INPUT_CANCELLED" ;;
-    esac
+    if ! ui_confirm_token "确认重置 UFW 规则？" "RESET-UFW"; then
+        warn "已取消。"
+        return "$INPUT_CANCELLED"
+    fi
 
     backup_ufw_config || return 1
     run_cmd "禁用 UFW" ufw --force disable || return 1
@@ -850,6 +1044,21 @@ configure_fail2ban() {
     find_ssh_log_or_backend || true
     if [[ -n "$SSH_LOG_PATH" && "$SSH_LOG_PATH" != "using systemd backend" ]]; then
         logpath="$SSH_LOG_PATH"
+    fi
+
+    ui_section "Fail2ban 影响范围"
+    ui_warn "确认后将写入 Fail2ban SSH jail 配置并重启 fail2ban。"
+    ui_rule
+    ui_kv "目标文件" "$FAIL2BAN_SSHD_LOCAL"
+    ui_kv "SSH 端口" "${DETECTED_SSH_PORT:-ssh}"
+    ui_kv "后端" "$FAIL2BAN_BACKEND"
+    ui_kv "日志路径" "${logpath:-默认/systemd}"
+    ui_kv "备份目录" "$BACKUP_DIR"
+    ui_rule
+
+    if ! ui_confirm_token "确认覆盖 Fail2ban 配置？" "OVERWRITE"; then
+        warn "已取消。"
+        return "$INPUT_CANCELLED"
     fi
 
     tmp_file="$(make_tmp_file)" || return 1
@@ -958,17 +1167,24 @@ secure_ssh() {
     prompt_yes_no "是否禁用 SSH 密码认证并强制使用密钥登录" "N"
     answer_status=$?
     case "$answer_status" in
-        0)
-            prompt_exact_yes "请确认已成功测试 SSH 密钥登录。"
-            answer_status=$?
-            case "$answer_status" in
-                0) password_auth="no" ;;
-                "$INPUT_CANCELLED") info "已取消当前操作，返回上一级。"; return "$INPUT_CANCELLED" ;;
-                *) warn "未输入 yes，跳过禁用密码认证。" ;;
-            esac
-            ;;
+        0) password_auth="no" ;;
         "$INPUT_CANCELLED") info "已取消当前操作，返回上一级。"; return "$INPUT_CANCELLED" ;;
     esac
+
+    ui_section "SSH 影响范围"
+    ui_warn "确认后将写入 SSH 加固配置并重启 SSH 服务。请保持当前 SSH 会话并准备备用登录窗口。"
+    ui_rule
+    ui_kv "主配置" "$SSH_CONFIG_FILE"
+    ui_kv "加固配置" "$SSHD_HARDENING_FILE"
+    ui_kv "PermitRootLogin" "$permit_root_login"
+    ui_kv "PasswordAuthentication" "$password_auth"
+    ui_kv "备份目录" "$BACKUP_DIR"
+    ui_rule
+
+    if ! ui_confirm_token "确认覆盖 SSH 加固配置？" "OVERWRITE"; then
+        warn "已取消。"
+        return "$INPUT_CANCELLED"
+    fi
 
     tmp_hardening="$(make_tmp_file)" || return 1
     render_sshd_hardening_config "$permit_root_login" "$password_auth" > "$tmp_hardening"
@@ -1046,43 +1262,91 @@ show_fail2ban_status() {
     fi
 }
 
+get_ufw_state() {
+    local state=""
+    if ! command -v ufw >/dev/null 2>&1; then
+        printf 'missing'
+        return 0
+    fi
+    state="$(ufw status 2>/dev/null | awk -F': ' '/^Status:/ { print $2; exit }')"
+    printf '%s' "${state:-unknown}"
+}
+
+get_fail2ban_state() {
+    if ! command -v fail2ban-client >/dev/null 2>&1; then
+        printf 'missing'
+        return 0
+    fi
+    if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet fail2ban 2>/dev/null; then
+        printf 'active'
+    else
+        printf 'inactive'
+    fi
+}
+
+get_menu_ssh_label() {
+    local port="${DETECTED_SSH_PORT:-}"
+    [[ -n "$port" ]] || port="$(detect_ssh_port_from_file "$SSH_CONFIG_FILE")"
+    if [[ -n "$port" ]]; then
+        printf '%s/tcp' "$port"
+    else
+        printf 'unknown'
+    fi
+}
+
+build_status_line() {
+    printf 'UFW: %s | Fail2ban: %s | SSH: %s' \
+        "$(get_ufw_state)" \
+        "$(get_fail2ban_state)" \
+        "$(get_menu_ssh_label)"
+}
+
+ui_menu_footer() {
+    ui_dim "主菜单：输入 0 退出脚本。普通输入：输入 q 取消当前操作。"
+}
+
 show_main_menu_loop() {
     local choice=""
+    local should_pause=false
 
     while true; do
-        printf '%b\n' "${BLUE}${BOLD}================= Linux 安全加固脚本 =================${RESET}"
-        printf '%b\n' "${CYAN}请选择要执行的操作:${RESET}"
-        printf '  1. 安装 UFW 和 Fail2ban 依赖\n'
-        printf '  2. 配置 UFW 防火墙（将重置现有规则）\n'
-        printf '  3. 配置 Fail2ban\n'
-        printf '  4. 强化 SSH 配置\n'
-        printf '  5. 执行所有步骤 (1-4)\n'
-        printf '  6. 查看 UFW 状态\n'
-        printf '  7. 查看 Fail2ban SSH jail 状态\n'
-        printf '  0. 退出脚本\n'
-        read -r -p "请输入选项 [0-7]: " choice
-
-        if ! is_valid_main_menu_choice "$choice"; then
-            warn "无效选项，请输入 0 到 7。"
-            continue
-        fi
+        should_pause=false
+        ui_render_title
+        printf '\n'
+        ui_dim "$(build_status_line)"
+        printf '\n'
+        ui_info "请选择要执行的操作:"
+        ui_menu_item 1 "安装 UFW 和 Fail2ban 依赖"
+        ui_menu_item 2 "配置 UFW 防火墙（将重置现有规则）"
+        ui_menu_item 3 "配置 Fail2ban"
+        ui_menu_item 4 "强化 SSH 配置"
+        ui_menu_item 5 "执行所有步骤 (1-4)"
+        ui_menu_item 6 "查看 UFW 状态"
+        ui_menu_item 7 "查看 Fail2ban SSH jail 状态"
+        ui_menu_item 0 "退出"
+        ui_menu_footer
+        ui_read_main_menu_choice choice
 
         case "$choice" in
-            1) install_packages ;;
-            2) configure_ufw ;;
-            3) configure_fail2ban ;;
-            4) secure_ssh ;;
-            5) run_all_steps ;;
-            6) show_ufw_status ;;
-            7) show_fail2ban_status ;;
+            1) ui_run_menu_action "安装依赖" install_packages; should_pause=true ;;
+            2) ui_run_menu_action "配置 UFW 防火墙" configure_ufw; should_pause=true ;;
+            3) ui_run_menu_action "配置 Fail2ban" configure_fail2ban; should_pause=true ;;
+            4) ui_run_menu_action "强化 SSH 配置" secure_ssh; should_pause=true ;;
+            5) ui_run_menu_action "执行所有步骤" run_all_steps; should_pause=true ;;
+            6) ui_run_menu_action "查看 UFW 状态" show_ufw_status; should_pause=true ;;
+            7) ui_run_menu_action "查看 Fail2ban SSH jail 状态" show_fail2ban_status; should_pause=true ;;
             0) info "退出脚本。"; exit 0 ;;
+            q|Q) warn "主菜单请使用 0 退出脚本。" ;;
+            *) err "无效选项，请输入 0 到 7。" ;;
         esac
 
-        pause_before_menu
+        $should_pause && pause_before_menu
     done
 }
 
 main() {
+    ui_init_colors
+    ui_init_prompt_input
     require_root || return 1
     show_main_menu_loop
 }
