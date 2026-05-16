@@ -16,7 +16,7 @@
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="2026.05.02-r1"
+SCRIPT_VERSION="2026.05.16-r1"
 SS_VERSION_DEFAULT="1.24.0"
 SHADOW_TLS_VERSION_DEFAULT="v0.2.25"
 SHADOW_TLS_SNI_DEFAULT="gateway.icloud.com"
@@ -51,6 +51,7 @@ SHADOW_TLS_VERSION="${SHADOW_TLS_VERSION_DEFAULT}"
 UI_PROMPT_FD=0
 PROMPT_FD=0
 UI_PAUSE_ENABLED=false
+UI_FROM_MENU=false
 UI_RETURN_TO_MENU=130
 CANCEL_STATUS="${UI_RETURN_TO_MENU}"
 
@@ -260,12 +261,14 @@ ui_pause() {
 }
 
 ui_run_menu_action() {
-    local __action_name="$1" __rc=0 __previous_pause="${UI_PAUSE_ENABLED}"
+    local __action_name="$1" __rc=0 __previous_pause="${UI_PAUSE_ENABLED}" __previous_from_menu="${UI_FROM_MENU}"
     shift
 
     UI_PAUSE_ENABLED=true
+    UI_FROM_MENU=true
     "$@" || __rc=$?
     UI_PAUSE_ENABLED="${__previous_pause}"
+    UI_FROM_MENU="${__previous_from_menu}"
     case "${__rc}" in
         0) return 0 ;;
         "${UI_RETURN_TO_MENU}")
@@ -293,7 +296,13 @@ ui_menu_footer() {
     ui_dim "普通输入：输入 q 取消当前操作。"
 }
 
-print_title() { ui_clear_and_title; }
+print_title() {
+    if [[ "${UI_FROM_MENU}" == "true" ]]; then
+        ui_clear_and_title
+    else
+        ui_title "Shadowsocks-Rust 统一管理脚本" "${SCRIPT_VERSION}"
+    fi
+}
 print_section() { ui_section "$@"; }
 print_success() { ui_ok "$@"; }
 print_warn() { ui_warn "$@"; }
@@ -313,18 +322,26 @@ Shadowsocks-Rust 统一管理脚本
 用法：
   sudo bash shadowsocks-manager.sh [options] [command]
 
-Commands:
-  install      安装 / 覆盖安装 Shadowsocks-Rust
-  stls         安装 / 配置 Shadow-TLS
-  view         查看当前配置和客户端连接信息
-  update       更新 Shadowsocks-Rust / Shadow-TLS
-  uninstall    卸载 Shadowsocks-Rust / Shadow-TLS
-  status       查看服务状态和日志提示
-  menu         打开交互式管理菜单（默认）
+命令：
+  menu       打开交互式管理菜单（默认）
+  install    安装 / 覆盖安装 Shadowsocks-Rust
+  stls       安装 / 配置 Shadow-TLS
+  view       查看当前配置与客户端连接信息
+  update     更新 Shadowsocks-Rust / Shadow-TLS
+  uninstall  卸载 Shadowsocks-Rust / Shadow-TLS
+  status     查看服务状态和日志提示
 
-Options:
-  --latest     启动时从 GitHub 获取最新稳定版本
-  -h, --help   显示帮助
+选项：
+  --latest   启动时尝试获取最新稳定版本，失败时回退默认版本
+  -h, --help 显示帮助
+
+交互语义：
+  主菜单输入 0 退出脚本。
+  子菜单输入 0 返回上一级。
+  普通输入中输入 q 取消当前操作。
+
+安全提示：
+  view 会输出包含密码、端口或客户端连接信息的内容，请避免泄露。
 EOF
 }
 
@@ -1101,15 +1118,16 @@ show_client_config() {
     ui_kv "SS 加密" "${ss_method:-unknown}"
     ui_kv "Shadow-TLS" "${stls_state}"
     ui_rule
-    echo
+    ui_blank
     ui_warn "下面会显示包含敏感凭据的客户端配置，请避免在共享屏幕、日志或工单中泄露。"
-    print_info "Shadowsocks 直连配置："
-    echo "${host} = ss, ${server_ip}, ${ss_port}, encrypt-method=${ss_method}, password=${ss_password}, udp-relay=true"
+    ui_blank
+    ui_print "Shadowsocks 直连配置："
+    printf '%s\n' "${host} = ss, ${server_ip}, ${ss_port}, encrypt-method=${ss_method}, password=${ss_password}, udp-relay=true"
 
     if [ "${stls_state}" = "active" ] && load_shadow_tls_env; then
-        echo
-        print_info "Shadow-TLS 配置："
-        echo "${host}-stls = ss, ${server_ip}, ${STLS_PORT}, encrypt-method=${ss_method}, password=${ss_password}, shadow-tls-password=${STLS_PASSWORD}, shadow-tls-sni=${STLS_SNI}, shadow-tls-version=3, udp-relay=true, udp-port=${ss_port}"
+        ui_blank
+        ui_print "Shadow-TLS 组合配置："
+        printf '%s\n' "${host}-stls = ss, ${server_ip}, ${STLS_PORT}, encrypt-method=${ss_method}, password=${ss_password}, shadow-tls-password=${STLS_PASSWORD}, shadow-tls-sni=${STLS_SNI}, shadow-tls-version=3, udp-relay=true, udp-port=${ss_port}"
     fi
 
     if [ "${pause_after}" = true ]; then
@@ -1317,16 +1335,21 @@ show_status_and_logs() {
 
 uninstall_all() {
     print_title
-    print_section "卸载 Shadowsocks / Shadow-TLS"
-    echo "即将删除："
-    ui_kv "Shadowsocks 服务" "${SYSTEMD_SS_SERVICE}"
-    ui_kv "OpenRC 服务" "${OPENRC_SS_SERVICE}"
-    ui_kv "Shadow-TLS 服务" "${SYSTEMD_SHADOW_TLS_SERVICE}"
-    ui_kv "Shadow-TLS 二进制" "${SHADOW_TLS_BINARY}"
+    ui_section "高风险操作确认"
+    ui_warn "此操作将删除以下对象："
     ui_kv "安装目录" "${INSTALL_DIR}"
-    echo
+    ui_kv "Shadowsocks 配置" "${SS_CONFIG_FILE}"
+    if [ "${SERVICE_MANAGER}" = "systemd" ]; then
+        ui_kv "Shadowsocks 服务" "${SYSTEMD_SS_SERVICE}"
+    else
+        ui_kv "OpenRC 服务" "${OPENRC_SS_SERVICE}"
+    fi
+    ui_kv "Shadow-TLS 程序" "${SHADOW_TLS_BINARY}"
+    ui_kv "Shadow-TLS 配置" "${SHADOW_TLS_ENV_FILE}"
+    ui_kv "Shadow-TLS 服务" "${SYSTEMD_SHADOW_TLS_SERVICE}"
+    ui_blank
     ui_confirm_token "确认卸载 Shadowsocks-Rust 与 Shadow-TLS？" "DELETE" || {
-        ui_warn "已取消卸载。"
+        ui_warn "已取消。"
         pause_screen
         return
     }
