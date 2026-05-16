@@ -500,6 +500,7 @@ is_port_in_use() {
 
 prompt_port() {
     local var_name="$1" prompt_text="$2" allow_random="${3:-false}" value=""
+    ui_blank
     while true; do
         read_prompt value "${prompt_text}" || return "$?"
         if [ -z "${value}" ] && [ "${allow_random}" = true ]; then
@@ -524,11 +525,15 @@ prompt_port() {
 
 choose_method() {
     local var_name="$1" choice=""
-    echo "请选择 Shadowsocks 加密方法："
+    ui_blank
+    ui_print "请选择 Shadowsocks 加密方法："
+    ui_blank
     ui_menu_item 1 "2022-blake3-aes-128-gcm（推荐，24 字符 Base64 密码）"
     ui_menu_item 2 "2022-blake3-aes-256-gcm（44 字符 Base64 密码）"
     ui_menu_item 0 "返回上一级"
+    ui_blank
     ui_default_hint
+    ui_blank
     while true; do
         read_prompt choice "请输入选项编号（默认 1，0 返回）： " || return "$?"
         choice="${choice:-1}"
@@ -566,7 +571,9 @@ prompt_password() {
 
   expected_len="$(method_password_length "${method}")"
 
+  ui_blank
   if confirm_yes_no "是否手动指定 Shadowsocks 密码？" "n"; then
+    ui_blank
     while true; do
       read_secret input_password "请输入 Shadowsocks 密码（${expected_len} 字符 Base64，q 取消）： " || return "$?"
 
@@ -832,6 +839,7 @@ install_or_reinstall_ss() {
 
     if [ -d "${INSTALL_DIR}" ]; then
         local overwrite_status=0
+        ui_blank
         confirm_yes_no "检测到已有安装，是否覆盖 Shadowsocks 配置？" "n" || overwrite_status=$?
         if [ "${overwrite_status}" -ne 0 ]; then
             cancel_to_previous_menu
@@ -846,6 +854,7 @@ install_or_reinstall_ss() {
 
     show_ss_config_change_summary "确认安装参数" "${port}" "${method}" "安装核心、写入配置并启动 ss-rust 服务"
     local install_confirm_status=0
+    ui_blank
     confirm_yes_no "确认写入配置并启动服务？" "y" || install_confirm_status=$?
     if [ "${install_confirm_status}" -eq "${CANCEL_STATUS}" ]; then
         cancel_to_previous_menu
@@ -959,6 +968,7 @@ install_or_configure_shadow_tls() {
     ss_port="$(get_ss_port)"
     [ -n "${ss_port}" ] || { print_error "无法读取 Shadowsocks 端口。"; pause_screen; return 1; }
 
+    ui_blank
     read_prompt stls_port "请输入 Shadow-TLS 监听端口（默认 443，q 取消）： " || { cancel_to_previous_menu; return; }
     stls_port="${stls_port:-443}"
     if ! validate_port "${stls_port}"; then
@@ -972,6 +982,7 @@ install_or_configure_shadow_tls() {
         return 1
     fi
 
+    ui_blank
     read_prompt stls_sni "请输入 Shadow-TLS SNI（默认 ${SHADOW_TLS_SNI_DEFAULT}，q 取消）： " || { cancel_to_previous_menu; return; }
     stls_sni="${stls_sni:-${SHADOW_TLS_SNI_DEFAULT}}"
     if ! validate_sni "${stls_sni}"; then
@@ -981,7 +992,9 @@ install_or_configure_shadow_tls() {
     fi
 
     local password_confirm_status=0
+    ui_blank
     if confirm_yes_no "是否手动指定 Shadow-TLS 密码？" "n"; then
+        ui_blank
         while true; do
             read_secret stls_password "请输入 Shadow-TLS 密码（q 取消）： " || { cancel_to_previous_menu; return; }
             [ -n "${stls_password}" ] && break
@@ -1001,6 +1014,7 @@ install_or_configure_shadow_tls() {
 
     show_shadow_tls_change_summary "确认 Shadow-TLS 参数" "${ss_port}" "${stls_port}" "${stls_sni}"
     local stls_confirm_status=0
+    ui_blank
     confirm_yes_no "确认写入配置并启动 Shadow-TLS？" "y" || stls_confirm_status=$?
     if [ "${stls_confirm_status}" -eq "${CANCEL_STATUS}" ]; then
         cancel_to_previous_menu
@@ -1120,6 +1134,7 @@ modify_ss_config() {
     current_password="$(get_ss_password)"
 
     print_info "当前端口：${current_port}"
+    ui_blank
     read_prompt new_port "请输入新端口（回车保持不变，q 取消）： " || { cancel_to_previous_menu; return; }
     if [ -z "${new_port}" ]; then
         new_port="${current_port}"
@@ -1134,12 +1149,14 @@ modify_ss_config() {
     fi
 
     local method_confirm_status=0 password_confirm_status=0
+    ui_blank
     if confirm_yes_no "是否修改加密方法？" "n"; then
         choose_method new_method || { cancel_to_previous_menu; return; }
         prompt_password new_password "${new_method}" || { cancel_to_previous_menu; return; }
     else
         method_confirm_status=$?
         [ "${method_confirm_status}" -eq "${CANCEL_STATUS}" ] && { cancel_to_previous_menu; return; }
+        ui_blank
         if confirm_yes_no "是否修改密码？" "n"; then
             new_method="${current_method}"
             prompt_password new_password "${new_method}" || { cancel_to_previous_menu; return; }
@@ -1159,6 +1176,7 @@ modify_ss_config() {
 
     show_ss_config_change_summary "确认修改参数" "${new_port}" "${new_method}"
     local modify_confirm_status=0
+    ui_blank
     confirm_yes_no "确认写入配置并重启服务？" "y" || modify_confirm_status=$?
     if [ "${modify_confirm_status}" -eq "${CANCEL_STATUS}" ]; then
         cancel_to_previous_menu
@@ -1211,23 +1229,26 @@ update_components() {
 
 manage_services() {
     while true; do
-        print_title
-        print_section "服务控制"
+        ui_clear_and_title
         ui_dim "$(build_status_line)"
-        echo
-        ui_menu_item 1 "启动 Shadowsocks"
-        ui_menu_item 2 "停止 Shadowsocks"
-        ui_menu_item 3 "重启 Shadowsocks"
+        ui_blank
+        ui_print "请选择服务操作："
+        ui_blank
+        ui_menu_item 1 "启动 Shadowsocks-Rust"
+        ui_menu_item 2 "停止 Shadowsocks-Rust"
+        ui_menu_item 3 "重启 Shadowsocks-Rust"
         if [ "${SERVICE_MANAGER}" = "systemd" ]; then
             ui_menu_item 4 "启动 Shadow-TLS"
             ui_menu_item 5 "停止 Shadow-TLS"
             ui_menu_item 6 "重启 Shadow-TLS"
         fi
         ui_menu_item 0 "返回上一级"
-        ui_menu_footer
+        ui_blank
+        ui_dim "普通输入：输入 q 取消当前操作。"
+        ui_blank
 
         local choice action_done=true
-        ui_read_submenu_choice choice || return "$?"
+        ui_read_raw choice "请输入选项编号（0 返回）： "
         case "${choice}" in
             1) start_ss_service || action_done=false ;;
             2) stop_ss_service ;;
@@ -1256,8 +1277,12 @@ manage_services() {
                     action_done=false
                 fi
                 ;;
-            0) return "${CANCEL_STATUS}" ;;
-            q|Q) print_warn "子菜单请使用 0 返回上一级。"; action_done=false ;;
+            0) return 0 ;;
+            q|Q)
+                ui_warn "已取消，返回上一级菜单。"
+                ui_pause
+                return 0
+                ;;
             *) print_error "无效选项。"; action_done=false ;;
         esac
         [ "${action_done}" = true ] && print_success "服务操作已执行。"
@@ -1325,11 +1350,11 @@ uninstall_all() {
 
 show_main_menu() {
     while true; do
-        print_title
+        ui_clear_and_title
         ui_dim "$(build_status_line)"
-        echo
-        echo "请选择操作："
-        echo
+        ui_blank
+        ui_print "请选择操作："
+        ui_blank
         ui_menu_item 1 "安装 / 覆盖安装 Shadowsocks-Rust"
         ui_menu_item 2 "安装 / 配置 Shadow-TLS"
         ui_menu_item 3 "查看当前配置与客户端连接信息"
@@ -1339,8 +1364,9 @@ show_main_menu() {
         ui_menu_item 7 "卸载 Shadowsocks / Shadow-TLS"
         ui_menu_item 8 "查看服务状态与日志提示"
         ui_menu_item 0 "退出"
+        ui_blank
         ui_menu_footer
-        echo
+        ui_blank
         local choice
         ui_read_main_menu_choice choice
         case "${choice}" in
@@ -1352,9 +1378,15 @@ show_main_menu() {
             6) ui_run_menu_action "服务控制" manage_services ;;
             7) ui_run_menu_action "卸载 Shadowsocks / Shadow-TLS" uninstall_all ;;
             8) ui_run_menu_action "查看服务状态" show_status_and_logs true ;;
-            0) echo; print_info "已退出。"; exit 0 ;;
-            q|Q) print_warn "主菜单请使用 0 退出脚本。"; sleep 1 ;;
-            *) print_error "无效选项，请重新输入。"; sleep 1 ;;
+            0) ui_blank; print_info "已退出。"; exit 0 ;;
+            q|Q)
+                print_warn "主菜单请使用 0 退出脚本。"
+                ui_pause
+                ;;
+            *)
+                print_error "无效选项，请重新输入。"
+                ui_pause
+                ;;
         esac
     done
 }
