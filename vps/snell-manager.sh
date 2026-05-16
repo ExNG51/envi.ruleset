@@ -17,7 +17,7 @@
 set +e
 set -Euo pipefail
 
-SCRIPT_VERSION="2026.05.02-r1"
+SCRIPT_VERSION="2026.05.16-r1"
 SNELL_VERSION_DEFAULT="5.0.1"
 SNELL_V4_VERSION="4.1.1"
 SNELL_PORT_DEFAULT="16386"
@@ -42,6 +42,7 @@ UI_COLOR_BLUE=""
 UI_COLOR_CYAN=""
 UI_COLOR_BOLD=""
 UI_COLOR_DIM=""
+UI_TITLE_WIDTH=60
 UI_KV_LABEL_WIDTH=18
 
 PKG_MANAGER=""
@@ -49,6 +50,7 @@ ARCH=""
 UI_PROMPT_FD=0
 PROMPT_FD=0
 UI_PAUSE_ENABLED=false
+UI_MENU_CONTEXT=false
 COMMAND="menu"
 LEGACY_LISTEN=""
 LEGACY_PORT=""
@@ -113,6 +115,8 @@ ui_warn() { printf '%b\n' "${UI_COLOR_YELLOW}[WARN]${UI_COLOR_RESET} $*" >&2; }
 ui_error() { printf '%b\n' "${UI_COLOR_RED}[ERROR]${UI_COLOR_RESET} $*" >&2; }
 ui_dim() { printf '%b\n' "${UI_COLOR_DIM}$*${UI_COLOR_RESET}"; }
 ui_section() { printf '\n%b\n' "${UI_COLOR_BLUE}${UI_COLOR_BOLD}>>> $*${UI_COLOR_RESET}"; }
+ui_print() { printf '%b\n' "$*"; }
+ui_blank() { printf '\n'; }
 
 ui_text_width() {
     local text="$1" width=0 i char byte
@@ -146,20 +150,28 @@ ui_clear() {
     [[ -t 1 ]] && clear 2>/dev/null || true
 }
 
+ui_center_text() {
+    local text="$1" width padding
+    width="$(ui_text_width "${text}")"
+    padding=$(((UI_TITLE_WIDTH - width) / 2))
+    ((padding < 0)) && padding=0
+    printf '%*s%s\n' "${padding}" "" "${text}"
+}
+
 ui_title() {
-    local title="$1" version="${2:-}"
+    local title="$1" version="${2:-}" border version_text=""
+    border="$(printf '%*s' "${UI_TITLE_WIDTH}" '' | tr ' ' '=')"
+    [[ -n "${version}" ]] && version_text="Version: ${version}"
     printf '%b' "${UI_COLOR_CYAN}${UI_COLOR_BOLD}"
-    printf '%s\n' "============================================================"
-    printf '        %s\n' "${title}"
-    if [[ -n "${version}" ]]; then
-        printf '        Version: %s\n' "${version}"
-    fi
-    printf '%s\n' "============================================================"
+    printf '%s\n' "${border}"
+    ui_center_text "${title}"
+    [[ -n "${version_text}" ]] && ui_center_text "${version_text}"
+    printf '%s\n' "${border}"
     printf '%b' "${UI_COLOR_RESET}"
 }
 
 ui_render_title() {
-    ui_clear
+    [[ "${UI_MENU_CONTEXT}" == "true" ]] && ui_clear
     ui_title "Snell Server 统一管理脚本" "${SCRIPT_VERSION}"
 }
 
@@ -217,7 +229,9 @@ ui_read_main_menu_choice() {
 ui_read_submenu_choice() {
     local __target="$1"
     ui_read_raw "${__target}" "请输入选项编号（0 返回）： "
-    [[ "${!__target}" == "0" ]] && return "${UI_RETURN_TO_MENU}"
+    if [[ "${!__target}" == "0" ]] || ui_is_cancel "${!__target}"; then
+        return "${UI_RETURN_TO_MENU}"
+    fi
 }
 
 ui_confirm() {
@@ -261,6 +275,7 @@ ui_confirm_or_yes() {
 ui_confirm_token() {
     local prompt="$1" token="$2" answer
     ui_read_raw answer "${prompt} 输入 ${token} 继续： "
+    ui_is_cancel "${answer}" && return "${UI_RETURN_TO_MENU}"
     [[ "${answer}" == "${token}" ]]
 }
 
@@ -395,7 +410,7 @@ read_secret_or_cancel() {
 read_menu_choice() {
     local __target="$1" __prompt="$2"
     read_prompt "${__target}" "${__prompt}"
-    if is_back_input "${!__target}"; then
+    if is_cancel_input "${!__target}" || is_back_input "${!__target}"; then
         return "${RETURN_TO_MENU}"
     fi
 }
@@ -623,8 +638,6 @@ get_installed_binary_version() {
 service_state() {
     if systemctl is-active --quiet snell 2>/dev/null; then
         echo "active"
-    elif systemctl is-enabled --quiet snell 2>/dev/null; then
-        echo "enabled"
     else
         echo "inactive"
     fi
@@ -678,8 +691,6 @@ has_legacy_layout() {
 legacy_service_state() {
     if systemctl is-active --quiet snell-server 2>/dev/null; then
         echo "active"
-    elif systemctl is-enabled --quiet snell-server 2>/dev/null; then
-        echo "enabled"
     else
         echo "inactive"
     fi
@@ -732,7 +743,7 @@ read_legacy_config() {
 
 show_legacy_takeover_plan() {
     ui_section "接管计划"
-    ui_rule
+    ui_warn "此操作将接管以下对象："
     ui_kv "旧服务状态" "${LEGACY_SERVICE_STATE}"
     ui_kv "旧监听端口" "${LEGACY_PORT}"
     ui_kv "协议版本" "${LEGACY_PROTOCOL_VERSION}"
@@ -740,11 +751,10 @@ show_legacy_takeover_plan() {
     ui_kv "IPv6" "${LEGACY_IPV6}"
     ui_kv "TFO" "${LEGACY_TFO}"
     ui_kv "obfs" "${LEGACY_OBFS}"
-    ui_rule
-    echo
-    echo "将写入新配置：${SNELL_CONFIG_FILE}"
-    echo "将写入新服务：${SNELL_SERVICE_FILE}"
-    echo "旧配置和旧服务会在新服务验证成功后改名备份。"
+    ui_kv "新配置" "${SNELL_CONFIG_FILE}"
+    ui_kv "新服务" "${SNELL_SERVICE_FILE}"
+    ui_blank
+    ui_print "旧配置和旧服务会在新服务验证成功后改名备份。"
     if [ "${LEGACY_WAS_ACTIVE}" = true ]; then
         ui_warn "接管会短暂停止旧 snell-server，再启动新 snell 服务。"
     fi
@@ -851,7 +861,7 @@ run_legacy_takeover() {
 
     read_legacy_config || { pause_screen; return 1; }
     show_legacy_takeover_plan
-    echo
+    ui_blank
     ui_confirm_token "确认接管旧 Snell？" "TAKEOVER" || { ui_warn "已取消接管。"; pause_screen; return 0; }
 
     ensure_dependencies
@@ -879,13 +889,15 @@ run_legacy_migration() {
 
 choose_snell_version() {
     local var_name="$1" choice selected_version
-    echo "请选择 Snell Server 版本："
+    ui_print "请选择 Snell Server 版本："
+    ui_blank
     ui_menu_item 1 "v${SNELL_VERSION_DEFAULT}（默认，v5）"
     ui_menu_item 2 "v${SNELL_V4_VERSION}（v4）"
     ui_menu_item 3 "手动输入版本号"
     ui_menu_item 0 "返回上一级"
     ui_submenu_hint
     while true; do
+        ui_blank
         read_menu_choice choice "请输入选项编号（默认 1，0 返回）： " || return "$?"
         choice="${choice:-1}"
         case "${choice}" in
@@ -893,6 +905,7 @@ choose_snell_version() {
             2) printf -v "${var_name}" '%s' "${SNELL_V4_VERSION}"; return 0 ;;
             3)
                 ui_input_hint
+                ui_blank
                 read_prompt_or_cancel selected_version "请输入版本号（例如 5.0.1，q 取消）： " || return "$?"
                 selected_version="$(normalize_version "${selected_version}")"
                 validate_version "${selected_version}" || { ui_error "版本号格式无效。"; continue; }
@@ -909,24 +922,27 @@ choose_update_version() {
     current_version="$(get_installed_binary_version)"
     current_major="$(get_config_protocol_version)"
 
-    echo "请选择更新目标："
+    ui_print "请选择更新目标："
+    ui_blank
     ui_menu_item 1 "更新到默认稳定版本 v${SNELL_VERSION_DEFAULT}"
     ui_menu_item 2 "指定版本更新"
     if [ "${current_major}" = "4" ]; then
         ui_menu_item 3 "从 v4 升级到 v5 默认稳定版本"
     fi
     ui_menu_item 0 "返回上一级"
-    echo
+    ui_blank
     ui_dim "当前二进制版本：${current_version}；配置协议版本：${current_major:-未知}"
     ui_submenu_hint
 
     while true; do
+        ui_blank
         read_menu_choice choice "请输入选项编号（默认 1，0 返回）： " || return "$?"
         choice="${choice:-1}"
         case "${choice}" in
             1) printf -v "${var_name}" '%s' "${SNELL_VERSION_DEFAULT}"; return 0 ;;
             2)
                 ui_input_hint
+                ui_blank
                 read_prompt_or_cancel target_input "请输入目标版本号（例如 5.0.1，q 取消）： " || return "$?"
                 target_input="$(normalize_version "${target_input}")"
                 validate_version "${target_input}" || { ui_error "版本号格式无效。"; continue; }
@@ -949,6 +965,7 @@ prompt_port() {
     local var_name="$1" default_port="$2" value
     ui_default_hint
     while true; do
+        ui_blank
         read_prompt_or_cancel value "请输入 Snell 监听端口（默认 ${default_port}，回车使用默认值，q 取消）： " || return "$?"
         value="${value:-${default_port}}"
         validate_port "${value}" || { ui_error "端口格式无效，请输入 1-65535 之间的数字。"; continue; }
@@ -964,6 +981,7 @@ prompt_port() {
 prompt_psk() {
     local var_name="$1" current_value="${2:-}" value confirm_rc
     if [ -n "${current_value}" ]; then
+        ui_blank
         confirm_yes_no "是否修改 PSK？" "n"
         confirm_rc=$?
         case "${confirm_rc}" in
@@ -974,10 +992,12 @@ prompt_psk() {
         esac
     fi
 
+    ui_blank
     confirm_yes_no "是否手动指定 PSK？" "n"
     confirm_rc=$?
     if [ "${confirm_rc}" -eq 0 ]; then
         while true; do
+            ui_blank
             read_secret_or_cancel value "请输入 Snell PSK（q 取消）： " || return "$?"
             validate_psk "${value}" && break
             ui_error "PSK 不能为空、不能包含换行，且长度不能超过 256 个字符。"
@@ -993,6 +1013,7 @@ prompt_psk() {
 
 prompt_boolean() {
     local var_name="$1" prompt_text="$2" default_value="${3:-false}" confirm_rc
+    ui_blank
     if confirm_yes_no "${prompt_text}" "$( [ "${default_value}" = "true" ] && echo y || echo n )"; then
         printf -v "${var_name}" '%s' "true"
     else
@@ -1007,6 +1028,7 @@ prompt_boolean() {
 prompt_dns() {
     local var_name="$1" default_dns="$2" value
     ui_default_hint
+    ui_blank
     read_prompt_or_cancel value "请输入 DNS（默认 ${default_dns}，回车使用默认值，q 取消）： " || return "$?"
     value="${value:-${default_dns}}"
     validate_dns "${value}" || { ui_error "DNS 只能包含 IP、逗号、空格、点、冒号、下划线和短横线。"; return 1; }
@@ -1015,13 +1037,15 @@ prompt_dns() {
 
 prompt_obfs() {
     local obfs_var="$1" host_var="$2" current_obfs="${3:-off}" current_host="${4:-}" choice host
-    echo "请选择 obfs 设置："
+    ui_print "请选择 obfs 设置："
+    ui_blank
     ui_menu_item 1 "off（默认）"
     ui_menu_item 2 "http"
     ui_menu_item 3 "tls"
     ui_menu_item 0 "返回上一级"
     ui_default_hint
     while true; do
+        ui_blank
         read_menu_choice choice "请输入选项编号（当前 ${current_obfs:-off}，回车保持，0 返回）： " || return "$?"
         if [ -z "${choice}" ]; then
             printf -v "${obfs_var}" '%s' "${current_obfs:-off}"
@@ -1032,12 +1056,12 @@ prompt_obfs() {
             1) printf -v "${obfs_var}" '%s' "off"; printf -v "${host_var}" '%s' ""; return 0 ;;
             2) printf -v "${obfs_var}" '%s' "http"; break ;;
             3) printf -v "${obfs_var}" '%s' "tls"; break ;;
-            q|Q) return "${RETURN_TO_MENU}" ;;
             *) ui_error "无效选项，请输入 1、2 或 3。" ;;
         esac
     done
     validate_obfs_mode "${!obfs_var}" || { ui_error "obfs 只能是 off、http 或 tls。"; return 1; }
     ui_default_hint
+    ui_blank
     read_prompt_or_cancel host "请输入 obfs-host（默认 ${current_host:-${SNELL_OBFS_HOST_DEFAULT}}，回车使用默认值，q 取消）： " || return "$?"
     host="${host:-${current_host:-${SNELL_OBFS_HOST_DEFAULT}}}"
     validate_obfs_host "${host}" || { ui_error "obfs-host 只能包含字母、数字、点、下划线和短横线，长度不能超过 253。"; return 1; }
@@ -1058,6 +1082,7 @@ show_config_change_summary() {
     if [ "${obfs}" != "off" ]; then
         ui_kv "obfs-host" "${obfs_host}"
     fi
+    ui_blank
     ui_warn "确认后将写入配置并重启 snell 服务；PSK 不会在摘要中显示。"
 }
 
@@ -1219,6 +1244,7 @@ install_or_reinstall_snell() {
     local confirm_rc
     if has_legacy_layout; then
         ui_warn '检测到旧 Snell 布局。已有旧 VPS 建议优先使用菜单中的 "检测 / 接管旧 Snell 服务与配置"。'
+        ui_blank
         confirm_yes_no "是否仍然继续执行全新安装 / 覆盖安装？" "n"
         confirm_rc=$?
         if [ "${confirm_rc}" -eq "${RETURN_TO_MENU}" ]; then
@@ -1233,6 +1259,7 @@ install_or_reinstall_snell() {
     ensure_dependencies || return 1
 
     if [ -f "${SNELL_CONFIG_FILE}" ]; then
+        ui_blank
         confirm_yes_no "检测到已有配置，是否覆盖安装？" "n"
         confirm_rc=$?
         if [ "${confirm_rc}" -eq "${RETURN_TO_MENU}" ]; then
@@ -1256,6 +1283,7 @@ install_or_reinstall_snell() {
     prompt_obfs obfs obfs_host "off" "" || return "$?"
 
     show_config_change_summary "确认安装参数" "v${version}" "${port}" "${ipv6}" "${dns}" "${tfo}" "${obfs}" "${obfs_host}"
+    ui_blank
     confirm_yes_no "确认写入配置并启动服务？" "y"
     confirm_rc=$?
     if [ "${confirm_rc}" -eq "${RETURN_TO_MENU}" ]; then
@@ -1292,7 +1320,9 @@ show_client_config() {
     ui_section "当前配置"
     if [ ! -f "${SNELL_CONFIG_FILE}" ]; then
         ui_warn "尚未安装或尚未生成 Snell 配置。"
-        [ "${pause_after}" = true ] && pause_screen
+        if [ "${pause_after}" = true ]; then
+            pause_screen
+        fi
         return
     fi
 
@@ -1308,7 +1338,6 @@ show_client_config() {
     server_ip="$(get_server_ip)"
     host="$(hostname 2>/dev/null || echo snell)"
 
-    ui_rule
     ui_kv "服务状态" "$(service_state)"
     ui_kv "监听端口" "${port}"
     ui_kv "协议版本" "${protocol_version:-未知}"
@@ -1317,17 +1346,20 @@ show_client_config() {
     ui_kv "TFO" "${tfo:-false}"
     ui_kv "obfs" "${obfs:-off}"
     ui_kv "DNS" "${dns:-未设置}"
-    ui_rule
-    echo
+    ui_blank
     ui_warn "下面会显示包含敏感凭据的客户端配置，请避免在共享屏幕、日志或工单中泄露。"
+    ui_blank
     ui_info "Surge 配置片段："
     client_line="${host} = snell, ${server_ip}, ${port}, psk=${psk}, version=${protocol_version:-5}, tfo=${tfo:-false}, reuse=true, ecn=true"
     if [ "${obfs:-off}" != "off" ]; then
         client_line="${client_line}, obfs=${obfs}, obfs-host=${obfs_host}"
     fi
-    echo "${client_line}"
+    ui_print "${client_line}"
 
-    [ "${pause_after}" = true ] && pause_screen
+    if [ "${pause_after}" = true ]; then
+        pause_screen
+    fi
+    return 0
 }
 
 modify_snell_config() {
@@ -1360,6 +1392,7 @@ modify_snell_config() {
     protocol_version="${current_protocol:-5}"
 
     show_config_change_summary "确认修改参数" "" "${port}" "${ipv6}" "${dns}" "${tfo}" "${obfs}" "${obfs_host}"
+    ui_blank
     confirm_yes_no "确认写入配置并重启服务？" "y"
     confirm_rc=$?
     if [ "${confirm_rc}" -eq "${RETURN_TO_MENU}" ]; then
@@ -1434,19 +1467,23 @@ manage_service() {
     ui_render_title
     ui_section "服务控制"
     ui_dim "$(build_status_line)"
-    echo
+    ui_blank
+    ui_print "请选择操作："
+    ui_blank
     ui_menu_item 1 "启动 Snell"
     ui_menu_item 2 "停止 Snell"
     ui_menu_item 3 "重启 Snell"
-    ui_menu_item 0 "返回"
-    ui_menu_footer
+    ui_menu_item 0 "返回上一级"
+    ui_blank
+    ui_dim "输入 0 返回上一级。"
+    ui_dim "普通输入：输入 q 取消当前操作。"
+    ui_blank
     local choice action_done=true
     ui_read_submenu_choice choice || return "$?"
     case "${choice}" in
         1) start_snell_service || action_done=false ;;
         2) stop_snell_service || action_done=false ;;
         3) restart_snell_service || action_done=false ;;
-        q|Q) ui_warn "子菜单请使用 0 返回上一级。"; action_done=false ;;
         *) ui_error "无效选项。"; action_done=false ;;
     esac
     [ "${action_done}" = true ] && ui_ok "服务操作已执行。"
@@ -1517,13 +1554,16 @@ validate_snell_service() {
         failed=1
     fi
 
-    echo
+    ui_blank
     if [ "${failed}" -eq 0 ]; then
         ui_ok "核心验证通过。"
     else
         ui_warn "存在需要人工确认的项目，请检查 systemd、端口监听和 Snell 配置。"
     fi
-    [ "${pause_after}" = true ] && pause_screen
+    if [ "${pause_after}" = true ]; then
+        pause_screen
+    fi
+    return 0
 }
 
 show_status_and_logs() {
@@ -1535,13 +1575,16 @@ show_status_and_logs() {
     ui_kv "Snell" "$(service_state)"
     ui_kv "二进制版本" "$(get_installed_binary_version)"
     ui_kv "协议版本" "$(get_config_protocol_version || echo "未知")"
-    echo
+    ui_blank
     ui_info "日志查看命令："
-    echo "journalctl -u snell -n 80 --no-pager"
-    echo "systemctl status snell --no-pager"
-    echo
+    ui_print "journalctl -u snell -n 80 --no-pager"
+    ui_print "systemctl status snell --no-pager"
+    ui_blank
     systemctl status snell --no-pager 2>/dev/null || ui_warn "未检测到 snell systemd 服务。"
-    [ "${pause_after}" = true ] && pause_screen
+    if [ "${pause_after}" = true ]; then
+        pause_screen
+    fi
+    return 0
 }
 
 apply_network_tuning() {
@@ -1550,19 +1593,22 @@ apply_network_tuning() {
     local pause_after="${1:-false}"
     write_network_tuning
     ui_ok "网络优化参数已写入 ${SNELL_SYSCTL_FILE}。"
-    [ "${pause_after}" = true ] && pause_screen
+    if [ "${pause_after}" = true ]; then
+        pause_screen
+    fi
+    return 0
 }
 
 uninstall_snell() {
     ui_render_title
     ui_section "卸载 Snell Server"
-    echo "即将删除："
+    ui_warn "此操作将删除以下对象："
     ui_kv "服务" "${SNELL_SERVICE_FILE}"
     ui_kv "旧服务" "${OLD_SNELL_SERVICE_FILE}"
     ui_kv "二进制" "${SNELL_BINARY_PATH}"
     ui_kv "配置目录" "${SNELL_CONFIG_DIR}"
     ui_kv "网络优化" "${SNELL_SYSCTL_FILE}"
-    echo
+    ui_blank
     ui_confirm_token "确认卸载 Snell Server？" "DELETE" || { ui_warn "已取消卸载。"; pause_screen; return 0; }
 
     systemctl disable --now snell >/dev/null 2>&1 || true
@@ -1576,12 +1622,13 @@ uninstall_snell() {
 }
 
 show_main_menu() {
+    UI_MENU_CONTEXT=true
     while true; do
         ui_render_title
         ui_dim "$(build_status_line)"
-        echo
-        echo "请选择操作："
-        echo
+        ui_blank
+        ui_print "请选择操作："
+        ui_blank
         ui_menu_item 1 "安装 / 覆盖安装 Snell Server"
         ui_menu_item 2 "查看当前配置与客户端连接信息"
         ui_menu_item 3 "修改 Snell 配置"
@@ -1594,7 +1641,7 @@ show_main_menu() {
         ui_menu_item 10 "卸载 Snell Server"
         ui_menu_item 0 "退出"
         ui_menu_footer
-        echo
+        ui_blank
         local choice
         ui_read_main_menu_choice choice
         case "${choice}" in
