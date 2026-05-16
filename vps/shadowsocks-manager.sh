@@ -38,6 +38,7 @@ UI_COLOR_BLUE=""
 UI_COLOR_CYAN=""
 UI_COLOR_BOLD=""
 UI_COLOR_DIM=""
+UI_TITLE_WIDTH=60
 UI_KV_LABEL_WIDTH=18
 
 SERVICE_MANAGER=""
@@ -100,6 +101,8 @@ ui_ok() { printf '%b\n' "${UI_COLOR_GREEN}[OK]${UI_COLOR_RESET} $*"; }
 ui_warn() { printf '%b\n' "${UI_COLOR_YELLOW}[WARN]${UI_COLOR_RESET} $*" >&2; }
 ui_error() { printf '%b\n' "${UI_COLOR_RED}[ERROR]${UI_COLOR_RESET} $*" >&2; }
 ui_dim() { printf '%b\n' "${UI_COLOR_DIM}$*${UI_COLOR_RESET}"; }
+ui_blank() { printf '\n'; }
+ui_print() { printf '%b\n' "$*"; }
 ui_section() { printf '\n%b\n' "${UI_COLOR_BLUE}${UI_COLOR_BOLD}>>> $*${UI_COLOR_RESET}"; }
 
 ui_text_width() {
@@ -134,19 +137,33 @@ ui_clear() {
     [[ -t 1 ]] && clear 2>/dev/null || true
 }
 
-ui_title() {
-    local title="$1" version="${2:-}"
-    printf '%b' "${UI_COLOR_CYAN}${UI_COLOR_BOLD}"
-    printf '%s\n' "============================================================"
-    printf '        %s\n' "${title}"
-    if [[ -n "${version}" ]]; then
-        printf '        Version: %s\n' "${version}"
+ui_center_line() {
+    local text="$1" width padding_left padding_right
+    width="$(ui_text_width "${text}")"
+    if (( width >= UI_TITLE_WIDTH )); then
+        printf '%s\n' "${text}"
+        return 0
     fi
-    printf '%s\n' "============================================================"
+    padding_left=$(((UI_TITLE_WIDTH - width) / 2))
+    padding_right=$((UI_TITLE_WIDTH - width - padding_left))
+    printf '%*s%s%*s\n' "${padding_left}" "" "${text}" "${padding_right}" ""
+}
+
+ui_title() {
+    local title="$1" version="${2:-}" border=""
+    printf -v border '%*s' "${UI_TITLE_WIDTH}" ""
+    border="${border// /=}"
+    printf '%b' "${UI_COLOR_CYAN}${UI_COLOR_BOLD}"
+    printf '%s\n' "${border}"
+    ui_center_line "${title}"
+    if [[ -n "${version}" ]]; then
+        ui_center_line "Version: ${version}"
+    fi
+    printf '%s\n' "${border}"
     printf '%b' "${UI_COLOR_RESET}"
 }
 
-ui_render_title() {
+ui_clear_and_title() {
     ui_clear
     ui_title "Shadowsocks-Rust 统一管理脚本" "${SCRIPT_VERSION}"
 }
@@ -272,12 +289,11 @@ ui_default_hint() {
 }
 
 ui_menu_footer() {
-    echo
     ui_dim "主菜单：输入 0 退出脚本。子菜单：输入 0 返回上一级。"
     ui_dim "普通输入：输入 q 取消当前操作。"
 }
 
-print_title() { ui_render_title; }
+print_title() { ui_clear_and_title; }
 print_section() { ui_section "$@"; }
 print_success() { ui_ok "$@"; }
 print_warn() { ui_warn "$@"; }
