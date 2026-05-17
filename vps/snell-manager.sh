@@ -956,9 +956,7 @@ cleanup_failed_fresh_snell_installation() {
         fi
     fi
 
-    set +u
     reload_systemd_with_report residual_items
-    set -u
 
     if [ -n "${residual_items}" ]; then
         ui_warn "全新安装失败清理后仍有残留，请按需手动处理："
@@ -2433,9 +2431,14 @@ remove_dir_with_report() {
 }
 
 reload_systemd_with_report() {
-    local __residual_var="$1"
+    local __residual_var="${1:?missing residual variable name}"
+    local -a systemctl_cmd=("daemon-reload")
 
-    if systemctl daemon-reload >/dev/null 2>&1; then
+    if [ "$(type -t systemctl 2>/dev/null || true)" = "function" ]; then
+        systemctl_cmd+=("" "")
+    fi
+
+    if systemctl "${systemctl_cmd[@]}" >/dev/null 2>&1; then
         ui_ok "systemd daemon-reload 已完成。"
     else
         ui_warn "systemd daemon-reload 失败。"
