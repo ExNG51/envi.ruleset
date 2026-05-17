@@ -460,16 +460,44 @@ install_packages() {
     esac
 }
 
-ensure_dependencies() {
-    print_section "检查基础依赖"
+ensure_ss_install_dependencies() {
     local packages=()
-    if [ "${PKG_MANAGER}" = "apt" ]; then
-        packages=(curl wget tar openssl ca-certificates net-tools xz-utils coreutils jq)
-    else
-        packages=(curl wget tar openssl ca-certificates net-tools xz coreutils jq)
-    fi
+
+    case "${PKG_MANAGER}" in
+        apk)
+            packages=(curl wget tar openssl ca-certificates iproute2 xz coreutils jq)
+            ;;
+        apt)
+            packages=(curl wget tar openssl ca-certificates iproute2 xz-utils coreutils jq)
+            ;;
+        dnf|yum)
+            packages=(curl wget tar openssl ca-certificates iproute xz coreutils jq)
+            ;;
+        *)
+            print_error "未识别的包管理器：${PKG_MANAGER}"
+            return 1
+            ;;
+    esac
+
+    print_section "检查基础依赖"
     install_packages "${packages[@]}"
     print_success "基础依赖已就绪。"
+}
+
+has_runtime_port_probe_tool() {
+    check_command_exists ss || check_command_exists netstat
+}
+
+install_runtime_port_probe_dependency() {
+    case "${PKG_MANAGER}" in
+        apk|apt) install_packages iproute2 ;;
+        dnf|yum) install_packages iproute ;;
+        *) return 1 ;;
+    esac
+}
+
+ensure_dependencies() {
+    ensure_ss_install_dependencies
 }
 
 fetch_latest_versions_if_needed() {
@@ -594,10 +622,8 @@ choose_method() {
     ui_menu_item 2 "2022-blake3-aes-256-gcm（44 字符 Base64 密码）"
     ui_menu_item 0 "返回上一级"
     ui_blank
-    ui_default_hint
-    ui_blank
     while true; do
-        read_prompt choice "请输入选项编号（默认 1，0 返回）： " || return "$?"
+        read_prompt choice "请输入选项编号（默认 1，回车使用默认值，0 返回，q 取消）： " || return "$?"
         choice="${choice:-1}"
         case "${choice}" in
             1) printf -v "${var_name}" '%s' "2022-blake3-aes-128-gcm"; return 0 ;;
@@ -626,41 +652,69 @@ generate_password_for_method() {
 }
 
 prompt_password() {
-  local -n output_password_ref="$1"
-  local method="$2"
-  local expected_len=""
-  local input_password=""
+    local output_var_name="$1"
+    local method="$2"
+    local _current_password="${3:-}"
+    local expected_len=""
+    local input_password=""
+    local generated_password=""
+    local confirm_status=0
 
-  expected_len="$(method_password_length "${method}")"
+    expected_len="$(method_password_length "${method}")"
 
-  ui_blank
-  if confirm_yes_no "是否手动指定 Shadowsocks 密码？" "n"; then
+    ui_blank
+    confirm_yes_no "是否自动生成 Shadowsocks 密码？" "y" || confirm_status=$?
+    if [ "${confirm_status}" -eq 0 ]; then
+        generated_password="$(generate_password_for_method "${method}")"
+        printf -v "${output_var_name}" '%s' "${generated_password}"
+        print_success "已生成符合 ${method} 要求的随机密码。"
+        return 0
+    fi
+    [ "${confirm_status}" -eq "${CANCEL_STATUS}" ] && return "${CANCEL_STATUS}"
+
     ui_blank
     while true; do
-      read_secret input_password "请输入 Shadowsocks 密码（${expected_len} 字符 Base64，q 取消）： " || return "$?"
+        read_secret input_password "请输入 Shadowsocks 密码（${expected_len} 字符 Base64，q 取消）： " || return "$?"
 
-      if [ "${#input_password}" -ne "${expected_len}" ]; then
-        print_error "密码长度不符合 ${method} 要求，应为 ${expected_len} 字符。"
-        continue
-      fi
+        if [ "${#input_password}" -ne "${expected_len}" ]; then
+            print_error "密码长度不符合 ${method} 要求，应为 ${expected_len} 字符。"
+            continue
+        fi
 
-      if [[ ! "${input_password}" =~ ^[A-Za-z0-9+/]+={0,2}$ ]]; then
-        print_error "密码必须是 Base64 字符串。"
-        continue
-      fi
+        if [[ ! "${input_password}" =~ ^[A-Za-z0-9+/]+={0,2}$ ]]; then
+            print_error "密码必须是 Base64 字符串。"
+            continue
+        fi
 
-      # shellcheck disable=SC2034 # nameref output assigned for caller.
-      output_password_ref="${input_password}"
-      return 0
+        printf -v "${output_var_name}" '%s' "${input_password}"
+        return 0
     done
-  else
-    local confirm_status=$?
-    [ "${confirm_status}" -eq "${CANCEL_STATUS}" ] && return "${CANCEL_STATUS}"
-  fi
+}
 
-  # shellcheck disable=SC2034 # nameref output assigned for caller.
-  output_password_ref="$(generate_password_for_method "${method}")"
-  print_success "已生成符合 ${method} 要求的随机密码。"
+prompt_shadow_tls_password() {
+    local output_var_name="$1"
+    local input_password=""
+    local generated_password=""
+    local confirm_status=0
+
+    ui_blank
+    confirm_yes_no "是否自动生成 Shadow-TLS 密码？" "y" || confirm_status=$?
+    if [ "${confirm_status}" -eq 0 ]; then
+        generated_password="$(openssl rand -base64 16)"
+        printf -v "${output_var_name}" '%s' "${generated_password}"
+        print_success "已生成随机 Shadow-TLS 密码。"
+        return 0
+    fi
+    [ "${confirm_status}" -eq "${CANCEL_STATUS}" ] && return "${CANCEL_STATUS}"
+
+    ui_blank
+    while true; do
+        read_secret input_password "请输入 Shadow-TLS 密码（q 取消）： " || return "$?"
+        [ -n "${input_password}" ] && break
+        print_error "Shadow-TLS 密码不能为空。"
+    done
+
+    printf -v "${output_var_name}" '%s' "${input_password}"
 }
 
 get_ss_package_name() {
@@ -1065,7 +1119,7 @@ install_or_configure_shadow_tls() {
     [ -n "${ss_port}" ] || { print_error "无法读取 Shadowsocks 端口。"; pause_screen; return 1; }
 
     ui_blank
-    read_prompt stls_port "请输入 Shadow-TLS 监听端口（默认 443，q 取消）： " || { cancel_to_previous_menu; return; }
+    read_prompt stls_port "请输入 Shadow-TLS 监听端口（默认 443，回车使用默认值，q 取消）： " || { cancel_to_previous_menu; return; }
     stls_port="${stls_port:-443}"
     if ! validate_port "${stls_port}"; then
         print_error "Shadow-TLS 端口无效。"
@@ -1079,7 +1133,7 @@ install_or_configure_shadow_tls() {
     fi
 
     ui_blank
-    read_prompt stls_sni "请输入 Shadow-TLS SNI（默认 ${SHADOW_TLS_SNI_DEFAULT}，q 取消）： " || { cancel_to_previous_menu; return; }
+    read_prompt stls_sni "请输入 Shadow-TLS SNI（默认 ${SHADOW_TLS_SNI_DEFAULT}，回车使用默认值，q 取消）： " || { cancel_to_previous_menu; return; }
     stls_sni="${stls_sni:-${SHADOW_TLS_SNI_DEFAULT}}"
     if ! validate_sni "${stls_sni}"; then
         print_error "SNI 仅支持有效域名字符，并且至少包含一个点。"
@@ -1087,21 +1141,7 @@ install_or_configure_shadow_tls() {
         return 1
     fi
 
-    local password_confirm_status=0
-    ui_blank
-    if confirm_yes_no "是否手动指定 Shadow-TLS 密码？" "n"; then
-        ui_blank
-        while true; do
-            read_secret stls_password "请输入 Shadow-TLS 密码（q 取消）： " || { cancel_to_previous_menu; return; }
-            [ -n "${stls_password}" ] && break
-            print_error "Shadow-TLS 密码不能为空。"
-        done
-    else
-        password_confirm_status=$?
-        [ "${password_confirm_status}" -eq "${CANCEL_STATUS}" ] && { cancel_to_previous_menu; return; }
-        stls_password="$(openssl rand -base64 16)"
-        print_success "已生成随机 Shadow-TLS 密码。"
-    fi
+    prompt_shadow_tls_password stls_password || { cancel_to_previous_menu; return; }
     if ! validate_safe_env_value "${stls_password}"; then
         print_error "Shadow-TLS 密码包含不支持的字符。请使用字母、数字或 Base64 常见字符。"
         pause_screen
