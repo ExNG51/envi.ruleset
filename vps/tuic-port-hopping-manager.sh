@@ -280,6 +280,15 @@ ui_confirm() {
     done
 }
 
+ui_confirm_token() {
+    local prompt_text="$1" token="$2" answer=""
+    ui_read_or_cancel answer "${prompt_text}" || return "$?"
+    if [ "${answer}" = "${token}" ]; then
+        return 0
+    fi
+    return 1
+}
+
 require_root() {
     if [ "$(id -u)" -ne 0 ]; then
         print_error "请使用 root 权限运行：sudo $0"
@@ -396,9 +405,9 @@ show_instance_table() {
         return 1
     fi
 
-    printf "%s\n" "------------------------------------------------------------"
+    ui_rule
     printf "%-8s %-18s %-16s %-12s\n" "端口" "跳跃范围" "systemd" "更新时间"
-    printf "%s\n" "------------------------------------------------------------"
+    ui_rule
 
     local port cfg start_port end_port updated service state
     while read -r port; do
@@ -418,7 +427,7 @@ show_instance_table() {
         printf "%-8s %-18s %-16s %-12s\n" "${port}" "${start_port}-${end_port}" "${state}" "${updated:-未知}"
     done < <(list_instances)
 
-    printf "%s\n" "------------------------------------------------------------"
+    ui_rule
 }
 
 select_instance() {
@@ -613,13 +622,13 @@ set -eu
 
 port="${1:-}"
 if [ -z "${port}" ]; then
-    echo "[错误] 缺少实例端口参数。"
+    echo "[ERROR] 缺少实例端口参数。" >&2
     exit 1
 fi
 
 config_file="/etc/tuic-port-hopping/instances/${port}.env"
 if [ ! -f "${config_file}" ]; then
-    echo "[错误] 未找到实例配置：${config_file}"
+    echo "[ERROR] 未找到实例配置：${config_file}" >&2
     exit 1
 fi
 
@@ -627,7 +636,7 @@ fi
 . "${config_file}"
 
 if [ -z "${NFT_TABLE_NAME:-}" ] || [ -z "${NFT_RULE_FILE:-}" ]; then
-    echo "[错误] 实例配置缺少 NFT_TABLE_NAME 或 NFT_RULE_FILE。"
+    echo "[ERROR] 实例配置缺少 NFT_TABLE_NAME 或 NFT_RULE_FILE。" >&2
     exit 1
 fi
 
@@ -701,6 +710,8 @@ apply_instance_rules() {
         print_success "nftables 规则已应用。"
     else
         print_error "nftables 规则应用失败，最近 systemd 日志如下："
+        ui_blank
+        ui_info "原始 journalctl 输出："
         journalctl -u "${service}" -n 30 --no-pager 2>/dev/null || true
         return 1
     fi
@@ -710,6 +721,8 @@ apply_instance_rules() {
         print_success "systemd 服务已启用并处于 active：${service}"
     else
         print_warn "systemd 服务未处于 active，最近日志如下："
+        ui_blank
+        ui_info "原始 journalctl 输出："
         journalctl -u "${service}" -n 30 --no-pager 2>/dev/null || true
     fi
 }
@@ -739,10 +752,10 @@ remove_ufw_rules() {
 
 show_security_group_hint() {
     local real_port="$1" start_port="$2" end_port="$3"
-    echo
+    ui_blank
     print_warn "请确认 VPS 商家后台安全组也已放行："
-    echo "  ${real_port}/udp"
-    echo "  ${start_port}-${end_port}/udp"
+    ui_kv "真实端口" "${real_port}/udp"
+    ui_kv "跳跃范围" "${start_port}-${end_port}/udp"
 }
 
 create_or_update_instance() {
@@ -785,11 +798,11 @@ create_or_update_instance() {
     write_instance_files "${REAL_PORT}" "${RANGE_START}" "${RANGE_END}"
     apply_instance_rules "${REAL_PORT}" || { pause_screen; return 1; }
     configure_ufw_rules "${REAL_PORT}" "${RANGE_START}" "${RANGE_END}"
-    echo
+    ui_blank
     print_success "实例 ${REAL_PORT} 配置完成。"
-    echo "  真实 TUIC 端口：${REAL_PORT}/udp"
-    echo "  跳跃端口范围：${RANGE_START}-${RANGE_END}/udp"
-    echo "  客户端参数：port-hopping=\"${REAL_PORT};${RANGE_START}-${RANGE_END}\", port-hopping-interval=30"
+    ui_kv "真实端口" "${REAL_PORT}/udp"
+    ui_kv "跳跃范围" "${RANGE_START}-${RANGE_END}/udp"
+    ui_kv "客户端参数" "port-hopping=\"${REAL_PORT};${RANGE_START}-${RANGE_END}\", port-hopping-interval=30"
     show_security_group_hint "${REAL_PORT}" "${RANGE_START}" "${RANGE_END}"
     pause_screen
 }
@@ -812,15 +825,19 @@ show_instance_status() {
     service="$(get_service_name "${REAL_PORT}")"
 
     print_section "实例状态：${REAL_PORT}"
-    echo "真实端口：${REAL_PORT}/udp"
-    echo "跳跃范围：${RANGE_START}-${RANGE_END}/udp"
-    echo "nftables 表：${NFT_TABLE_NAME}"
-    echo "nftables 文件：${NFT_RULE_FILE}"
-    echo "systemd 服务：${service}"
+    ui_kv "真实端口" "${REAL_PORT}/udp"
+    ui_kv "跳跃范围" "${RANGE_START}-${RANGE_END}/udp"
+    ui_kv "nftables 表" "inet ${NFT_TABLE_NAME}"
+    ui_kv "nftables 文件" "${NFT_RULE_FILE}"
+    ui_kv "systemd 服务" "${service}"
 
     print_section "监听状态"
-    if check_command_exists ss && is_udp_port_listening "${REAL_PORT}"; then
+    if ! check_command_exists ss; then
+        print_warn "缺少 ss 命令，无法检查监听状态。"
+    elif is_udp_port_listening "${REAL_PORT}"; then
         print_success "UDP ${REAL_PORT} 正在监听。"
+        ui_blank
+        ui_info "原始 ss -lunp 过滤结果："
         ss -lunp 2>/dev/null | grep -E ":${REAL_PORT}([[:space:]]|$)" || true
     else
         print_warn "未检测到 UDP ${REAL_PORT} 监听。"
@@ -828,16 +845,28 @@ show_instance_status() {
 
     print_section "nftables 状态"
     if check_command_exists nft && nft list table inet "${NFT_TABLE_NAME}" >/dev/null 2>&1; then
+        print_success "检测到 nftables 表：inet ${NFT_TABLE_NAME}"
+        ui_blank
+        ui_info "原始 nft list table 输出："
         nft list table inet "${NFT_TABLE_NAME}"
     else
         print_warn "未检测到 nftables 表。"
     fi
 
     print_section "systemd 状态"
-    systemctl status "${service}" --no-pager 2>/dev/null || print_warn "未检测到 systemd 服务。"
+    if systemctl status "${service}" --no-pager >/dev/null 2>&1; then
+        print_success "检测到 systemd 服务：${service}"
+    else
+        print_warn "systemd 服务可能未处于正常状态，原始输出如下："
+    fi
+    ui_blank
+    ui_info "原始 systemctl status 输出："
+    systemctl status "${service}" --no-pager 2>/dev/null || true
 
     print_section "UFW 状态"
     if check_command_exists ufw; then
+        ui_blank
+        ui_info "原始 ufw status verbose 输出："
         ufw status verbose || true
     else
         print_warn "未安装 UFW。"
@@ -857,6 +886,12 @@ validate_instance() {
     service="$(get_service_name "${REAL_PORT}")"
 
     print_section "验证实例：${REAL_PORT}"
+    ui_kv "真实端口" "${REAL_PORT}/udp"
+    ui_kv "跳跃范围" "${RANGE_START}-${RANGE_END}/udp"
+    ui_kv "nftables 表" "inet ${NFT_TABLE_NAME}"
+    ui_kv "systemd 服务" "${service}"
+    ui_blank
+
     if check_command_exists ss && is_udp_port_listening "${REAL_PORT}"; then
         print_success "真实端口 ${REAL_PORT}/udp 正在监听。"
     else
@@ -889,6 +924,8 @@ validate_instance() {
         print_success "systemd 服务 active。"
     else
         print_warn "systemd 服务不是 active，最近日志如下："
+        ui_blank
+        ui_info "原始 journalctl 输出："
         journalctl -u "${service}" -n 20 --no-pager 2>/dev/null || true
         failed=1
     fi
@@ -898,9 +935,12 @@ validate_instance() {
         ufw_output="$(ufw status 2>/dev/null || true)"
         echo "${ufw_output}" | grep -Eq "${REAL_PORT}/udp|${REAL_PORT}[[:space:]]+.*UDP" && print_success "UFW 检测到真实端口规则。" || print_warn "UFW 未检测到真实端口规则。"
         echo "${ufw_output}" | grep -Eq "${RANGE_START}:${RANGE_END}/udp|${RANGE_START}:${RANGE_END}" && print_success "UFW 检测到跳跃范围规则。" || print_warn "UFW 未检测到跳跃范围规则。"
+        ui_blank
+        ui_info "原始 ufw status verbose 输出："
+        ufw status verbose 2>/dev/null || true
     fi
 
-    echo
+    ui_blank
     if [ "${failed}" -eq 0 ]; then
         print_success "核心配置验证通过。"
     else
@@ -919,10 +959,12 @@ show_client_hint() {
     }
     load_instance_config "${SELECTED_PORT}" || { pause_screen; return 1; }
     print_section "客户端配置提示：${REAL_PORT}"
-    echo "Surge / Surgio 建议追加："
-    echo
-    echo -e "${COLOR_YELLOW}port-hopping=\"${REAL_PORT};${RANGE_START}-${RANGE_END}\", port-hopping-interval=30${COLOR_RESET}"
-    echo
+    print_warn "下面会显示客户端连接参数。请勿在公开环境截图或转发。"
+    ui_blank
+    ui_print "Surge / Surgio 建议追加："
+    ui_blank
+    ui_print "${COLOR_YELLOW}port-hopping=\"${REAL_PORT};${RANGE_START}-${RANGE_END}\", port-hopping-interval=30${COLOR_RESET}"
+    ui_blank
     print_warn "启用 port-hopping 后，建议跳跃列表中显式包含真实端口 ${REAL_PORT}。"
     show_security_group_hint "${REAL_PORT}" "${RANGE_START}" "${RANGE_END}"
     pause_screen
@@ -937,15 +979,21 @@ show_tcpdump_helper() {
     }
     load_instance_config "${SELECTED_PORT}" || { pause_screen; return 1; }
     print_section "抓包辅助命令：${REAL_PORT}"
-    echo "同时观察真实端口与跳跃端口范围："
-    echo -e "${COLOR_YELLOW}sudo tcpdump -ni any 'udp port ${REAL_PORT} or udp portrange ${RANGE_START}-${RANGE_END}'${COLOR_RESET}"
-    echo
-    echo "只观察跳跃端口范围："
-    echo -e "${COLOR_YELLOW}sudo tcpdump -ni any 'udp portrange ${RANGE_START}-${RANGE_END}'${COLOR_RESET}"
-    echo
-    echo "只观察真实 TUIC 端口："
-    echo -e "${COLOR_YELLOW}sudo tcpdump -ni any 'udp port ${REAL_PORT}'${COLOR_RESET}"
-    echo
+    ui_kv "真实端口" "${REAL_PORT}/udp"
+    ui_kv "跳跃范围" "${RANGE_START}-${RANGE_END}/udp"
+    ui_blank
+    ui_print "同时观察真实端口与跳跃端口范围："
+    ui_blank
+    ui_print "${COLOR_YELLOW}sudo tcpdump -ni any 'udp port ${REAL_PORT} or udp portrange ${RANGE_START}-${RANGE_END}'${COLOR_RESET}"
+    ui_blank
+    ui_print "只观察跳跃端口范围："
+    ui_blank
+    ui_print "${COLOR_YELLOW}sudo tcpdump -ni any 'udp portrange ${RANGE_START}-${RANGE_END}'${COLOR_RESET}"
+    ui_blank
+    ui_print "只观察真实 TUIC 端口："
+    ui_blank
+    ui_print "${COLOR_YELLOW}sudo tcpdump -ni any 'udp port ${REAL_PORT}'${COLOR_RESET}"
+    ui_blank
     print_warn "如果没有安装 tcpdump，可执行：sudo apt install -y tcpdump"
     print_warn "如果能看到跳跃端口入站但节点不可用，重点检查 nftables、TUIC token/证书、UFW 与商家安全组。"
     pause_screen
@@ -959,6 +1007,11 @@ reapply_instance() {
         return 0
     }
     load_instance_config "${SELECTED_PORT}" || { pause_screen; return 1; }
+    print_section "重新应用实例规则：${REAL_PORT}"
+    ui_kv "真实端口" "${REAL_PORT}/udp"
+    ui_kv "跳跃范围" "${RANGE_START}-${RANGE_END}/udp"
+    ui_kv "nftables 表" "inet ${NFT_TABLE_NAME}"
+    ui_kv "systemd 服务" "$(get_service_name "${REAL_PORT}")"
     install_nftables_if_needed
     case "$?" in
         0) ;;
@@ -980,20 +1033,27 @@ remove_instance() {
         return 0
     }
     load_instance_config "${SELECTED_PORT}" || { pause_screen; return 1; }
-    local service cfg answer
+    local service cfg
     service="$(get_service_name "${REAL_PORT}")"
     cfg="$(get_config_file "${REAL_PORT}")"
 
-    print_section "删除实例：${REAL_PORT}"
-    echo "即将删除："
-    echo "  配置：${cfg}"
-    echo "  nftables 表：inet ${NFT_TABLE_NAME}"
-    echo "  nftables 文件：${NFT_RULE_FILE}"
-    echo "  systemd 服务：${service}"
-    echo "  UFW 规则：${REAL_PORT}/udp 与 ${RANGE_START}:${RANGE_END}/udp"
-    echo
-    read_prompt answer "确认删除该实例？输入 DELETE 继续： "
-    [ "${answer}" = "DELETE" ] || { print_warn "已取消删除。"; pause_screen; return 0; }
+    print_section "高风险操作确认"
+    ui_blank
+    print_warn "此操作将删除当前 TUIC Port-Hopping 实例，并移除对应 nftables / systemd / UFW 配置。"
+    ui_blank
+    ui_print "影响范围："
+    ui_kv "配置文件" "${cfg}"
+    ui_kv "nftables 表" "inet ${NFT_TABLE_NAME}"
+    ui_kv "nftables 文件" "${NFT_RULE_FILE}"
+    ui_kv "systemd 服务" "${service}"
+    ui_kv "UFW 规则" "${REAL_PORT}/udp 与 ${RANGE_START}:${RANGE_END}/udp"
+    ui_blank
+    ui_confirm_token "请输入 DELETE 确认删除，或输入 q 取消： " "DELETE"
+    case "$?" in
+        0) ;;
+        "${UI_RETURN_TO_MENU}") return 0 ;;
+        *) print_warn "已取消删除。"; pause_screen; return 0 ;;
+    esac
 
     systemctl disable --now "${service}" >/dev/null 2>&1 || true
     if check_command_exists nft && nft list table inet "${NFT_TABLE_NAME}" >/dev/null 2>&1; then
@@ -1008,12 +1068,24 @@ remove_instance() {
 
 remove_all_instances() {
     print_title
-    print_section "删除全部实例"
     show_instance_table || { pause_screen; return 0; }
-    echo
-    local answer
-    read_prompt answer "确认删除全部实例？输入 DELETE-ALL 继续： "
-    [ "${answer}" = "DELETE-ALL" ] || { print_warn "已取消删除。"; pause_screen; return 0; }
+    print_section "高风险操作确认"
+    ui_blank
+    print_warn "此操作将删除全部 TUIC Port-Hopping 实例，并移除通用 apply 脚本与 systemd 模板。"
+    ui_blank
+    ui_print "影响范围："
+    ui_kv "实例目录" "${INSTANCE_DIR}"
+    ui_kv "通用脚本" "${APPLY_SCRIPT}"
+    ui_kv "systemd 模板" "${SYSTEMD_TEMPLATE}"
+    ui_kv "nftables 文件" "${NFT_RULE_DIR}/tuic-port-hopping-*.nft"
+    ui_kv "UFW 规则" "所有实例对应 UDP 规则"
+    ui_blank
+    ui_confirm_token "请输入 DELETE-ALL 确认删除全部实例，或输入 q 取消： " "DELETE-ALL"
+    case "$?" in
+        0) ;;
+        "${UI_RETURN_TO_MENU}") return 0 ;;
+        *) print_warn "已取消删除。"; pause_screen; return 0 ;;
+    esac
 
     local port cfg real start end table nft_file service
     while read -r port; do
