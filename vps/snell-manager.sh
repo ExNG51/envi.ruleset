@@ -686,6 +686,117 @@ restore_path_for_rollback() {
     cp -a "${backup_path}" "${target_path}"
 }
 
+has_current_snell_installation() {
+    [ -f "${SNELL_BINARY_PATH}" ] \
+        || [ -f "${SNELL_CONFIG_FILE}" ] \
+        || [ -f "${SNELL_VERSION_FILE}" ] \
+        || [ -f "${SNELL_SERVICE_FILE}" ]
+}
+
+backup_snell_installation_for_rollback() {
+    local __binary_var="$1" __config_var="$2" __version_var="$3" __service_var="$4"
+    local saved_binary_backup="" saved_config_backup="" saved_version_backup="" saved_service_backup=""
+
+    saved_binary_backup="$(backup_path_for_rollback "${SNELL_BINARY_PATH}")" || return 1
+    saved_config_backup="$(backup_path_for_rollback "${SNELL_CONFIG_FILE}")" || return 1
+    saved_version_backup="$(backup_path_for_rollback "${SNELL_VERSION_FILE}")" || return 1
+    saved_service_backup="$(backup_path_for_rollback "${SNELL_SERVICE_FILE}")" || return 1
+
+    if [ -z "${saved_binary_backup}" ] && [ -z "${saved_config_backup}" ] && [ -z "${saved_version_backup}" ] && [ -z "${saved_service_backup}" ]; then
+        return 1
+    fi
+
+    printf -v "${__binary_var}" '%s' "${saved_binary_backup}"
+    printf -v "${__config_var}" '%s' "${saved_config_backup}"
+    printf -v "${__version_var}" '%s' "${saved_version_backup}"
+    printf -v "${__service_var}" '%s' "${saved_service_backup}"
+}
+
+rollback_snell_installation_change() {
+    local binary_backup="$1" config_backup="$2" version_backup="$3" service_backup="$4"
+    local rollback_failed=0
+
+    ui_warn "安装 / 覆盖安装失败，正在恢复旧 Snell 状态。"
+
+    if [ -n "${binary_backup}" ]; then
+        restore_path_for_rollback "${binary_backup}" "${SNELL_BINARY_PATH}" || {
+            ui_error "旧二进制恢复失败：${binary_backup}"
+            rollback_failed=1
+        }
+    elif [ -e "${SNELL_BINARY_PATH}" ]; then
+        rm -f "${SNELL_BINARY_PATH}" 2>/dev/null || {
+            ui_error "新二进制清理失败：${SNELL_BINARY_PATH}"
+            rollback_failed=1
+        }
+    fi
+
+    if [ -n "${config_backup}" ]; then
+        restore_path_for_rollback "${config_backup}" "${SNELL_CONFIG_FILE}" || {
+            ui_error "旧配置恢复失败：${config_backup}"
+            rollback_failed=1
+        }
+    elif [ -e "${SNELL_CONFIG_FILE}" ]; then
+        rm -f "${SNELL_CONFIG_FILE}" 2>/dev/null || {
+            ui_error "新配置清理失败：${SNELL_CONFIG_FILE}"
+            rollback_failed=1
+        }
+    fi
+
+    if [ -n "${version_backup}" ]; then
+        restore_path_for_rollback "${version_backup}" "${SNELL_VERSION_FILE}" || {
+            ui_error "旧版本文件恢复失败：${version_backup}"
+            rollback_failed=1
+        }
+    elif [ -e "${SNELL_VERSION_FILE}" ]; then
+        rm -f "${SNELL_VERSION_FILE}" 2>/dev/null || {
+            ui_error "新版本文件清理失败：${SNELL_VERSION_FILE}"
+            rollback_failed=1
+        }
+    fi
+
+    if [ -n "${service_backup}" ]; then
+        restore_path_for_rollback "${service_backup}" "${SNELL_SERVICE_FILE}" || {
+            ui_error "旧 systemd service 恢复失败：${service_backup}"
+            rollback_failed=1
+        }
+    elif [ -e "${SNELL_SERVICE_FILE}" ]; then
+        rm -f "${SNELL_SERVICE_FILE}" 2>/dev/null || {
+            ui_error "新 systemd service 清理失败：${SNELL_SERVICE_FILE}"
+            rollback_failed=1
+        }
+    fi
+
+    rm -f "${SNELL_BINARY_PATH}.new" 2>/dev/null || true
+    systemctl daemon-reload >/dev/null 2>&1 || true
+
+    if [ -n "${service_backup}" ] || [ -f "${SNELL_SERVICE_FILE}" ]; then
+        if systemctl restart snell >/dev/null 2>&1; then
+            ui_ok "旧 Snell 服务已恢复运行。"
+        else
+            ui_error "旧 Snell 服务未能自动恢复，请立即手动检查。"
+            ui_warn "建议执行："
+            ui_print "journalctl -u snell -n 80 --no-pager"
+            ui_print "systemctl status snell --no-pager"
+            ui_print "systemctl restart snell"
+            return 1
+        fi
+    fi
+
+    if [ "${rollback_failed}" -ne 0 ]; then
+        ui_error "旧 Snell 状态未完全恢复，请根据上方错误信息手动检查。"
+        return 1
+    fi
+
+    return 0
+}
+
+cleanup_failed_fresh_snell_installation() {
+    ui_warn "全新安装未完成，正在清理明显的不完整文件。"
+    rm -f "${SNELL_BINARY_PATH}.new" 2>/dev/null || true
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    ui_warn "如需重新安装，请再次运行安装菜单。"
+}
+
 restore_snell_config_after_failed_change() {
     local config_backup="$1"
 
