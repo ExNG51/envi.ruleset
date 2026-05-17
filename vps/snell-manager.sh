@@ -66,6 +66,8 @@ LEGACY_SERVICE_STATE="inactive"
 LEGACY_WAS_ACTIVE=false
 UI_RETURN_TO_MENU=130
 RETURN_TO_MENU="${UI_RETURN_TO_MENU}"
+UNINSTALL_MODE_STANDARD="standard"
+UNINSTALL_MODE_PURGE="purge"
 
 ui_init_colors() {
     UI_COLOR_RESET='\033[0m'
@@ -575,6 +577,17 @@ append_report_item() {
     else
         printf -v "${__var_name}" '%s' "${item}"
     fi
+}
+
+append_report_item_once() {
+    local __var_name="$1" item="$2"
+    local current_value="${!__var_name:-}"
+
+    if [ -n "${current_value}" ] && printf '%s\n' "${current_value}" | grep -Fqx -- "${item}"; then
+        return 0
+    fi
+
+    append_report_item "${__var_name}" "${item}"
 }
 
 validate_protocol_version() {
@@ -2097,6 +2110,190 @@ apply_network_tuning() {
         pause_screen
     fi
     return 0
+}
+
+choose_uninstall_mode() {
+    local choice="" read_rc=0
+
+    while true; do
+        ui_section "选择卸载模式"
+        ui_menu_item 1 "标准卸载：删除服务和二进制，保留配置目录（推荐）"
+        ui_menu_item 2 "完全清理：删除服务、二进制、配置目录、备份、rollback 和网络优化"
+        ui_menu_item 0 "返回上一级"
+        ui_blank
+        ui_dim "子菜单：输入 0 返回上一级。"
+        ui_dim "普通输入：输入 q 取消当前操作。"
+        ui_blank
+
+        ui_read_submenu_choice choice
+        read_rc=$?
+        if [ "${read_rc}" -ne 0 ]; then
+            return "${read_rc}"
+        fi
+
+        case "${choice}" in
+            1)
+                printf '%s\n' "${UNINSTALL_MODE_STANDARD}"
+                return 0
+                ;;
+            2)
+                printf '%s\n' "${UNINSTALL_MODE_PURGE}"
+                return 0
+                ;;
+            0)
+                return "${RETURN_TO_MENU}"
+                ;;
+            *)
+                ui_error "无效选项，请输入 0 到 2。"
+                ;;
+        esac
+    done
+}
+
+show_uninstall_plan() {
+    local mode="$1"
+    local mode_label="标准卸载（推荐）"
+
+    if [ "${mode}" = "${UNINSTALL_MODE_PURGE}" ]; then
+        mode_label="完全清理"
+    fi
+
+    ui_section "卸载计划"
+    ui_kv "卸载模式" "${mode_label}"
+    ui_blank
+    ui_print "将停止 / 禁用："
+    ui_print "- snell"
+    ui_print "- snell-server"
+    ui_blank
+    ui_print "将删除："
+    ui_print "- ${SNELL_SERVICE_FILE}"
+    ui_print "- ${OLD_SNELL_SERVICE_FILE}"
+    ui_print "- ${SNELL_BINARY_PATH}"
+
+    if [ "${mode}" = "${UNINSTALL_MODE_PURGE}" ]; then
+        ui_print "- ${SNELL_CONFIG_DIR}"
+        ui_print "- ${SNELL_SYSCTL_FILE}"
+        ui_blank
+        ui_warn "完全清理会删除配置、备份、rollback 文件和网络优化文件。"
+        ui_warn "执行后无法依赖本脚本恢复原配置。"
+    else
+        ui_blank
+        ui_print "将保留："
+        ui_print "- ${SNELL_CONFIG_DIR}"
+        ui_print "- ${SNELL_CONFIG_FILE}"
+        ui_print "- ${SNELL_VERSION_FILE}"
+        ui_print "- ${SNELL_SYSCTL_FILE}"
+        ui_print "- *.bak.* / *.rollback.* 恢复材料"
+    fi
+}
+
+disable_service_with_report() {
+    local service_name="$1" __residual_var="$2"
+
+    if systemctl disable --now "${service_name}" >/dev/null 2>&1; then
+        ui_ok "服务已停止并取消启用：${service_name}"
+    else
+        ui_warn "服务停止 / disable 失败或不存在：${service_name}"
+        append_report_item_once "${__residual_var}" "systemctl disable --now ${service_name}"
+    fi
+}
+
+remove_file_with_report() {
+    local file_path="$1" __residual_var="$2"
+
+    if [ ! -e "${file_path}" ]; then
+        ui_dim "未发现：${file_path}"
+        return 0
+    fi
+
+    if rm -f "${file_path}"; then
+        ui_ok "已删除：${file_path}"
+    else
+        ui_warn "删除失败：${file_path}"
+        append_report_item_once "${__residual_var}" "rm -f '${file_path}'"
+    fi
+}
+
+remove_dir_with_report() {
+    local dir_path="$1" __residual_var="$2"
+
+    if [ ! -e "${dir_path}" ]; then
+        ui_dim "未发现：${dir_path}"
+        return 0
+    fi
+
+    if rm -rf "${dir_path}"; then
+        ui_ok "已删除目录：${dir_path}"
+    else
+        ui_warn "目录删除失败：${dir_path}"
+        append_report_item_once "${__residual_var}" "rm -rf '${dir_path}'"
+    fi
+}
+
+reload_systemd_with_report() {
+    local __residual_var="$1"
+
+    if systemctl daemon-reload >/dev/null 2>&1; then
+        ui_ok "systemd daemon-reload 已完成。"
+    else
+        ui_warn "systemd daemon-reload 失败。"
+        append_report_item_once "${__residual_var}" "systemctl daemon-reload"
+    fi
+}
+
+reload_sysctl_with_report() {
+    local __residual_var="$1"
+
+    if sysctl --system >/dev/null 2>&1; then
+        ui_ok "sysctl --system 已完成。"
+    else
+        ui_warn "sysctl --system 执行失败。"
+        append_report_item_once "${__residual_var}" "sysctl --system"
+    fi
+}
+
+check_snell_uninstall_residuals() {
+    local mode="$1" __residual_var="$2"
+
+    if systemctl is-active --quiet snell 2>/dev/null; then
+        append_report_item_once "${__residual_var}" "systemctl disable --now snell"
+    fi
+
+    if systemctl is-enabled --quiet snell 2>/dev/null; then
+        append_report_item_once "${__residual_var}" "systemctl disable --now snell"
+    fi
+
+    if systemctl is-active --quiet snell-server 2>/dev/null; then
+        append_report_item_once "${__residual_var}" "systemctl disable --now snell-server"
+    fi
+
+    if systemctl is-enabled --quiet snell-server 2>/dev/null; then
+        append_report_item_once "${__residual_var}" "systemctl disable --now snell-server"
+    fi
+
+    [ -e "${SNELL_SERVICE_FILE}" ] && append_report_item_once "${__residual_var}" "rm -f '${SNELL_SERVICE_FILE}'"
+    [ -e "${OLD_SNELL_SERVICE_FILE}" ] && append_report_item_once "${__residual_var}" "rm -f '${OLD_SNELL_SERVICE_FILE}'"
+    [ -e "${SNELL_BINARY_PATH}" ] && append_report_item_once "${__residual_var}" "rm -f '${SNELL_BINARY_PATH}'"
+
+    if [ "${mode}" = "${UNINSTALL_MODE_PURGE}" ]; then
+        [ -e "${SNELL_CONFIG_DIR}" ] && append_report_item_once "${__residual_var}" "rm -rf '${SNELL_CONFIG_DIR}'"
+        [ -e "${SNELL_SYSCTL_FILE}" ] && append_report_item_once "${__residual_var}" "rm -f '${SNELL_SYSCTL_FILE}'"
+    fi
+}
+
+show_uninstall_result() {
+    local residual_items="$1"
+
+    ui_blank
+    if [ -n "${residual_items}" ]; then
+        ui_warn "卸载流程已执行，但存在残留或需要人工确认的项目："
+        ui_warn "请按需手动处理以下命令："
+        while IFS= read -r item; do
+            [ -n "${item}" ] && ui_print "${item}"
+        done <<< "${residual_items}"
+    else
+        ui_ok "卸载目标已完成，未发现目标残留。"
+    fi
 }
 
 uninstall_snell() {
