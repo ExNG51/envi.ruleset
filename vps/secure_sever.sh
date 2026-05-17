@@ -713,6 +713,51 @@ get_current_ip() {
     ok "使用手动输入 IP/CIDR: ${CURRENT_IP}"
 }
 
+prompt_fail2ban_ignore_ip() {
+    local choice=""
+    local manual_ip=""
+    while true; do
+        ui_section "Fail2ban 忽略来源"
+        ui_print "请选择是否将当前维护来源加入 ignoreip："
+        ui_blank
+        ui_menu_item 1 "自动检测当前外部 IP/CIDR 并加入 ignoreip（推荐）"
+        ui_menu_item 2 "手动输入 IPv4/CIDR"
+        ui_menu_item 3 "不加入额外 ignoreip"
+        ui_menu_item 0 "返回上一级"
+        ui_blank
+        ui_dim "子菜单：输入 0 返回上一级。"
+        ui_dim "普通输入：输入 q 取消当前操作。"
+        ui_blank
+        ui_read_or_cancel choice "请输入选项编号（0 返回，q 取消）： " || return "$?"
+        case "$choice" in
+            0)
+                return "$INPUT_CANCELLED"
+                ;;
+            1)
+                get_current_ip || return "$?"
+                return 0
+                ;;
+            2)
+                manual_ip="$(prompt_required "请输入要加入 ignoreip 的 IPv4/CIDR")" || return "$?"
+                if ! is_ipv4_or_cidr "${manual_ip}"; then
+                    ui_error "IP/CIDR 格式无效：${manual_ip}"
+                    continue
+                fi
+                CURRENT_IP="${manual_ip}"
+                return 0
+                ;;
+            3)
+                CURRENT_IP=""
+                ui_warn "未加入额外 ignoreip。若远程维护 IP 触发失败登录，可能被 Fail2ban 封禁。"
+                return 0
+                ;;
+            *)
+                ui_error "无效选项，请输入 0 到 3。"
+                ;;
+        esac
+    done
+}
+
 find_ssh_log_or_backend() {
     local found=false
     local service_unit=""
@@ -1110,6 +1155,18 @@ configure_fail2ban() {
     section "步骤 3: 配置 Fail2ban"
     require_command fail2ban-client || return 1
     require_command systemctl || return 1
+    ensure_ufw_banaction_ready || {
+        case "$?" in
+            "$INPUT_CANCELLED") info "已取消当前操作，返回上一级。"; return "$INPUT_CANCELLED" ;;
+            *) return 1 ;;
+        esac
+    }
+    prompt_fail2ban_ignore_ip || {
+        case "$?" in
+            "$INPUT_CANCELLED") info "已取消当前操作，返回上一级。"; return "$INPUT_CANCELLED" ;;
+            *) return 1 ;;
+        esac
+    }
 
     if [[ -z "$DETECTED_SSH_PORT" ]]; then
         detect_ssh_port || {
@@ -1130,6 +1187,7 @@ configure_fail2ban() {
     ui_kv "SSH 端口" "${DETECTED_SSH_PORT:-unknown}/tcp"
     ui_kv "后端" "$FAIL2BAN_BACKEND"
     ui_kv "日志路径" "${logpath:-默认/systemd}"
+    ui_kv "额外 ignoreip" "${CURRENT_IP:-无}"
     ui_kv "服务重启" "fail2ban"
     ui_kv "备份目录" "$BACKUP_DIR"
     ui_kv "Dry-run" "$(get_dry_run_status_text)"
@@ -1354,6 +1412,21 @@ get_ufw_state() {
     fi
     state="$(ufw status 2>/dev/null | awk -F': ' '/^Status:/ { print $2; exit }')"
     printf '%s' "${state:-unknown}"
+}
+
+ensure_ufw_banaction_ready() {
+    local state=""
+    require_command ufw || {
+        ui_error "当前 Fail2ban 配置使用 banaction = ufw，但未检测到 ufw。"
+        ui_warn "请先执行依赖安装 / UFW 配置，或手动安装 ufw。"
+        return 1
+    }
+    state="$(get_ufw_state)"
+    if [[ "${state}" != "active" ]]; then
+        ui_warn "UFW 当前状态为 ${state}。Fail2ban 可写入配置，但 ban 动作可能不会实际生效。"
+        ui_confirm "是否仍然继续写入 Fail2ban 配置" "n" || return "$?"
+    fi
+    return 0
 }
 
 get_fail2ban_state() {
