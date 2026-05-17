@@ -276,7 +276,7 @@ ui_confirm_or_yes() {
 
 ui_confirm_token() {
     local prompt="$1" token="$2" answer
-    ui_read_raw answer "${prompt} 输入 ${token} 继续： "
+    ui_read_raw answer "${prompt} 输入 ${token} 继续，或输入 q 取消： "
     ui_is_cancel "${answer}" && return "${UI_RETURN_TO_MENU}"
     [[ "${answer}" == "${token}" ]]
 }
@@ -341,7 +341,6 @@ ui_submenu_hint() {
 }
 
 ui_menu_footer() {
-    echo
     ui_dim "主菜单：输入 0 退出脚本。子菜单：输入 0 返回上一级。"
     ui_dim "普通输入：输入 q 取消当前操作。"
 }
