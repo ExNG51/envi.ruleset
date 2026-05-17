@@ -24,8 +24,8 @@ SYSTEMD_TEMPLATE="/etc/systemd/system/tuic-port-hopping@.service"
 NFT_TABLE_PREFIX="tuic_hopping_"
 
 UI_TITLE_WIDTH=60
-UI_KV_LABEL_WIDTH=16
-UI_RETURN_TO_MENU=2
+UI_KV_LABEL_WIDTH=18
+UI_RETURN_TO_MENU=130
 
 UI_COLOR_RESET=""
 UI_COLOR_RED=""
@@ -46,6 +46,7 @@ COLOR_BOLD=""
 COLOR_DIM=""
 
 PROMPT_FD=0
+COMMAND="menu"
 
 ui_support_color() {
     [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-}" != "dumb" ]
@@ -191,6 +192,26 @@ ui_pause() {
 
 page_title() {
     ui_title "TUIC Port-Hopping 多实例管理脚本" "${SCRIPT_VERSION}"
+}
+
+show_help() {
+    cat <<'EOF'
+TUIC Port-Hopping 多实例管理脚本
+用法：
+  sudo bash tuic-port-hopping-manager.sh [command]
+  sudo bash tuic-port-hopping-manager.sh [options]
+命令：
+  menu       打开交互式管理菜单（默认）
+选项：
+  -h, --help 显示帮助并退出
+交互语义：
+  主菜单输入 0 退出脚本。
+  子菜单输入 0 返回上一级。
+  普通输入中输入 q 取消当前操作。
+说明：
+  该脚本用于为 sing-box / 233boy/sing-box 创建的单端口 TUIC inbound
+  增加服务端 Port-Hopping 支持。每个真实 TUIC UDP 端口对应一个独立实例。
+EOF
 }
 
 init_prompt_input() {
@@ -1145,12 +1166,58 @@ show_main_menu() {
     done
 }
 
-main() {
-    require_root
-    ui_init_colors
-    init_prompt_input
-    ensure_directories
-    show_main_menu
+parse_arguments() {
+    COMMAND="menu"
+
+    if [ "$#" -eq 0 ] && [ -z "${BASH_SOURCE[0]:-}" ]; then
+        case "${0:-}" in
+            -h|--help|menu)
+                set -- "${0}"
+                ;;
+        esac
+    fi
+
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            -h|--help)
+                COMMAND="help"
+                shift
+                ;;
+            menu)
+                COMMAND="menu"
+                shift
+                ;;
+            *)
+                ui_error "未知参数：$1"
+                show_help
+                exit 1
+                ;;
+        esac
+    done
 }
 
-main "$@"
+main() {
+    ui_init_colors
+    init_prompt_input
+    parse_arguments "$@"
+
+    case "${COMMAND}" in
+        help)
+            show_help
+            return 0
+            ;;
+        menu)
+            require_root
+            ensure_directories
+            show_main_menu
+            ;;
+        *)
+            ui_error "未知命令：${COMMAND}"
+            return 1
+            ;;
+    esac
+}
+
+if [[ -z "${BASH_SOURCE[0]:-}" || "${BASH_SOURCE[0]:-}" == "$0" ]]; then
+    main "$@"
+fi
