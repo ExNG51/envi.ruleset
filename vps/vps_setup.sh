@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-set -Eeuo pipefail
 
 # ==============================================================================
 # 脚本意图: VPS 通用初始化入口，支持独立公网 IP 与 NAT VPS 两种 profile
@@ -235,17 +234,30 @@ show_usage() {
 VPS 初始化向导
 
 用法：
-  sudo bash vps_setup.sh [options]
+  sudo bash vps_setup.sh [选项]
 
-Options:
+命令：
+  sudo bash vps_setup.sh --profile public
+  sudo bash vps_setup.sh --profile nat --yes
+  sudo bash vps_setup.sh --profile public --ssh-port 2222
+
+选项：
   --profile public|nat       VPS 类型。public=独立公网 IP，nat=NAT VPS。
   --timezone Zone/Name       设置时区，默认 Asia/Singapore。
-  --yes                      非交互执行，公共可选组件默认不安装，并跳过执行前确认。
+  --yes                      自动确认普通执行步骤；不会自动重启系统。
   --install-docker           public profile 可选：通过系统包管理器安装 Docker。
   --install-nodejs           public profile 可选：通过系统包管理器安装 Node.js/npm。
   --install-cloud-kernel     public profile 可选：Debian 安装 linux-image-cloud-amd64。
   --ssh-port PORT            public profile 可选：新增 SSH 监听端口，并保留已有端口。
   -h, --help                 显示帮助。
+
+交互语义：
+  q/Q                        取消当前一次性向导。
+  回车                       仅在提示明确写有“回车使用默认值”时使用默认值。
+
+说明：
+  --help 不需要 root，不会修改系统。
+  --yes 会跳过普通确认，但重启仍需显式确认，默认不重启。
 EOF
 }
 
@@ -276,6 +288,31 @@ init_prompt_input() {
 
 read_prompt() {
     ui_read_raw "$@"
+}
+
+read_or_cancel() {
+    local __roc_result_var="$1"
+    local __roc_prompt_text="$2"
+    local __roc_value=""
+
+    read_prompt __roc_value "${__roc_prompt_text}" || return "$?"
+    if ui_is_cancel "${__roc_value}"; then
+        return "${UI_RETURN_TO_MENU:-130}"
+    fi
+
+    printf -v "${__roc_result_var}" '%s' "${__roc_value}"
+}
+
+read_with_default() {
+    local __rwd_result_var="$1"
+    local __rwd_prompt_text="$2"
+    local __rwd_default_value="$3"
+    local __rwd_value=""
+
+    read_or_cancel __rwd_value "${__rwd_prompt_text}（默认 ${__rwd_default_value}，回车使用默认值，q 取消）： " || return "$?"
+    __rwd_value="${__rwd_value:-${__rwd_default_value}}"
+
+    printf -v "${__rwd_result_var}" '%s' "${__rwd_value}"
 }
 
 prompt_yes_no() {
@@ -432,11 +469,16 @@ select_vps_profile() {
         ui_menu_item "1" "public - 独立公网 IP VPS"
         ui_menu_item "2" "nat - NAT VPS / 共享公网出口"
         ui_blank
-        read_prompt selected_profile "请输入 VPS 类型编号（1-2，q 取消）： "
+        read_or_cancel selected_profile "请输入 VPS 类型编号（1-2，q 取消）： " || {
+            local status=$?
+            if [ "${status}" -eq "${UI_RETURN_TO_MENU}" ]; then
+                cancel_script
+            fi
+            return "${status}"
+        }
         case "${selected_profile}" in
             1) GLOBAL_PROFILE="public" ;;
             2) GLOBAL_PROFILE="nat" ;;
-            q|Q) cancel_script ;;
             0) ui_warn "一次性向导请使用 q 取消。" ;;
             *) ui_warn "无效选项，请输入 1、2 或 q。" ;;
         esac
@@ -474,6 +516,8 @@ show_execution_summary() {
     ui_section "执行摘要"
     ui_kv "VPS 类型" "${GLOBAL_PROFILE}"
     ui_kv "运行模式" "$(get_run_mode)"
+    ui_kv "自动确认" "$(format_bool_cn "${GLOBAL_ASSUME_YES}")"
+    ui_kv "自动重启" "否"
     ui_kv "系统时区" "${GLOBAL_TIMEZONE}"
     ui_kv "安装 Docker" "$(format_bool_cn "${GLOBAL_INSTALL_DOCKER}")"
     ui_kv "安装 Node.js/npm" "$(format_bool_cn "${GLOBAL_INSTALL_NODEJS}")"
@@ -484,6 +528,9 @@ show_execution_summary() {
         ui_kv "SSH 端口" "不修改"
     fi
     ui_kv "自动任务" "Swap / 时区 / 基础工具 / 网络调优 / 清理"
+    if [ "${GLOBAL_ASSUME_YES}" = true ]; then
+        ui_warn "--yes 不会自动重启系统，重启仍需显式确认且默认不重启。"
+    fi
 }
 
 confirm_execution_plan() {
@@ -1056,6 +1103,7 @@ confirm_reboot() {
 
     ui_section "重启确认"
     ui_warn "部分系统配置可能需要重启后完全生效。"
+    ui_warn "即使启用了 --yes，脚本也不会自动重启系统。"
     ui_blank
     if ui_confirm_or_default "是否立即重启系统？" "n" "${GLOBAL_ASSUME_YES}"; then
         ui_info "系统将在 5 秒后执行重启指令..."
@@ -1101,6 +1149,7 @@ execute_main_lifecycle() {
 }
 
 main() {
+    set -Eeuo pipefail
     trap 'handle_unexpected_error "$LINENO"' ERR
     ui_init_colors
     ui_init_prompt_input
