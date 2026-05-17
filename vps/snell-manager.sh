@@ -2113,11 +2113,12 @@ apply_network_tuning() {
 }
 
 choose_uninstall_mode() {
+    local __result_var="$1"
     local choice="" read_rc=0
 
     while true; do
         ui_section "选择卸载模式"
-        ui_menu_item 1 "标准卸载：删除服务和二进制，保留配置目录（推荐）"
+        ui_menu_item 1 "标准卸载：删除服务和二进制，保留配置目录"
         ui_menu_item 2 "完全清理：删除服务、二进制、配置目录、备份、rollback 和网络优化"
         ui_menu_item 0 "返回上一级"
         ui_blank
@@ -2133,11 +2134,11 @@ choose_uninstall_mode() {
 
         case "${choice}" in
             1)
-                printf '%s\n' "${UNINSTALL_MODE_STANDARD}"
+                printf -v "${__result_var}" '%s' "${UNINSTALL_MODE_STANDARD}"
                 return 0
                 ;;
             2)
-                printf '%s\n' "${UNINSTALL_MODE_PURGE}"
+                printf -v "${__result_var}" '%s' "${UNINSTALL_MODE_PURGE}"
                 return 0
                 ;;
             0)
@@ -2152,7 +2153,7 @@ choose_uninstall_mode() {
 
 show_uninstall_plan() {
     local mode="$1"
-    local mode_label="标准卸载（推荐）"
+    local mode_label="标准卸载"
 
     if [ "${mode}" = "${UNINSTALL_MODE_PURGE}" ]; then
         mode_label="完全清理"
@@ -2310,7 +2311,8 @@ uninstall_snell() {
 
     local mode="" mode_rc=0 residual_items="" reload_sysctl=false
 
-    mode="$(choose_uninstall_mode)"
+    mode=""
+    choose_uninstall_mode mode
     mode_rc=$?
     if [ "${mode_rc}" -ne 0 ]; then
         return "${mode_rc}"
