@@ -2192,9 +2192,12 @@ disable_service_with_report() {
 
     if systemctl disable --now "${service_name}" >/dev/null 2>&1; then
         ui_ok "服务已停止并取消启用：${service_name}"
-    else
-        ui_warn "服务停止 / disable 失败或不存在：${service_name}"
+    elif systemctl is-active --quiet "${service_name}" 2>/dev/null \
+        || systemctl is-enabled --quiet "${service_name}" 2>/dev/null; then
+        ui_warn "服务停止 / disable 失败：${service_name}"
         append_report_item_once "${__residual_var}" "systemctl disable --now ${service_name}"
+    else
+        ui_dim "未发现或已停用：${service_name}"
     fi
 }
 
@@ -2299,24 +2302,55 @@ show_uninstall_result() {
 uninstall_snell() {
     ui_render_title
     ui_section "卸载 Snell Server"
-    ui_warn "此操作将删除以下对象："
-    ui_kv "服务" "${SNELL_SERVICE_FILE}"
-    ui_kv "旧服务" "${OLD_SNELL_SERVICE_FILE}"
-    ui_kv "二进制" "${SNELL_BINARY_PATH}"
+    ui_kv "snell 状态" "$(service_state)"
+    ui_kv "snell-server 状态" "$(legacy_service_state)"
+    ui_kv "Snell 二进制" "${SNELL_BINARY_PATH}"
     ui_kv "配置目录" "${SNELL_CONFIG_DIR}"
-    ui_kv "网络优化" "${SNELL_SYSCTL_FILE}"
     ui_blank
-    ui_confirm_token "确认卸载 Snell Server？" "DELETE" || { ui_warn "已取消卸载。"; pause_screen; return 0; }
 
-    systemctl disable --now snell >/dev/null 2>&1 || true
-    systemctl disable --now snell-server >/dev/null 2>&1 || true
-    rm -f "${SNELL_SERVICE_FILE}" "${OLD_SNELL_SERVICE_FILE}" "${SNELL_BINARY_PATH}" "${SNELL_SYSCTL_FILE}"
-    rm -rf "${SNELL_CONFIG_DIR}"
-    systemctl daemon-reload >/dev/null 2>&1 || true
-    if ! sysctl --system >/dev/null 2>&1; then
-        ui_warn "sysctl 配置重新加载失败，请手动执行 sysctl --system 检查。"
+    local mode="" mode_rc=0 residual_items="" reload_sysctl=false
+
+    mode="$(choose_uninstall_mode)"
+    mode_rc=$?
+    if [ "${mode_rc}" -ne 0 ]; then
+        return "${mode_rc}"
     fi
-    ui_ok "Snell Server 已卸载。"
+
+    show_uninstall_plan "${mode}"
+    ui_blank
+    ui_confirm_token "确认卸载 Snell Server？" "DELETE" || {
+        ui_warn "已取消卸载。"
+        pause_screen
+        return 0
+    }
+
+    if [ "${mode}" = "${UNINSTALL_MODE_PURGE}" ] && [ -e "${SNELL_SYSCTL_FILE}" ]; then
+        reload_sysctl=true
+    fi
+
+    disable_service_with_report "snell" residual_items
+    disable_service_with_report "snell-server" residual_items
+
+    remove_file_with_report "${SNELL_SERVICE_FILE}" residual_items
+    remove_file_with_report "${OLD_SNELL_SERVICE_FILE}" residual_items
+    remove_file_with_report "${SNELL_BINARY_PATH}" residual_items
+
+    if [ "${mode}" = "${UNINSTALL_MODE_PURGE}" ]; then
+        remove_dir_with_report "${SNELL_CONFIG_DIR}" residual_items
+        remove_file_with_report "${SNELL_SYSCTL_FILE}" residual_items
+    else
+        ui_ok "标准卸载已保留配置目录：${SNELL_CONFIG_DIR}"
+        ui_ok "标准卸载已保留网络优化文件：${SNELL_SYSCTL_FILE}"
+    fi
+
+    reload_systemd_with_report residual_items
+
+    if [ "${reload_sysctl}" = true ] && [ ! -e "${SNELL_SYSCTL_FILE}" ]; then
+        reload_sysctl_with_report residual_items
+    fi
+
+    check_snell_uninstall_residuals "${mode}" residual_items
+    show_uninstall_result "${residual_items}"
     pause_screen
 }
 
