@@ -709,8 +709,14 @@ install_essential_utilities() {
     display_status_info "正在验证并安装必备运维工具箱..."
 
     local dependencies=("sudo" "curl" "jq" "wget" "unzip" "ca-certificates" "${GLOBAL_BIND_UTILS}")
+    if [[ "${GLOBAL_PKG_MANAGER}" == "apt-get" ]]; then
+        dependencies+=("iproute2")
+    elif [[ "${GLOBAL_PKG_MANAGER}" == "dnf" ]]; then
+        dependencies+=("iproute")
+    fi
+
     if [[ "${GLOBAL_PROFILE}" == "public" ]]; then
-        dependencies+=("git" "vim" "net-tools")
+        dependencies+=("git" "vim")
     else
         dependencies+=("dkms")
     fi
@@ -951,13 +957,48 @@ select_ssh_port_config_file() {
 is_tcp_port_listening() {
     local port="$1"
 
+    validate_port_number "${port}" || return 1
+
     if command -v ss >/dev/null 2>&1; then
-        ss -H -ltn "sport = :${port}" 2>/dev/null | grep -q .
-    elif command -v netstat >/dev/null 2>&1; then
-        netstat -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]${port}$"
-    else
-        return 1
+        ss -H -ltn 2>/dev/null | awk -v expected_port="${port}" '
+            function extract_port(listen_addr, parts, n) {
+                n = split(listen_addr, parts, ":")
+                if (n > 1 && parts[n] ~ /^[0-9]+$/) return parts[n]
+                n = split(listen_addr, parts, ".")
+                if (n > 1 && parts[n] ~ /^[0-9]+$/) return parts[n]
+                return ""
+            }
+            {
+                if (extract_port($4) == expected_port) {
+                    found = 1
+                }
+            }
+            END { exit found ? 0 : 1 }
+        '
+        return "$?"
     fi
+
+    if command -v netstat >/dev/null 2>&1; then
+        netstat -ltn 2>/dev/null | awk -v expected_port="${port}" '
+            function extract_port(listen_addr, parts, n) {
+                n = split(listen_addr, parts, ":")
+                if (n > 1 && parts[n] ~ /^[0-9]+$/) return parts[n]
+                n = split(listen_addr, parts, ".")
+                if (n > 1 && parts[n] ~ /^[0-9]+$/) return parts[n]
+                return ""
+            }
+            NR > 2 {
+                if ($1 ~ /^tcp/ && extract_port($4) == expected_port) {
+                    found = 1
+                }
+            }
+            END { exit found ? 0 : 1 }
+        '
+        return "$?"
+    fi
+
+    display_status_warning "缺少 ss/netstat，无法验证 TCP ${port} 端口监听状态；不会将缺少探测工具视为端口未监听。"
+    return 2
 }
 
 apply_firewall_ssh_port() {
