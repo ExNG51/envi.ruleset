@@ -184,6 +184,11 @@ ui_menu_item() {
     printf ' %2s. %s\n' "${number}" "${label}"
 }
 
+ui_menu_footer() {
+    ui_dim "主菜单：输入 0 退出脚本。子菜单：输入 0 返回上一级。"
+    ui_dim "普通输入：输入 q 取消当前操作。"
+}
+
 ui_pause() {
     local _
     ui_blank
@@ -972,7 +977,7 @@ show_client_hint() {
     }
     load_instance_config "${SELECTED_PORT}" || { pause_screen; return 1; }
     ui_section "客户端配置提示：${REAL_PORT}"
-    ui_warn "下面会显示客户端连接参数。请勿在公开环境截图或转发。"
+    ui_warn "下面会显示包含敏感连接参数的客户端配置，请避免在共享屏幕、日志或工单中泄露。"
     ui_blank
     ui_print "Surge / Surgio 建议追加："
     ui_blank
@@ -1132,7 +1137,7 @@ show_main_menu() {
     local choice
     while true; do
         page_title
-        ui_info "$(build_main_status_line)"
+        ui_dim "$(build_main_status_line)"
         ui_blank
         ui_print "请选择操作："
         ui_blank
@@ -1147,8 +1152,7 @@ show_main_menu() {
         ui_menu_item 9 "删除全部实例"
         ui_menu_item 0 "退出"
         ui_blank
-        ui_print "主菜单：输入 0 退出脚本。"
-        ui_print "普通输入：输入 q 取消当前操作并返回上一级。"
+        ui_menu_footer
         ui_blank
         ui_read_menu_choice choice
         case "${choice}" in
