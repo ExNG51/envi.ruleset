@@ -663,7 +663,7 @@ prompt_port_range() {
     ui_info "根据真实端口 ${REAL_PORT} 自动生成的跳跃范围：${auto_range}"
     ui_info "可直接回车使用自动范围，也可输入自定义范围，格式为：起始端口-结束端口"
     while true; do
-        ui_read_or_cancel custom_range "请输入跳跃端口范围（回车使用 ${auto_range}，q 取消）： " || return "$?"
+        ui_read_or_cancel custom_range "请输入跳跃端口范围（默认 ${auto_range}，回车使用默认值，q 取消）： " || return "$?"
         custom_range="${custom_range:-${auto_range}}"
         validate_port_range "${custom_range}" || { ui_error "范围格式无效，请使用 start-end。"; continue; }
         RANGE_START="${custom_range%-*}"
@@ -1623,7 +1623,7 @@ show_client_hint() {
     }
     load_instance_config "${SELECTED_PORT}" || { pause_screen; return 1; }
     ui_section "客户端配置提示：${REAL_PORT}"
-    ui_warn "下面会显示包含敏感连接参数的客户端配置，请避免在共享屏幕、日志或工单中泄露。"
+    ui_warn "下面会显示包含敏感凭据的客户端配置，请避免在共享屏幕、日志或工单中泄露。"
     ui_blank
     ui_print "Surge / Surgio 建议追加："
     ui_blank
@@ -1712,22 +1712,43 @@ remove_instance() {
     ui_kv "systemd 服务" "${service}"
     ui_kv "UFW 规则" "${REAL_PORT}/udp 与 ${RANGE_START}:${RANGE_END}/udp"
     ui_blank
-    ui_confirm_token "请输入 DELETE 确认删除，或输入 q 取消： " "DELETE"
+    ui_confirm_token "确认删除当前 TUIC 实例？ 输入 DELETE 继续，或输入 q 取消： " "DELETE"
     case "$?" in
         0) ;;
         "${UI_RETURN_TO_MENU}") return 0 ;;
         *) ui_warn "已取消删除。"; pause_screen; return 0 ;;
     esac
 
-    systemctl disable --now "${service}" >/dev/null 2>&1 || true
-    if check_command_exists nft && nft list table inet "${NFT_TABLE_NAME}" >/dev/null 2>&1; then
-        nft delete table inet "${NFT_TABLE_NAME}" || true
-        ui_ok "已删除 nftables 表：inet ${NFT_TABLE_NAME}"
+    local cleanup_failed=0 residual_failed=0
+    ensure_nftables_dependency || cleanup_failed=1
+    ensure_runtime_validation_dependencies || cleanup_failed=1
+
+    disable_instance_service_with_report "${REAL_PORT}" || cleanup_failed=1
+    remove_instance_nft_runtime "${NFT_TABLE_NAME}" || cleanup_failed=1
+    remove_ufw_rules "${REAL_PORT}" "${RANGE_START}" "${RANGE_END}" || cleanup_failed=1
+
+    if rm -f "${NFT_RULE_FILE}" "${cfg}"; then
+        ui_ok "已删除实例 env/nft 文件。"
+    else
+        ui_warn "实例 env/nft 文件删除失败。"
+        show_file_manual_cleanup_commands "${cfg}" "${NFT_RULE_FILE}"
+        cleanup_failed=1
     fi
-    remove_ufw_rules "${REAL_PORT}" "${RANGE_START}" "${RANGE_END}"
-    rm -f "${NFT_RULE_FILE}" "${cfg}"
-    ui_ok "实例 ${REAL_PORT} 已删除。"
+
+    systemctl daemon-reload >/dev/null 2>&1 || {
+        ui_warn "systemd daemon-reload 失败。"
+        show_systemd_diagnostics "${REAL_PORT}"
+        cleanup_failed=1
+    }
+
+    report_instance_deletion_residuals "${REAL_PORT}" "${REAL_PORT}" "${RANGE_START}" "${RANGE_END}" "${NFT_TABLE_NAME}" "${NFT_RULE_FILE}" "${cfg}" || residual_failed=1
+    if [ "${cleanup_failed}" -eq 0 ] && [ "${residual_failed}" -eq 0 ]; then
+        ui_ok "实例 ${REAL_PORT} 删除完成，未检测到脚本管理对象残留。"
+    else
+        ui_warn "实例 ${REAL_PORT} 删除后仍存在失败项或未验证项，请按上方命令人工处理。"
+    fi
     pause_screen
+    [ "${cleanup_failed}" -eq 0 ] && [ "${residual_failed}" -eq 0 ]
 }
 
 remove_all_instances() {
@@ -1744,39 +1765,80 @@ remove_all_instances() {
     ui_kv "nftables 文件" "${NFT_RULE_DIR}/tuic-port-hopping-*.nft"
     ui_kv "UFW 规则" "所有实例对应 UDP 规则"
     ui_blank
-    ui_confirm_token "请输入 DELETE-ALL 确认删除全部实例，或输入 q 取消： " "DELETE-ALL"
+    ui_confirm_token "确认删除全部 TUIC 实例？ 输入 DELETE-ALL 继续，或输入 q 取消： " "DELETE-ALL"
     case "$?" in
         0) ;;
         "${UI_RETURN_TO_MENU}") return 0 ;;
         *) ui_warn "已取消删除。"; pause_screen; return 0 ;;
     esac
 
-    local port cfg real start end table nft_file service
-    while read -r port; do
+    local port cfg real start end table nft_file cleanup_failed=0 residual_failed=0
+    local total_count=0 clear_count=0 residual_count=0 common_failed=0
+    local port_list
+
+    ensure_nftables_dependency || cleanup_failed=1
+    ensure_runtime_validation_dependencies || cleanup_failed=1
+
+    port_list="$(list_instances)"
+    for port in ${port_list}; do
         [ -n "${port}" ] || continue
+        total_count=$((total_count + 1))
         cfg="$(get_config_file "${port}")"
         real="$(read_env_value "${cfg}" "REAL_PORT" || true)"
         start="$(read_env_value "${cfg}" "RANGE_START" || true)"
         end="$(read_env_value "${cfg}" "RANGE_END" || true)"
         table="$(read_env_value "${cfg}" "NFT_TABLE_NAME" || true)"
         nft_file="$(read_env_value "${cfg}" "NFT_RULE_FILE" || true)"
-        service="$(get_service_name "${port}")"
-        systemctl disable --now "${service}" >/dev/null 2>&1 || true
-        if check_command_exists nft && [ -n "${table}" ] && nft list table inet "${table}" >/dev/null 2>&1; then
-            nft delete table inet "${table}" || true
-        fi
-        if [ -n "${real}" ] && [ -n "${start}" ] && [ -n "${end}" ]; then
-            remove_ufw_rules "${real}" "${start}" "${end}"
-        fi
-        rm -f "${nft_file}" "${cfg}"
-        ui_ok "已删除实例：${port}"
-    done < <(list_instances)
+        real="${real:-${port}}"
+        table="${table:-$(get_nft_table_name "${port}")}"
+        nft_file="${nft_file:-$(get_nft_rule_file "${port}")}"
 
-    rm -f "${APPLY_SCRIPT}" "${SYSTEMD_TEMPLATE}"
-    systemctl daemon-reload >/dev/null 2>&1 || true
-    rmdir "${INSTANCE_DIR}" "${BASE_DIR}" >/dev/null 2>&1 || true
-    ui_ok "全部实例已删除。"
+        ui_section "删除实例：${port}"
+        disable_instance_service_with_report "${port}" || cleanup_failed=1
+        remove_instance_nft_runtime "${table}" || cleanup_failed=1
+        if validate_instance_env_values "${real}" "${start:-}" "${end:-}"; then
+            remove_ufw_rules "${real}" "${start}" "${end}" || cleanup_failed=1
+        else
+            ui_warn "实例 ${port} 的端口范围无效，跳过 UFW 自动删除并进入残留报告。"
+            cleanup_failed=1
+            start="${start:-0}"
+            end="${end:-0}"
+        fi
+        if rm -f "${nft_file}" "${cfg}"; then
+            ui_ok "已删除实例 env/nft 文件：${port}"
+        else
+            ui_warn "实例 ${port} env/nft 文件删除失败。"
+            show_file_manual_cleanup_commands "${cfg}" "${nft_file}"
+            cleanup_failed=1
+        fi
+
+        if report_instance_deletion_residuals "${port}" "${real}" "${start}" "${end}" "${table}" "${nft_file}" "${cfg}"; then
+            clear_count=$((clear_count + 1))
+        else
+            residual_count=$((residual_count + 1))
+            residual_failed=1
+        fi
+    done
+
+    if [ "${residual_count}" -eq 0 ] && ! has_instances; then
+        cleanup_common_objects_with_report || common_failed=1
+    else
+        ui_warn "仍有实例残留或实例文件，跳过公共 apply 脚本与 systemd 模板删除。"
+        common_failed=1
+    fi
+    report_common_deletion_residuals || common_failed=1
+
+    ui_section "删除汇总"
+    ui_kv "总实例数" "${total_count}"
+    ui_kv "无残留实例" "${clear_count}"
+    ui_kv "有残留实例" "${residual_count}"
+    if [ "${cleanup_failed}" -eq 0 ] && [ "${residual_failed}" -eq 0 ] && [ "${common_failed}" -eq 0 ]; then
+        ui_ok "全部实例删除完成，未检测到脚本管理对象残留。"
+    else
+        ui_warn "删除全部实例后仍存在失败项或未验证项，请按上方命令人工处理。"
+    fi
     pause_screen
+    [ "${cleanup_failed}" -eq 0 ] && [ "${residual_failed}" -eq 0 ] && [ "${common_failed}" -eq 0 ]
 }
 
 show_main_menu() {
