@@ -923,9 +923,52 @@ rollback_snell_installation_change() {
 }
 
 cleanup_failed_fresh_snell_installation() {
-    ui_warn "全新安装未完成，正在清理明显的不完整文件。"
-    rm -f "${SNELL_BINARY_PATH}.new" 2>/dev/null || true
-    systemctl daemon-reload >/dev/null 2>&1 || true
+    local residual_items=""
+
+    ui_warn "全新安装未完成，正在清理本次创建的不完整对象。"
+
+    if systemctl disable --now snell >/dev/null 2>&1; then
+        ui_ok "新 snell 服务已停止并取消启用。"
+    elif systemctl is-active --quiet snell 2>/dev/null \
+        || systemctl is-enabled --quiet snell 2>/dev/null; then
+        ui_warn "新 snell 服务停止 / disable 失败。"
+        append_report_item_once residual_items "systemctl disable --now snell"
+    else
+        ui_dim "未发现 active/enabled 的新 snell 服务。"
+    fi
+
+    remove_file_with_report "${SNELL_SERVICE_FILE}" residual_items
+    remove_file_with_report "${SNELL_BINARY_PATH}" residual_items
+    remove_file_with_report "${SNELL_BINARY_PATH}.new" residual_items
+    remove_file_with_report "${SNELL_CONFIG_FILE}" residual_items
+    remove_file_with_report "${SNELL_VERSION_FILE}" residual_items
+
+    if [ -d "${SNELL_CONFIG_DIR}" ]; then
+        if find "${SNELL_CONFIG_DIR}" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null | grep -q .; then
+            ui_dim "配置目录非空，已保留：${SNELL_CONFIG_DIR}"
+        else
+            if rmdir "${SNELL_CONFIG_DIR}" 2>/dev/null; then
+                ui_ok "空配置目录已删除：${SNELL_CONFIG_DIR}"
+            else
+                ui_warn "空配置目录删除失败：${SNELL_CONFIG_DIR}"
+                append_report_item_once residual_items "rmdir '${SNELL_CONFIG_DIR}'"
+            fi
+        fi
+    fi
+
+    set +u
+    reload_systemd_with_report residual_items
+    set -u
+
+    if [ -n "${residual_items}" ]; then
+        ui_warn "全新安装失败清理后仍有残留，请按需手动处理："
+        while IFS= read -r item; do
+            [ -n "${item}" ] && ui_print "${item}"
+        done <<< "${residual_items}"
+    else
+        ui_ok "全新安装失败残留已清理。"
+    fi
+
     ui_warn "如需重新安装，请再次运行安装菜单。"
 }
 
@@ -1349,7 +1392,7 @@ choose_snell_version() {
     local var_name="$1" choice selected_version
     ui_print "请选择 Snell Server 版本："
     ui_blank
-    ui_menu_item 1 "v${SNELL_VERSION_DEFAULT}（默认，v5）"
+    ui_menu_item 1 "v${SNELL_VERSION_DEFAULT}（v5）"
     ui_menu_item 2 "v${SNELL_V4_VERSION}（v4）"
     ui_menu_item 3 "手动输入版本号"
     ui_menu_item 0 "返回上一级"
