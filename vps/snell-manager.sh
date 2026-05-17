@@ -686,6 +686,31 @@ restore_path_for_rollback() {
     cp -a "${backup_path}" "${target_path}"
 }
 
+restore_snell_config_after_failed_change() {
+    local config_backup="$1"
+
+    ui_warn "配置修改失败，正在恢复旧 Snell 配置。"
+
+    if ! restore_path_for_rollback "${config_backup}" "${SNELL_CONFIG_FILE}"; then
+        ui_error "旧配置恢复失败：${config_backup} -> ${SNELL_CONFIG_FILE}"
+        ui_warn "请手动检查："
+        ui_print "cp -a '${config_backup}' '${SNELL_CONFIG_FILE}'"
+        ui_print "systemctl restart snell"
+        return 1
+    fi
+
+    if restart_snell_service; then
+        ui_ok "旧配置已恢复，snell 服务已重新启动。"
+        return 0
+    fi
+
+    ui_error "旧配置已恢复，但 snell 服务重启失败。"
+    ui_warn "请手动检查："
+    ui_print "journalctl -u snell -n 80 --no-pager"
+    ui_print "systemctl status snell --no-pager"
+    return 1
+}
+
 atomic_replace_file() {
     local target="$1" mode="$2" owner_group="${3:-}" tmp_file target_dir
     target_dir="$(dirname "${target}")"
@@ -1263,6 +1288,18 @@ restart_snell_service() {
     systemctl restart snell
 }
 
+validate_snell_runtime_core() {
+    local port="${1:-}"
+
+    systemctl is-active --quiet snell 2>/dev/null || return 1
+
+    if [ -n "${port}" ] && check_command_exists ss; then
+        is_tcp_port_listening "${port}" || return 1
+    fi
+
+    return 0
+}
+
 enable_and_restart_service() {
     systemctl enable snell >/dev/null || return 1
     restart_snell_service
@@ -1406,7 +1443,7 @@ modify_snell_config() {
 
     local current_port current_psk current_ipv6 current_dns current_obfs current_obfs_host current_tfo current_protocol
     local port psk ipv6 dns obfs obfs_host tfo protocol_version
-    local confirm_rc
+    local confirm_rc config_backup new_port_for_validation
     current_port="$(get_config_port || echo "${SNELL_PORT_DEFAULT}")"
     current_psk="$(get_config_psk)"
     current_ipv6="$(get_config_ipv6)"
@@ -1437,9 +1474,39 @@ modify_snell_config() {
         return
     fi
 
-    write_snell_config "${port}" "${psk}" "${ipv6}" "${dns}" "${obfs}" "${obfs_host}" "${tfo}" "${protocol_version}" || return 1
-    restart_snell_service || return 1
-    ui_ok "配置已更新并重启服务。"
+    config_backup="$(backup_path_for_rollback "${SNELL_CONFIG_FILE}")" || {
+        ui_error "旧配置备份失败，已停止修改。"
+        pause_screen
+        return 1
+    }
+    if [ -z "${config_backup}" ]; then
+        ui_error "旧配置备份失败，未生成回滚文件。"
+        pause_screen
+        return 1
+    fi
+
+    if ! write_snell_config "${port}" "${psk}" "${ipv6}" "${dns}" "${obfs}" "${obfs_host}" "${tfo}" "${protocol_version}"; then
+        ui_error "新配置写入失败，原配置未完成替换。"
+        pause_screen
+        return 1
+    fi
+
+    if ! restart_snell_service; then
+        ui_error "新配置写入后服务重启失败。"
+        restore_snell_config_after_failed_change "${config_backup}" || true
+        pause_screen
+        return 1
+    fi
+
+    new_port_for_validation="${port}"
+    if ! validate_snell_runtime_core "${new_port_for_validation}"; then
+        ui_error "新配置重启后核心验证失败。"
+        restore_snell_config_after_failed_change "${config_backup}" || true
+        pause_screen
+        return 1
+    fi
+
+    ui_ok "配置已更新、服务已重启并通过核心验证。"
     show_client_config false
     pause_screen
 }
