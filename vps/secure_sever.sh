@@ -360,13 +360,21 @@ require_command() {
 
 show_help() {
     cat <<EOF
-用法:
+用法：
   bash secure_sever.sh [选项]
 
-选项:
-  -h, --help    显示帮助并退出
+命令：
+  不带参数    启动交互式安全加固菜单
 
-说明:
+选项：
+  -h, --help  显示帮助并退出
+
+交互语义：
+  主菜单输入 0 退出脚本
+  子菜单输入 0 返回上一级
+  普通输入中 q/Q 取消当前操作并返回上一级
+
+说明：
   该脚本用于交互式执行 Linux 安全加固流程，包括 UFW、Fail2ban 与 SSH 加固。
 EOF
 }
@@ -1206,6 +1214,85 @@ configure_ufw() {
     ok "UFW 配置流程完成。"
 }
 
+show_fail2ban_diagnostics() {
+    ui_warn "Fail2ban 诊断命令："
+    ui_print "fail2ban-client status"
+    ui_print "fail2ban-client status sshd"
+    ui_print "systemctl status fail2ban --no-pager"
+    ui_print "journalctl -u fail2ban -n 80 --no-pager"
+}
+
+show_fail2ban_recovery_commands() {
+    local backup_file="$1"
+
+    ui_warn "Fail2ban 人工恢复建议："
+    if [[ -n "$backup_file" ]]; then
+        ui_print "cp ${backup_file} ${FAIL2BAN_SSHD_LOCAL}"
+    else
+        ui_print "如确认该文件是本次失败写入的新文件，再执行：rm -f ${FAIL2BAN_SSHD_LOCAL}"
+    fi
+    ui_print "fail2ban-client -t"
+    ui_print "systemctl restart fail2ban"
+}
+
+restore_fail2ban_config() {
+    local backup_file="$1"
+
+    if [[ -n "$backup_file" ]]; then
+        restore_file_backup "$backup_file" "$FAIL2BAN_SSHD_LOCAL"
+        return "$?"
+    fi
+
+    if [[ -e "$FAIL2BAN_SSHD_LOCAL" ]]; then
+        run_cmd "移除新增 Fail2ban 配置" rm -f "$FAIL2BAN_SSHD_LOCAL"
+        return "$?"
+    fi
+
+    return 0
+}
+
+report_fail2ban_failure() {
+    local message="$1"
+    local backup_file="$2"
+
+    err "$message"
+    show_fail2ban_diagnostics
+    show_fail2ban_recovery_commands "$backup_file"
+}
+
+handle_fail2ban_failure_with_restore() {
+    local message="$1"
+    local backup_file="$2"
+
+    err "$message"
+    show_fail2ban_diagnostics
+
+    if ! restore_fail2ban_config "$backup_file"; then
+        err "Fail2ban 配置恢复失败。"
+        show_fail2ban_recovery_commands "$backup_file"
+        return 1
+    fi
+
+    ok "已恢复 Fail2ban 配置。"
+
+    if ! fail2ban-client -t; then
+        err "恢复后 Fail2ban 配置验证失败。"
+        show_fail2ban_diagnostics
+        show_fail2ban_recovery_commands "$backup_file"
+        return 1
+    fi
+
+    if ! systemctl restart fail2ban; then
+        err "恢复后 Fail2ban 服务重启失败。"
+        show_fail2ban_diagnostics
+        show_fail2ban_recovery_commands "$backup_file"
+        return 1
+    fi
+
+    ok "恢复后的 Fail2ban 配置已验证并重启服务。"
+    return 1
+}
+
 configure_fail2ban() {
     local tmp_file=""
     local backup_path=""
@@ -1256,11 +1343,20 @@ configure_fail2ban() {
 
     tmp_file="$(make_tmp_file)" || return 1
     umask 077
-    render_fail2ban_sshd_config "$DETECTED_SSH_PORT" "$CURRENT_IP" "$FAIL2BAN_BACKEND" "$logpath" > "$tmp_file"
+    if ! render_fail2ban_sshd_config "$DETECTED_SSH_PORT" "$CURRENT_IP" "$FAIL2BAN_BACKEND" "$logpath" > "$tmp_file"; then
+        report_fail2ban_failure "生成 Fail2ban 配置失败，未写入系统配置。" "$backup_path"
+        return 1
+    fi
 
-    create_backup_dir >/dev/null || return 1
+    if ! create_backup_dir >/dev/null; then
+        report_fail2ban_failure "创建 Fail2ban 备份目录失败，未写入系统配置。" "$backup_path"
+        return 1
+    fi
     if [[ -f "$FAIL2BAN_SSHD_LOCAL" ]]; then
-        backup_path="$(backup_file_if_exists "$FAIL2BAN_SSHD_LOCAL")" || return 1
+        if ! backup_path="$(backup_file_if_exists "$FAIL2BAN_SSHD_LOCAL")"; then
+            report_fail2ban_failure "备份 Fail2ban 旧配置失败，未覆盖现有配置。" "$backup_path"
+            return 1
+        fi
         info "Fail2ban 旧配置备份: $backup_path"
     fi
 
@@ -1270,25 +1366,29 @@ configure_fail2ban() {
         return 0
     fi
 
-    mkdir -p "$FAIL2BAN_JAIL_DIR" || return 1
-    install -m 0644 "$tmp_file" "$FAIL2BAN_SSHD_LOCAL" || return 1
-
-    if ! fail2ban-client -t; then
-        err "Fail2ban 配置验证失败，正在恢复。"
-        if [[ -n "$backup_path" ]]; then
-            restore_file_backup "$backup_path" "$FAIL2BAN_SSHD_LOCAL" || true
-        else
-            rm -f "$FAIL2BAN_SSHD_LOCAL"
-        fi
+    if ! mkdir -p "$FAIL2BAN_JAIL_DIR"; then
+        report_fail2ban_failure "创建 Fail2ban jail 目录失败，未写入配置。" "$backup_path"
+        return 1
+    fi
+    if ! install -m 0644 "$tmp_file" "$FAIL2BAN_SSHD_LOCAL"; then
+        handle_fail2ban_failure_with_restore "写入 Fail2ban 配置失败，正在尝试恢复。" "$backup_path"
         return 1
     fi
 
-    systemctl restart fail2ban || return 1
-    sleep 2
-    systemctl is-active --quiet fail2ban || {
-        err "Fail2ban 服务未能启动。"
+    if ! fail2ban-client -t; then
+        handle_fail2ban_failure_with_restore "Fail2ban 配置验证失败，正在尝试恢复。" "$backup_path"
         return 1
-    }
+    fi
+
+    if ! systemctl restart fail2ban; then
+        handle_fail2ban_failure_with_restore "Fail2ban 服务重启失败，正在尝试恢复。" "$backup_path"
+        return 1
+    fi
+    sleep 2
+    if ! systemctl is-active --quiet fail2ban; then
+        handle_fail2ban_failure_with_restore "Fail2ban 服务未能保持 active 状态，正在尝试恢复。" "$backup_path"
+        return 1
+    fi
     systemctl enable fail2ban >/dev/null 2>&1 || warn "Fail2ban 开机自启设置失败，请手动检查。"
     fail2ban-client status sshd || warn "无法查询 sshd jail 状态，请检查 Fail2ban 日志。"
     ok "Fail2ban 配置完成。"
