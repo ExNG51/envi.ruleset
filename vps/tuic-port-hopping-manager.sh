@@ -341,6 +341,19 @@ ranges_overlap() {
     [ "${a_start}" -le "${b_end}" ] && [ "${b_start}" -le "${a_end}" ]
 }
 
+is_port_in_range() {
+    local port="$1" start_port="$2" end_port="$3"
+    [ "${port}" -ge "${start_port}" ] && [ "${port}" -le "${end_port}" ]
+}
+
+validate_instance_env_values() {
+    local real_port="$1" start_port="$2" end_port="$3"
+    validate_port "${real_port}" || return 1
+    validate_port "${start_port}" || return 1
+    validate_port "${end_port}" || return 1
+    [ "${start_port}" -lt "${end_port}" ]
+}
+
 get_config_file() { echo "${INSTANCE_DIR}/$1.env"; }
 get_nft_table_name() { echo "${NFT_TABLE_PREFIX}$1"; }
 get_nft_rule_file() { echo "${NFT_RULE_DIR}/tuic-port-hopping-$1.nft"; }
@@ -534,18 +547,32 @@ check_range_listener_conflict() {
     [ "${found}" -eq 0 ]
 }
 
-check_instance_range_conflict() {
+check_instance_port_conflict() {
     local real_port="$1" start_port="$2" end_port="$3"
     local cfg other_port other_start other_end
     for cfg in "${INSTANCE_DIR}"/*.env; do
         [ -e "${cfg}" ] || continue
         other_port="$(read_env_value "${cfg}" "REAL_PORT" || true)"
-        [ "${other_port}" = "${real_port}" ] && continue
         other_start="$(read_env_value "${cfg}" "RANGE_START" || true)"
         other_end="$(read_env_value "${cfg}" "RANGE_END" || true)"
-        [ -n "${other_start}" ] && [ -n "${other_end}" ] || continue
+        if ! validate_instance_env_values "${other_port}" "${other_start}" "${other_end}"; then
+            ui_warn "跳过无效实例配置：${cfg}"
+            continue
+        fi
+        # 同一真实端口视为更新当前实例，允许继续。
+        if [ "${other_port}" = "${real_port}" ]; then
+            continue
+        fi
         if ranges_overlap "${start_port}" "${end_port}" "${other_start}" "${other_end}"; then
             ui_error "跳跃范围与已有实例 ${other_port} 冲突：${other_start}-${other_end}"
+            return 1
+        fi
+        if is_port_in_range "${other_port}" "${start_port}" "${end_port}"; then
+            ui_error "跳跃范围 ${start_port}-${end_port} 包含已有实例真实端口：${other_port}"
+            return 1
+        fi
+        if is_port_in_range "${real_port}" "${other_start}" "${other_end}"; then
+            ui_error "真实端口 ${real_port} 落入已有实例 ${other_port} 的跳跃范围：${other_start}-${other_end}"
             return 1
         fi
     done
@@ -576,7 +603,7 @@ prompt_port_range() {
             ui_error "跳跃范围不能包含真实端口 ${REAL_PORT}。"
             continue
         fi
-        check_instance_range_conflict "${REAL_PORT}" "${RANGE_START}" "${RANGE_END}" || continue
+        check_instance_port_conflict "${REAL_PORT}" "${RANGE_START}" "${RANGE_END}" || continue
         if ! check_range_listener_conflict "${RANGE_START}" "${RANGE_END}"; then
             ui_confirm "检测到端口占用风险，是否仍然继续" n
             case "$?" in
@@ -733,16 +760,25 @@ apply_instance_rules() {
         journalctl -u "${service}" -n 30 --no-pager 2>/dev/null || true
         return 1
     fi
-    systemctl enable "${service}" >/dev/null 2>&1
-    systemctl restart "${service}" >/dev/null 2>&1 || true
-    if systemctl is-active --quiet "${service}" 2>/dev/null; then
-        ui_ok "systemd 服务已启用并处于 active：${service}"
-    else
-        ui_warn "systemd 服务未处于 active，最近日志如下："
-        ui_blank
-        ui_info "原始 journalctl 输出："
+    # 运行时 nftables 规则已应用；若 systemd 持久化失败，这里只报错返回，不回滚临时规则。
+    systemctl enable "${service}" >/dev/null 2>&1 || {
+        ui_error "systemd 服务启用失败：${service}"
         journalctl -u "${service}" -n 30 --no-pager 2>/dev/null || true
-    fi
+        return 1
+    }
+    systemctl restart "${service}" >/dev/null 2>&1 || {
+        ui_error "systemd 服务重启失败：${service}"
+        ui_warn "nftables 规则可能已临时应用，但 systemd 持久化失败。请修复后重新应用实例规则。"
+        journalctl -u "${service}" -n 30 --no-pager 2>/dev/null || true
+        return 1
+    }
+    systemctl is-active --quiet "${service}" 2>/dev/null || {
+        ui_error "systemd 服务未处于 active：${service}"
+        ui_warn "nftables 规则可能已临时应用，但 systemd 持久化状态异常。请修复后重新应用实例规则。"
+        journalctl -u "${service}" -n 30 --no-pager 2>/dev/null || true
+        return 1
+    }
+    ui_ok "systemd 服务已启用并处于 active：${service}"
 }
 
 configure_ufw_rules() {
