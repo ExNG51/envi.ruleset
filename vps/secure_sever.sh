@@ -222,16 +222,29 @@ ui_read_or_cancel() {
 
 ui_read_main_menu_choice() {
     local __target="$1"
-    ui_read_raw "${__target}" "请输入选项编号（0 退出）： "
+    while true; do
+        ui_read_raw "${__target}" "请输入选项编号（0 退出）： "
+        if ui_is_cancel "${!__target}"; then
+            ui_warn "主菜单请使用 0 退出脚本。"
+            continue
+        fi
+        return 0
+    done
 }
 
 ui_read_submenu_choice() {
     local __target="$1"
-    ui_read_raw "${__target}" "请输入选项编号（0 返回）： "
-    if [[ "${!__target}" == "0" ]]; then
-        return "${UI_RETURN_TO_MENU}"
-    fi
-    return 0
+    while true; do
+        ui_read_raw "${__target}" "请输入选项编号（0 返回）： "
+        if [[ "${!__target}" == "0" ]]; then
+            return "${UI_RETURN_TO_MENU}"
+        fi
+        if ui_is_cancel "${!__target}"; then
+            ui_warn "子菜单请使用 0 返回上一级。"
+            continue
+        fi
+        return 0
+    done
 }
 
 ui_confirm() {
@@ -969,15 +982,20 @@ prompt_ssh_source_mode() {
 
     while true; do
         ui_section "SSH 来源限制"
+        ui_print "请选择操作："
+        ui_blank
         ui_menu_item 1 "保持 SSH 对所有来源开放，避免远程锁定"
         ui_menu_item 2 "仅允许当前 IP/CIDR 访问 SSH"
         ui_menu_item 0 "返回上一级"
+        ui_blank
+        ui_dim "子菜单：输入 0 返回上一级。"
+        ui_dim "普通输入：输入 q 取消当前操作。"
+        ui_blank
         ui_read_submenu_choice choice || return "$?"
 
         case "$choice" in
             1) printf -v "$__target" 'open'; return 0 ;;
             2) printf -v "$__target" 'restricted'; return 0 ;;
-            q|Q) warn "子菜单请使用 0 返回上一级。" ;;
             *) err "无效选项，请输入 0、1 或 2。" ;;
         esac
     done
@@ -1343,15 +1361,25 @@ get_menu_ssh_label() {
     fi
 }
 
+get_dry_run_status_text() {
+    if [[ "${SECURE_SERVER_DRY_RUN}" == "1" ]]; then
+        printf 'yes'
+    else
+        printf 'no'
+    fi
+}
+
 build_status_line() {
-    printf 'UFW: %s | Fail2ban: %s | SSH: %s' \
+    printf 'UFW: %s | Fail2ban: %s | SSH: %s | Dry-run: %s' \
         "$(get_ufw_state)" \
         "$(get_fail2ban_state)" \
-        "$(get_menu_ssh_label)"
+        "$(get_menu_ssh_label)" \
+        "$(get_dry_run_status_text)"
 }
 
 ui_menu_footer() {
-    ui_dim "主菜单：输入 0 退出脚本。普通输入：输入 q 取消当前操作。"
+    ui_dim "主菜单：输入 0 退出脚本。子菜单：输入 0 返回上一级。"
+    ui_dim "普通输入：输入 q 取消当前操作。"
 }
 
 show_main_menu_loop() {
@@ -1361,10 +1389,10 @@ show_main_menu_loop() {
     while true; do
         should_pause=false
         ui_render_title
-        printf '\n'
         ui_dim "$(build_status_line)"
-        printf '\n'
-        ui_info "请选择要执行的操作:"
+        ui_blank
+        ui_print "请选择操作："
+        ui_blank
         ui_menu_item 1 "安装 UFW 和 Fail2ban 依赖"
         ui_menu_item 2 "配置 UFW 防火墙（将重置现有规则）"
         ui_menu_item 3 "配置 Fail2ban"
@@ -1373,7 +1401,9 @@ show_main_menu_loop() {
         ui_menu_item 6 "查看 UFW 状态"
         ui_menu_item 7 "查看 Fail2ban SSH jail 状态"
         ui_menu_item 0 "退出"
+        ui_blank
         ui_menu_footer
+        ui_blank
         ui_read_main_menu_choice choice
 
         case "$choice" in
@@ -1385,7 +1415,6 @@ show_main_menu_loop() {
             6) ui_run_menu_action "查看 UFW 状态" show_ufw_status; should_pause=true ;;
             7) ui_run_menu_action "查看 Fail2ban SSH jail 状态" show_fail2ban_status; should_pause=true ;;
             0) info "退出脚本。"; exit 0 ;;
-            q|Q) warn "主菜单请使用 0 退出脚本。" ;;
             *) err "无效选项，请输入 0 到 7。" ;;
         esac
 
