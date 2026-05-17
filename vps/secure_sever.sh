@@ -1037,17 +1037,86 @@ prompt_ssh_source_mode() {
 }
 
 backup_ufw_config() {
+    local __result_var="${1:-}"
     local backup_path=""
+
+    if [[ -n "$__result_var" ]]; then
+        printf -v "$__result_var" '%s' ""
+    fi
 
     create_backup_dir >/dev/null || return 1
     backup_path="${BACKUP_DIR}/ufw-$(date +%Y%m%d_%H%M%S).tar.gz"
     if [[ "${SECURE_SERVER_DRY_RUN}" == "1" ]]; then
         ui_info "DRY-RUN: backup /etc/ufw -> ${backup_path}"
+        if [[ -n "$__result_var" ]]; then
+            printf -v "$__result_var" '%s' "$backup_path"
+        fi
         return 0
     fi
     [[ -d /etc/ufw ]] || return 0
-    tar -C /etc -czf "$backup_path" ufw
+    tar -C /etc -czf "$backup_path" ufw || return 1
+    if [[ -n "$__result_var" ]]; then
+        printf -v "$__result_var" '%s' "$backup_path"
+    fi
     ok "UFW 配置已备份到 $backup_path"
+}
+
+show_ufw_diagnostics() {
+    ui_warn "UFW 诊断命令："
+    ui_print "ufw status verbose"
+    ui_print "ufw status numbered"
+    ui_print "systemctl status ufw --no-pager"
+    ui_print "journalctl -u ufw -n 80 --no-pager"
+}
+
+show_ufw_recovery_commands() {
+    local backup_path="$1"
+    local ssh_port="${2:-${DETECTED_SSH_PORT:-<SSH_PORT>}}"
+
+    ui_warn "UFW 人工恢复建议："
+    ui_print "ufw status verbose"
+    ui_print "ufw allow ${ssh_port}/tcp"
+    ui_print "ufw reload"
+    if [[ -n "$backup_path" ]]; then
+        ui_print "备份归档：${backup_path}"
+        ui_print "如需按备份人工恢复，请先在本机控制台确认 SSH 放行规则，再解包恢复 /etc/ufw。"
+    fi
+}
+
+report_ufw_failure() {
+    local message="$1"
+    local backup_path="$2"
+
+    err "$message"
+    show_ufw_diagnostics
+    show_ufw_recovery_commands "$backup_path" "${DETECTED_SSH_PORT:-<SSH_PORT>}"
+}
+
+run_ufw_step() {
+    local description="$1"
+    local backup_path="$2"
+    shift 2
+
+    if ! run_cmd "$description" "$@"; then
+        report_ufw_failure "${description} 失败。UFW 规则可能处于部分写入状态。" "$backup_path"
+        return 1
+    fi
+}
+
+run_ufw_yes_step() {
+    local description="$1"
+    local backup_path="$2"
+    shift 2
+
+    if [[ "${SECURE_SERVER_DRY_RUN}" == "1" ]]; then
+        run_ufw_step "$description" "$backup_path" "$@"
+        return "$?"
+    fi
+
+    if ! printf 'y\n' | "$@"; then
+        report_ufw_failure "${description} 失败。UFW 规则可能处于部分写入状态。" "$backup_path"
+        return 1
+    fi
 }
 
 configure_ufw() {
@@ -1055,6 +1124,7 @@ configure_ufw() {
     local unique_tcp_ports=""
     local unique_udp_ports=""
     local ssh_source_mode=""
+    local ufw_backup_path=""
 
     section "步骤 2: 配置 UFW 防火墙"
     require_command ufw || return 1
@@ -1100,33 +1170,36 @@ configure_ufw() {
 
     ui_confirm_token "确认重置 UFW 规则？" "RESET-UFW" || return "$INPUT_CANCELLED"
 
-    backup_ufw_config || return 1
-    run_cmd "禁用 UFW" ufw --force disable || return 1
-    printf 'y\n' | run_cmd "重置 UFW 规则" ufw reset || return 1
-    run_cmd "设置默认拒绝入站" ufw default deny incoming || return 1
-    run_cmd "设置默认允许出站" ufw default allow outgoing || return 1
+    if ! backup_ufw_config ufw_backup_path; then
+        report_ufw_failure "UFW 备份失败，已停止重置流程。" "$ufw_backup_path"
+        return 1
+    fi
+    run_ufw_step "禁用 UFW" "$ufw_backup_path" ufw --force disable || return 1
+    run_ufw_yes_step "重置 UFW 规则" "$ufw_backup_path" ufw reset || return 1
+    run_ufw_step "设置默认拒绝入站" "$ufw_backup_path" ufw default deny incoming || return 1
+    run_ufw_step "设置默认允许出站" "$ufw_backup_path" ufw default allow outgoing || return 1
 
     if [[ "$ssh_source_mode" == "restricted" ]]; then
-        run_cmd "允许当前 IP/CIDR 访问 SSH" ufw allow from "$CURRENT_IP" to any port "$DETECTED_SSH_PORT" proto tcp comment "Allow SSH from current IP" || return 1
+        run_ufw_step "允许当前 IP/CIDR 访问 SSH" "$ufw_backup_path" ufw allow from "$CURRENT_IP" to any port "$DETECTED_SSH_PORT" proto tcp comment "Allow SSH from current IP" || return 1
     else
-        run_cmd "允许 SSH 端口" ufw allow "$DETECTED_SSH_PORT/tcp" comment "Allow SSH access" || return 1
+        run_ufw_step "允许 SSH 端口" "$ufw_backup_path" ufw allow "$DETECTED_SSH_PORT/tcp" comment "Allow SSH access" || return 1
     fi
 
     for port in $unique_tcp_ports; do
-        run_cmd "允许 TCP 端口 $port" ufw allow "$port/tcp" comment "Allow detected TCP service" || return 1
+        run_ufw_step "允许 TCP 端口 $port" "$ufw_backup_path" ufw allow "$port/tcp" comment "Allow detected TCP service" || return 1
     done
     for port in $unique_udp_ports; do
-        run_cmd "允许 UDP 端口 $port" ufw allow "$port/udp" comment "Allow detected UDP service" || return 1
+        run_ufw_step "允许 UDP 端口 $port" "$ufw_backup_path" ufw allow "$port/udp" comment "Allow detected UDP service" || return 1
     done
 
-    run_cmd "允许本地回环入站" ufw allow in on lo || return 1
-    run_cmd "允许本地回环出站" ufw allow out on lo || return 1
-    printf 'y\n' | run_cmd "启用 UFW" ufw enable || return 1
+    run_ufw_step "允许本地回环入站" "$ufw_backup_path" ufw allow in on lo || return 1
+    run_ufw_step "允许本地回环出站" "$ufw_backup_path" ufw allow out on lo || return 1
+    run_ufw_yes_step "启用 UFW" "$ufw_backup_path" ufw enable || return 1
 
     if [[ "${SECURE_SERVER_DRY_RUN}" != "1" ]]; then
         ufw status verbose
         ufw status | grep -Eq "${DETECTED_SSH_PORT}/tcp" || {
-            err "UFW 状态中未发现 SSH 端口规则，请立即检查防火墙。"
+            report_ufw_failure "UFW 状态中未发现 SSH 端口规则，请立即检查防火墙。" "$ufw_backup_path"
             return 1
         }
     fi
@@ -1252,6 +1325,93 @@ ensure_sshd_include() {
     run_cmd "写入 sshd_config Include" install -m 0644 "$tmp_main" "$SSH_CONFIG_FILE"
 }
 
+show_ssh_diagnostics() {
+    ui_warn "SSH 诊断命令："
+    ui_print "sshd -t"
+    ui_print "systemctl status ssh --no-pager || systemctl status sshd --no-pager"
+    ui_print "journalctl -u ssh -n 80 --no-pager || journalctl -u sshd -n 80 --no-pager"
+}
+
+show_ssh_recovery_commands() {
+    local backup_file="$1"
+    local hardening_backup="${2:-}"
+
+    ui_warn "SSH 人工恢复建议："
+    if [[ -n "$backup_file" ]]; then
+        ui_print "cp ${backup_file} ${SSH_CONFIG_FILE}"
+    fi
+    if [[ -n "$hardening_backup" ]]; then
+        ui_print "cp ${hardening_backup} ${SSHD_HARDENING_FILE}"
+    else
+        ui_print "rm -f ${SSHD_HARDENING_FILE}"
+    fi
+    ui_print "sshd -t"
+    ui_print "systemctl restart ssh || systemctl restart sshd"
+}
+
+restore_ssh_backups() {
+    local main_backup="$1"
+    local hardening_backup="$2"
+    local restore_failed=0
+
+    if [[ -n "$main_backup" ]]; then
+        if ! restore_file_backup "$main_backup" "$SSH_CONFIG_FILE"; then
+            err "恢复 SSH 主配置失败: ${main_backup} -> ${SSH_CONFIG_FILE}"
+            restore_failed=1
+        fi
+    fi
+
+    if [[ -n "$hardening_backup" ]]; then
+        if ! restore_file_backup "$hardening_backup" "$SSHD_HARDENING_FILE"; then
+            err "恢复 SSH 加固配置失败: ${hardening_backup} -> ${SSHD_HARDENING_FILE}"
+            restore_failed=1
+        fi
+    elif [[ -e "$SSHD_HARDENING_FILE" ]]; then
+        if ! run_cmd "移除新增 SSH 加固配置" rm -f "$SSHD_HARDENING_FILE"; then
+            err "移除新增 SSH 加固配置失败: ${SSHD_HARDENING_FILE}"
+            restore_failed=1
+        fi
+    fi
+
+    [[ "$restore_failed" -eq 0 ]]
+}
+
+handle_ssh_failure_with_restore() {
+    local message="$1"
+    local main_backup="$2"
+    local hardening_backup="$3"
+    local ssh_service_name="${4:-}"
+
+    err "$message"
+    show_ssh_diagnostics
+
+    if ! restore_ssh_backups "$main_backup" "$hardening_backup"; then
+        err "SSH 配置恢复失败。"
+        show_ssh_recovery_commands "$main_backup" "$hardening_backup"
+        return 1
+    fi
+
+    ok "已恢复 SSH 配置。"
+
+    if ! sshd -t -f "$SSH_CONFIG_FILE"; then
+        err "恢复后 SSH 配置验证失败。"
+        show_ssh_diagnostics
+        show_ssh_recovery_commands "$main_backup" "$hardening_backup"
+        return 1
+    fi
+
+    [[ -n "$ssh_service_name" ]] || ssh_service_name="$(detect_ssh_service_name)"
+    if ! systemctl restart "$ssh_service_name"; then
+        err "恢复后 SSH 服务重启失败。"
+        show_ssh_diagnostics
+        show_ssh_recovery_commands "$main_backup" "$hardening_backup"
+        return 1
+    fi
+
+    ok "恢复后的 SSH 配置已验证并重启服务。"
+    return 1
+}
+
 secure_ssh() {
     local permit_root_login="prohibit-password"
     local password_auth="yes"
@@ -1320,35 +1480,35 @@ secure_ssh() {
         return 0
     fi
 
-    mkdir -p "$SSHD_CONFIG_DIR" || return 1
-    ensure_sshd_include || return 1
-    install -m 0644 "$tmp_hardening" "$SSHD_HARDENING_FILE" || return 1
+    if ! mkdir -p "$SSHD_CONFIG_DIR"; then
+        handle_ssh_failure_with_restore "创建 SSH 配置目录失败，正在尝试恢复。" "$main_backup" "$hardening_backup"
+        return 1
+    fi
+    if ! ensure_sshd_include; then
+        handle_ssh_failure_with_restore "写入 sshd_config Include 失败，正在尝试恢复。" "$main_backup" "$hardening_backup"
+        return 1
+    fi
+    if ! install -m 0644 "$tmp_hardening" "$SSHD_HARDENING_FILE"; then
+        handle_ssh_failure_with_restore "写入 SSH 加固配置失败，正在尝试恢复。" "$main_backup" "$hardening_backup"
+        return 1
+    fi
 
     if ! sshd -t -f "$SSH_CONFIG_FILE"; then
-        err "SSH 配置验证失败，正在恢复。"
-        [[ -n "$main_backup" ]] && restore_file_backup "$main_backup" "$SSH_CONFIG_FILE" || true
-        if [[ -n "$hardening_backup" ]]; then
-            restore_file_backup "$hardening_backup" "$SSHD_HARDENING_FILE" || true
-        else
-            rm -f "$SSHD_HARDENING_FILE"
-        fi
+        handle_ssh_failure_with_restore "SSH 配置验证失败，正在尝试恢复。" "$main_backup" "$hardening_backup"
         return 1
     fi
 
     ssh_service_name="$(detect_ssh_service_name)"
-    systemctl restart "$ssh_service_name" || {
-        err "SSH 服务重启失败，正在恢复。"
-        [[ -n "$main_backup" ]] && restore_file_backup "$main_backup" "$SSH_CONFIG_FILE" || true
-        [[ -n "$hardening_backup" ]] && restore_file_backup "$hardening_backup" "$SSHD_HARDENING_FILE" || true
-        systemctl restart "$ssh_service_name" || true
+    if ! systemctl restart "$ssh_service_name"; then
+        handle_ssh_failure_with_restore "SSH 服务重启失败，正在尝试恢复。" "$main_backup" "$hardening_backup" "$ssh_service_name"
         return 1
-    }
+    fi
 
     sleep 2
-    systemctl is-active --quiet "$ssh_service_name" || {
-        err "SSH 服务未处于 active 状态，请立即检查。"
+    if ! systemctl is-active --quiet "$ssh_service_name"; then
+        handle_ssh_failure_with_restore "SSH 服务未处于 active 状态，正在尝试恢复。" "$main_backup" "$hardening_backup" "$ssh_service_name"
         return 1
-    }
+    fi
     ok "SSH 配置强化完成。请保持当前会话并用新 SSH 会话验证登录。"
 }
 
