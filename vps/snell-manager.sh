@@ -608,6 +608,68 @@ is_port_in_use() {
     fi
 }
 
+is_tcp_port_listening() {
+    local port="$1"
+
+    validate_port "${port}" || return 1
+
+    if check_command_exists ss; then
+        ss -H -ltn 2>/dev/null | awk -v expected_port="${port}" '
+            function extract_port(listen_addr, parts, n) {
+                n = split(listen_addr, parts, ":")
+                if (n > 1 && parts[n] ~ /^[0-9]+$/) return parts[n]
+                n = split(listen_addr, parts, ".")
+                if (n > 1 && parts[n] ~ /^[0-9]+$/) return parts[n]
+                return ""
+            }
+            {
+                if (extract_port($4) == expected_port) {
+                    found = 1
+                }
+            }
+            END { exit found ? 0 : 1 }
+        '
+        return "$?"
+    fi
+
+    if check_command_exists netstat; then
+        netstat -ltn 2>/dev/null | awk -v expected_port="${port}" '
+            function extract_port(listen_addr, parts, n) {
+                n = split(listen_addr, parts, ":")
+                if (n > 1 && parts[n] ~ /^[0-9]+$/) return parts[n]
+                n = split(listen_addr, parts, ".")
+                if (n > 1 && parts[n] ~ /^[0-9]+$/) return parts[n]
+                return ""
+            }
+            NR > 2 {
+                if ($1 ~ /^tcp/ && extract_port($4) == expected_port) {
+                    found = 1
+                }
+            }
+            END { exit found ? 0 : 1 }
+        ' && return 0
+
+        netstat -an -p tcp 2>/dev/null | awk -v expected_port="${port}" '
+            function extract_port(listen_addr, parts, n) {
+                n = split(listen_addr, parts, ":")
+                if (n > 1 && parts[n] ~ /^[0-9]+$/) return parts[n]
+                n = split(listen_addr, parts, ".")
+                if (n > 1 && parts[n] ~ /^[0-9]+$/) return parts[n]
+                return ""
+            }
+            NR > 2 {
+                if ($1 ~ /^tcp/ && $0 ~ /LISTEN/ && extract_port($4) == expected_port) {
+                    found = 1
+                }
+            }
+            END { exit found ? 0 : 1 }
+        '
+        return "$?"
+    fi
+
+    return 2
+}
+
 read_ini_value() {
     local key="$1" file="$2"
     [ -f "${file}" ] || return 1
@@ -1095,15 +1157,13 @@ validate_legacy_service_recovery() {
 
     if [ -n "${LEGACY_PORT:-}" ]; then
         if validate_port "${LEGACY_PORT}"; then
-            if check_command_exists ss; then
-                if is_tcp_port_listening "${LEGACY_PORT}"; then
-                    ui_ok "旧服务端口 TCP ${LEGACY_PORT} 已恢复监听。"
-                else
-                    ui_error "旧 snell-server active 状态异常或 TCP ${LEGACY_PORT} 未监听。"
-                    failed=1
-                fi
+            if ! check_command_exists ss && ! check_command_exists netstat; then
+                ui_warn "缺少 ss/netstat，跳过旧端口监听验证：${LEGACY_PORT}"
+            elif is_tcp_port_listening "${LEGACY_PORT}"; then
+                ui_ok "旧服务端口 TCP ${LEGACY_PORT} 已恢复监听。"
             else
-                ui_warn "缺少 ss 命令，跳过旧端口监听验证：${LEGACY_PORT}"
+                ui_error "旧 snell-server active 状态异常或 TCP ${LEGACY_PORT} 未监听。"
+                failed=1
             fi
         else
             ui_warn "旧服务端口无效，跳过旧端口监听验证：${LEGACY_PORT}"
@@ -1594,11 +1654,44 @@ validate_snell_runtime_core() {
 
     systemctl is-active --quiet snell 2>/dev/null || return 1
 
-    if [ -n "${port}" ] && check_command_exists ss; then
+    if [ -n "${port}" ]; then
+        if ! check_command_exists ss && ! check_command_exists netstat; then
+            ui_warn "缺少 ss/netstat，无法验证端口监听，仅确认 snell 服务 active。"
+            return 0
+        fi
         is_tcp_port_listening "${port}" || return 1
     fi
 
     return 0
+}
+
+wait_for_snell_runtime_core() {
+    local port="${1:-}"
+    local max_attempts="${2:-10}"
+    local sleep_seconds="${3:-1}"
+    local attempt=1
+
+    while [ "${attempt}" -le "${max_attempts}" ]; do
+        if systemctl is-active --quiet snell 2>/dev/null; then
+            if [ -z "${port}" ]; then
+                return 0
+            fi
+
+            if ! check_command_exists ss && ! check_command_exists netstat; then
+                ui_warn "缺少 ss/netstat，无法验证端口监听，仅确认 snell 服务 active。"
+                return 0
+            fi
+
+            if is_tcp_port_listening "${port}"; then
+                return 0
+            fi
+        fi
+
+        sleep "${sleep_seconds}"
+        attempt=$((attempt + 1))
+    done
+
+    return 1
 }
 
 enable_and_restart_service() {
@@ -1995,20 +2088,6 @@ manage_service() {
     esac
     [ "${action_done}" = true ] && ui_ok "服务操作已执行。"
     pause_screen
-}
-
-is_tcp_port_listening() {
-    local port="$1"
-    validate_port "${port}" || return 1
-    check_command_exists ss || return 2
-    ss -H -tln 2>/dev/null | awk -v port="${port}" '
-        {
-            local_addr = $4
-            sub(/^.*:/, "", local_addr)
-            if (local_addr == port) found = 1
-        }
-        END { exit found ? 0 : 1 }
-    '
 }
 
 validate_snell_service() {
