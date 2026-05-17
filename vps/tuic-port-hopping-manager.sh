@@ -186,7 +186,7 @@ ui_menu_item() {
 ui_pause() {
     local _
     ui_blank
-    read_prompt _ "按回车键继续..."
+    ui_read_raw _ "按回车键继续..."
 }
 
 print_title() { ui_title "TUIC Port-Hopping 多实例管理脚本" "${SCRIPT_VERSION}"; }
@@ -205,22 +205,40 @@ init_prompt_input() {
     fi
 }
 
-read_prompt() {
-    local var_name="$1" prompt_text="$2" value
-    if ! IFS= read -r -u "${PROMPT_FD}" -p "${prompt_text}" "${var_name}"; then
-        echo
-        print_error "无法读取交互式输入。请在交互式终端运行脚本。"
+ui_read_raw() {
+    local __target="$1" __prompt="$2" __value
+    if ! IFS= read -r -u "${PROMPT_FD}" -p "${__prompt}" __value; then
+        printf '\n' >&2
+        ui_error "无法读取交互式输入。请在交互式终端运行脚本。"
         exit 1
     fi
+    __value="${__value//$'\r'/}"
+    printf -v "${__target}" '%s' "${__value}"
+}
 
-    value="${!var_name//$'\r'/}"
-    printf -v "${var_name}" '%s' "${value}"
+ui_is_cancel() {
+    case "${1:-}" in
+        q|Q) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+ui_read_or_cancel() {
+    local __target="$1" __prompt="$2"
+    ui_read_raw "${__target}" "${__prompt}"
+    if ui_is_cancel "${!__target}"; then
+        return "${UI_RETURN_TO_MENU}"
+    fi
+}
+
+read_prompt() {
+    ui_read_raw "$1" "$2"
 }
 
 ui_read_menu_choice() {
     local __target="$1"
     while true; do
-        read_prompt "${__target}" "请输入选项编号（0 退出）： "
+        ui_read_raw "${__target}" "请输入选项编号（0 退出）： "
         case "${!__target}" in
             0|1|2|3|4|5|6|7|8|9) return 0 ;;
             q|Q)
@@ -240,14 +258,24 @@ pause_screen() {
     ui_pause
 }
 
-confirm_yes_no() {
-    local prompt_text="$1" answer=""
+ui_confirm() {
+    local prompt_text="$1" default_answer="${2:-n}" answer="" label
+
+    if [ "${default_answer}" = "y" ] || [ "${default_answer}" = "Y" ]; then
+        label="Y/n"
+        default_answer="y"
+    else
+        label="y/N"
+        default_answer="n"
+    fi
+
     while true; do
-        read_prompt answer "${prompt_text} [y/n]: "
+        ui_read_or_cancel answer "${prompt_text} [${label}，q 取消]: " || return "$?"
+        answer="${answer:-${default_answer}}"
         case "${answer}" in
-            y|Y) return 0 ;;
-            n|N) return 1 ;;
-            *) print_error "请输入 y 或 n。" ;;
+            y|Y|yes|YES|Yes) return 0 ;;
+            n|N|no|NO|No) return 1 ;;
+            *) ui_error "请输入 y、n 或 q。" ;;
         esac
     done
 }
@@ -396,11 +424,14 @@ show_instance_table() {
 select_instance() {
     SELECTED_PORT=""
     show_instance_table || return 1
-    echo
+    ui_blank
     local port
     while true; do
-        read_prompt port "请输入要管理的真实 TUIC 端口，或输入 0 返回： "
-        [ "${port}" = "0" ] && return 1
+        ui_read_or_cancel port "请输入要管理的真实 TUIC 端口（0 返回，q 取消）： " || {
+            [ "$?" -eq "${UI_RETURN_TO_MENU}" ] && return "${UI_RETURN_TO_MENU}"
+            return 1
+        }
+        [ "${port}" = "0" ] && return "${UI_RETURN_TO_MENU}"
         validate_port "${port}" || { print_error "端口格式无效。"; continue; }
         [ -f "$(get_config_file "${port}")" ] || { print_error "未找到端口 ${port} 的实例。"; continue; }
         SELECTED_PORT="${port}"
@@ -459,7 +490,7 @@ check_tuic_listener() {
     fi
     print_warn "未检测到 UDP ${REAL_PORT} 正在监听。"
     print_warn "如果 sing-box / TUIC 尚未启动，可先继续创建规则，稍后再验证。"
-    confirm_yes_no "是否仍然继续配置该端口"
+    ui_confirm "是否仍然继续配置该端口" n
 }
 
 check_range_listener_conflict() {
@@ -497,7 +528,7 @@ check_instance_range_conflict() {
 prompt_real_port() {
     REAL_PORT=""
     while true; do
-        read_prompt REAL_PORT "请输入当前 TUIC UDP 监听端口： "
+        ui_read_or_cancel REAL_PORT "请输入当前 TUIC UDP 监听端口（q 取消）： " || return "$?"
         validate_port "${REAL_PORT}" && break
         print_error "端口格式无效，请输入 1-65535 之间的数字。"
     done
@@ -509,7 +540,7 @@ prompt_port_range() {
     print_info "根据真实端口 ${REAL_PORT} 自动生成的跳跃范围：${auto_range}"
     print_info "可直接回车使用自动范围，也可输入自定义范围，格式为：起始端口-结束端口"
     while true; do
-        read_prompt custom_range "请输入跳跃端口范围（回车使用 ${auto_range}）： "
+        ui_read_or_cancel custom_range "请输入跳跃端口范围（回车使用 ${auto_range}，q 取消）： " || return "$?"
         custom_range="${custom_range:-${auto_range}}"
         validate_port_range "${custom_range}" || { print_error "范围格式无效，请使用 start-end。"; continue; }
         RANGE_START="${custom_range%-*}"
@@ -520,7 +551,12 @@ prompt_port_range() {
         fi
         check_instance_range_conflict "${REAL_PORT}" "${RANGE_START}" "${RANGE_END}" || continue
         if ! check_range_listener_conflict "${RANGE_START}" "${RANGE_END}"; then
-            confirm_yes_no "检测到端口占用风险，是否仍然继续" || continue
+            ui_confirm "检测到端口占用风险，是否仍然继续" n
+            case "$?" in
+                0) ;;
+                1) continue ;;
+                "${UI_RETURN_TO_MENU}") return "${UI_RETURN_TO_MENU}" ;;
+            esac
         fi
         break
     done
@@ -533,7 +569,7 @@ install_nftables_if_needed() {
         return 0
     fi
     print_warn "nftables 未安装。"
-    confirm_yes_no "是否现在安装 nftables" || return 1
+    ui_confirm "是否现在安装 nftables" n || return "$?"
     export DEBIAN_FRONTEND=noninteractive
     if check_command_exists apt-get; then
         apt-get update && apt-get install -y nftables
@@ -712,14 +748,36 @@ show_security_group_hint() {
 create_or_update_instance() {
     print_title
     print_section "创建 / 更新实例"
-    prompt_real_port
+    prompt_real_port || {
+        [ "$?" -eq "${UI_RETURN_TO_MENU}" ] && return 0
+        pause_screen
+        return 1
+    }
     if [ -f "$(get_config_file "${REAL_PORT}")" ]; then
         print_warn "端口 ${REAL_PORT} 已存在实例，本流程会覆盖该实例配置。"
-        confirm_yes_no "是否继续更新该实例" || { pause_screen; return 0; }
+        ui_confirm "是否继续更新该实例" n
+        case "$?" in
+            0) ;;
+            1|"${UI_RETURN_TO_MENU}") return 0 ;;
+        esac
     fi
-    check_tuic_listener || { print_warn "已取消。"; pause_screen; return 0; }
-    prompt_port_range
-    install_nftables_if_needed || { pause_screen; return 1; }
+    check_tuic_listener
+    case "$?" in
+        0) ;;
+        1|"${UI_RETURN_TO_MENU}") return 0 ;;
+        *) pause_screen; return 1 ;;
+    esac
+    prompt_port_range || {
+        [ "$?" -eq "${UI_RETURN_TO_MENU}" ] && return 0
+        pause_screen
+        return 1
+    }
+    install_nftables_if_needed
+    case "$?" in
+        0) ;;
+        1|"${UI_RETURN_TO_MENU}") return 0 ;;
+        *) pause_screen; return 1 ;;
+    esac
     test_nft_nat_support || { pause_screen; return 1; }
     ensure_directories
     write_apply_script
@@ -744,7 +802,11 @@ show_all_instances() {
 
 show_instance_status() {
     print_title
-    select_instance || { pause_screen; return 0; }
+    select_instance || {
+        [ "$?" -eq "${UI_RETURN_TO_MENU}" ] && return 0
+        pause_screen
+        return 0
+    }
     load_instance_config "${SELECTED_PORT}" || { pause_screen; return 1; }
     local service
     service="$(get_service_name "${REAL_PORT}")"
@@ -785,7 +847,11 @@ show_instance_status() {
 
 validate_instance() {
     print_title
-    select_instance || { pause_screen; return 0; }
+    select_instance || {
+        [ "$?" -eq "${UI_RETURN_TO_MENU}" ] && return 0
+        pause_screen
+        return 0
+    }
     load_instance_config "${SELECTED_PORT}" || { pause_screen; return 1; }
     local service failed=0
     service="$(get_service_name "${REAL_PORT}")"
@@ -846,7 +912,11 @@ validate_instance() {
 
 show_client_hint() {
     print_title
-    select_instance || { pause_screen; return 0; }
+    select_instance || {
+        [ "$?" -eq "${UI_RETURN_TO_MENU}" ] && return 0
+        pause_screen
+        return 0
+    }
     load_instance_config "${SELECTED_PORT}" || { pause_screen; return 1; }
     print_section "客户端配置提示：${REAL_PORT}"
     echo "Surge / Surgio 建议追加："
@@ -860,7 +930,11 @@ show_client_hint() {
 
 show_tcpdump_helper() {
     print_title
-    select_instance || { pause_screen; return 0; }
+    select_instance || {
+        [ "$?" -eq "${UI_RETURN_TO_MENU}" ] && return 0
+        pause_screen
+        return 0
+    }
     load_instance_config "${SELECTED_PORT}" || { pause_screen; return 1; }
     print_section "抓包辅助命令：${REAL_PORT}"
     echo "同时观察真实端口与跳跃端口范围："
@@ -879,9 +953,18 @@ show_tcpdump_helper() {
 
 reapply_instance() {
     print_title
-    select_instance || { pause_screen; return 0; }
+    select_instance || {
+        [ "$?" -eq "${UI_RETURN_TO_MENU}" ] && return 0
+        pause_screen
+        return 0
+    }
     load_instance_config "${SELECTED_PORT}" || { pause_screen; return 1; }
-    install_nftables_if_needed || { pause_screen; return 1; }
+    install_nftables_if_needed
+    case "$?" in
+        0) ;;
+        1|"${UI_RETURN_TO_MENU}") return 0 ;;
+        *) pause_screen; return 1 ;;
+    esac
     test_nft_nat_support || { pause_screen; return 1; }
     write_apply_script
     write_systemd_template
@@ -891,7 +974,11 @@ reapply_instance() {
 
 remove_instance() {
     print_title
-    select_instance || { pause_screen; return 0; }
+    select_instance || {
+        [ "$?" -eq "${UI_RETURN_TO_MENU}" ] && return 0
+        pause_screen
+        return 0
+    }
     load_instance_config "${SELECTED_PORT}" || { pause_screen; return 1; }
     local service cfg answer
     service="$(get_service_name "${REAL_PORT}")"
