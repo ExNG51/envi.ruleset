@@ -726,7 +726,7 @@ EOF_NFT
 }
 
 write_apply_script() {
-    cat > "${APPLY_SCRIPT}" <<'EOF_APPLY'
+    if ! cat > "${APPLY_SCRIPT}" <<'EOF_APPLY'
 #!/bin/sh
 set -eu
 
@@ -756,12 +756,19 @@ fi
 
     nft -f "${NFT_RULE_FILE}"
 EOF_APPLY
-    chmod +x "${APPLY_SCRIPT}"
+    then
+        ui_error "写入通用应用脚本失败：${APPLY_SCRIPT}"
+        return 1
+    fi
+    chmod +x "${APPLY_SCRIPT}" || {
+        ui_error "设置通用应用脚本可执行权限失败：${APPLY_SCRIPT}"
+        return 1
+    }
     ui_ok "已写入通用应用脚本：${APPLY_SCRIPT}"
 }
 
 write_systemd_template() {
-    cat > "${SYSTEMD_TEMPLATE}" <<EOF_SYSTEMD
+    if ! cat > "${SYSTEMD_TEMPLATE}" <<EOF_SYSTEMD
 [Unit]
 Description=Apply TUIC UDP port-hopping redirect rules for port %i
 After=network-online.target ufw.service
@@ -775,7 +782,14 @@ RemainAfterExit=yes
 [Install]
 WantedBy=multi-user.target
 EOF_SYSTEMD
-    systemctl daemon-reload
+    then
+        ui_error "写入 systemd 模板失败：${SYSTEMD_TEMPLATE}"
+        return 1
+    fi
+    systemctl daemon-reload || {
+        ui_error "systemd daemon-reload 失败。"
+        return 1
+    }
     ui_ok "已写入 systemd 模板：${SYSTEMD_TEMPLATE}"
 }
 
@@ -787,7 +801,7 @@ write_instance_files() {
     nft_table="$(get_nft_table_name "${real_port}")"
     updated_at="$(date +%F)"
 
-    cat > "${cfg}" <<EOF_CFG
+    if ! cat > "${cfg}" <<EOF_CFG
 # TUIC Port-Hopping 实例配置
 REAL_PORT="${real_port}"
 RANGE_START="${start_port}"
@@ -796,8 +810,13 @@ NFT_TABLE_NAME="${nft_table}"
 NFT_RULE_FILE="${nft_file}"
 UPDATED_AT="${updated_at}"
 EOF_CFG
+    then
+        ui_error "写入实例 env 失败：${cfg}"
+        return 1
+    fi
+    chmod 600 "${cfg}" 2>/dev/null || true
 
-    cat > "${nft_file}" <<EOF_NFT
+    if ! cat > "${nft_file}" <<EOF_NFT
  table inet ${nft_table} {
      chain prerouting {
          type nat hook prerouting priority dstnat; policy accept;
@@ -807,6 +826,10 @@ EOF_CFG
      }
  }
 EOF_NFT
+    then
+        ui_error "写入 nftables 规则文件失败：${nft_file}"
+        return 1
+    fi
 
     ui_ok "已写入实例配置：${cfg}"
     ui_ok "已写入 nftables 规则：${nft_file}"
@@ -820,26 +843,30 @@ apply_instance_rules() {
         ui_ok "nftables 规则已应用。"
     else
         ui_error "nftables 规则应用失败，最近 systemd 日志如下："
+        show_nft_diagnostics "$(get_nft_table_name "${port}")"
         ui_blank
         ui_info "原始 journalctl 输出："
         journalctl -u "${service}" -n 30 --no-pager 2>/dev/null || true
         return 1
     fi
-    # 运行时 nftables 规则已应用；若 systemd 持久化失败，这里只报错返回，不回滚临时规则。
+    # 调用方负责在任一失败点执行事务回滚或残留报告。
     systemctl enable "${service}" >/dev/null 2>&1 || {
         ui_error "systemd 服务启用失败：${service}"
+        show_systemd_diagnostics "${port}"
         journalctl -u "${service}" -n 30 --no-pager 2>/dev/null || true
         return 1
     }
     systemctl restart "${service}" >/dev/null 2>&1 || {
         ui_error "systemd 服务重启失败：${service}"
         ui_warn "nftables 规则可能已临时应用，但 systemd 持久化失败。请修复后重新应用实例规则。"
+        show_systemd_diagnostics "${port}"
         journalctl -u "${service}" -n 30 --no-pager 2>/dev/null || true
         return 1
     }
     systemctl is-active --quiet "${service}" 2>/dev/null || {
         ui_error "systemd 服务未处于 active：${service}"
         ui_warn "nftables 规则可能已临时应用，但 systemd 持久化状态异常。请修复后重新应用实例规则。"
+        show_systemd_diagnostics "${port}"
         journalctl -u "${service}" -n 30 --no-pager 2>/dev/null || true
         return 1
     }
@@ -848,16 +875,29 @@ apply_instance_rules() {
 
 configure_ufw_rules() {
     local real_port="$1" start_port="$2" end_port="$3"
+    local failed=0
     ui_section "UFW 放行规则"
     if ! check_command_exists ufw; then
         ui_warn "未检测到 UFW，跳过 UFW 放行。"
         return 0
     fi
-    ufw allow "${real_port}/udp" >/dev/null 2>&1 || true
-    ufw allow "${start_port}:${end_port}/udp" >/dev/null 2>&1 || true
-    ufw reload >/dev/null 2>&1 || true
-    ui_ok "已补充 UFW 放行：${real_port}/udp"
-    ui_ok "已补充 UFW 放行：${start_port}:${end_port}/udp"
+    ufw allow "${real_port}/udp" >/dev/null 2>&1 && ui_ok "已补充 UFW 放行：${real_port}/udp" || {
+        ui_error "UFW 放行真实端口失败：${real_port}/udp"
+        failed=1
+    }
+    ufw allow "${start_port}:${end_port}/udp" >/dev/null 2>&1 && ui_ok "已补充 UFW 放行：${start_port}:${end_port}/udp" || {
+        ui_error "UFW 放行跳跃范围失败：${start_port}:${end_port}/udp"
+        failed=1
+    }
+    ufw reload >/dev/null 2>&1 || {
+        ui_error "UFW reload 失败。"
+        failed=1
+    }
+    [ "${failed}" -eq 0 ] || {
+        show_ufw_diagnostics
+        show_ufw_manual_cleanup_commands "${real_port}" "${start_port}" "${end_port}"
+    }
+    return "${failed}"
 }
 
 remove_ufw_rules() {
@@ -1263,6 +1303,17 @@ report_common_deletion_residuals() {
     return "${failed}"
 }
 
+handle_create_or_update_failure() {
+    local port="$1" start_port="$2" end_port="$3" table="$4" nft_file="$5" had_instance="$6" rollback_dir="$7"
+    ui_blank
+    ui_error "实例 ${port} 创建 / 更新失败，开始事务恢复。"
+    if [ "${had_instance}" = "true" ]; then
+        rollback_existing_instance "${port}" "${rollback_dir}" || return 1
+    else
+        cleanup_failed_new_instance "${port}" "${start_port}" "${end_port}" "${table}" "${nft_file}" || return 1
+    fi
+}
+
 show_security_group_hint() {
     local real_port="$1" start_port="$2" end_port="$3"
     ui_blank
@@ -1279,7 +1330,13 @@ create_or_update_instance() {
         pause_screen
         return 1
     }
-    if [ -f "$(get_config_file "${REAL_PORT}")" ]; then
+    local had_instance=false rollback_dir="" cfg nft_file nft_table
+    cfg="$(get_config_file "${REAL_PORT}")"
+    nft_file="$(get_nft_rule_file "${REAL_PORT}")"
+    nft_table="$(get_nft_table_name "${REAL_PORT}")"
+
+    if [ -f "${cfg}" ]; then
+        had_instance=true
         ui_warn "端口 ${REAL_PORT} 已存在实例，本流程会覆盖该实例配置。"
         ui_confirm "是否继续更新该实例" n
         case "$?" in
@@ -1306,12 +1363,44 @@ create_or_update_instance() {
         *) pause_screen; return 1 ;;
     esac
     test_nft_nat_support || { pause_screen; return 1; }
-    ensure_directories
-    write_apply_script
-    write_systemd_template
-    write_instance_files "${REAL_PORT}" "${RANGE_START}" "${RANGE_END}"
-    apply_instance_rules "${REAL_PORT}" || { pause_screen; return 1; }
-    configure_ufw_rules "${REAL_PORT}" "${RANGE_START}" "${RANGE_END}"
+    ensure_directories || { pause_screen; return 1; }
+
+    if [ "${had_instance}" = "true" ]; then
+        prepare_instance_rollback_dir "${REAL_PORT}" || { pause_screen; return 1; }
+        rollback_dir="${INSTANCE_ROLLBACK_DIR}"
+        capture_instance_rollback_state "${REAL_PORT}" "${rollback_dir}" || { pause_screen; return 1; }
+    fi
+
+    if ! write_apply_script; then
+        handle_create_or_update_failure "${REAL_PORT}" "${RANGE_START}" "${RANGE_END}" "${nft_table}" "${nft_file}" "${had_instance}" "${rollback_dir}"
+        pause_screen
+        return 1
+    fi
+    if ! write_systemd_template; then
+        handle_create_or_update_failure "${REAL_PORT}" "${RANGE_START}" "${RANGE_END}" "${nft_table}" "${nft_file}" "${had_instance}" "${rollback_dir}"
+        pause_screen
+        return 1
+    fi
+    if ! write_instance_files "${REAL_PORT}" "${RANGE_START}" "${RANGE_END}"; then
+        handle_create_or_update_failure "${REAL_PORT}" "${RANGE_START}" "${RANGE_END}" "${nft_table}" "${nft_file}" "${had_instance}" "${rollback_dir}"
+        pause_screen
+        return 1
+    fi
+    if ! apply_instance_rules "${REAL_PORT}"; then
+        handle_create_or_update_failure "${REAL_PORT}" "${RANGE_START}" "${RANGE_END}" "${nft_table}" "${nft_file}" "${had_instance}" "${rollback_dir}"
+        pause_screen
+        return 1
+    fi
+    if ! configure_ufw_rules "${REAL_PORT}" "${RANGE_START}" "${RANGE_END}"; then
+        handle_create_or_update_failure "${REAL_PORT}" "${RANGE_START}" "${RANGE_END}" "${nft_table}" "${nft_file}" "${had_instance}" "${rollback_dir}"
+        pause_screen
+        return 1
+    fi
+    if ! validate_instance "${REAL_PORT}" "write"; then
+        handle_create_or_update_failure "${REAL_PORT}" "${RANGE_START}" "${RANGE_END}" "${nft_table}" "${nft_file}" "${had_instance}" "${rollback_dir}"
+        pause_screen
+        return 1
+    fi
     ui_blank
     ui_ok "实例 ${REAL_PORT} 配置完成。"
     ui_kv "真实端口" "${REAL_PORT}/udp"
