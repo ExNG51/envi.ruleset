@@ -316,6 +316,25 @@ require_root() {
 
 check_command_exists() { command -v "$1" >/dev/null 2>&1; }
 
+install_packages() {
+    local packages=("$@")
+    [ "${#packages[@]}" -gt 0 ] || return 0
+
+    export DEBIAN_FRONTEND=noninteractive
+    if check_command_exists apt-get; then
+        apt-get update && apt-get install -y "${packages[@]}"
+    elif check_command_exists apk; then
+        apk add --no-cache "${packages[@]}"
+    elif check_command_exists dnf; then
+        dnf install -y "${packages[@]}"
+    elif check_command_exists yum; then
+        yum install -y "${packages[@]}"
+    else
+        ui_error "未识别到 apt-get / apk / dnf / yum，请手动安装依赖：${packages[*]}"
+        return 1
+    fi
+}
+
 ensure_directories() {
     mkdir -p "${BASE_DIR}" "${INSTANCE_DIR}" "${NFT_RULE_DIR}"
 }
@@ -512,16 +531,66 @@ calculate_auto_range() {
     echo "${start_port}-${end_port}"
 }
 
+has_runtime_port_probe_tool() {
+    check_command_exists ss || check_command_exists netstat
+}
+
+install_runtime_port_probe_dependency() {
+    ui_warn "未检测到 ss，正在安装运行验证所需端口探测依赖。"
+    if check_command_exists apt-get || check_command_exists apk; then
+        install_packages iproute2 || return 1
+    elif check_command_exists dnf || check_command_exists yum; then
+        install_packages iproute || return 1
+    else
+        ui_error "未识别到支持的包管理器，请手动安装 iproute2/iproute。"
+        return 1
+    fi
+    check_command_exists ss || {
+        ui_error "端口探测依赖安装后仍未检测到 ss。"
+        return 1
+    }
+}
+
+ensure_runtime_validation_dependencies() {
+    has_runtime_port_probe_tool && return 0
+    install_runtime_port_probe_dependency
+}
+
+warn_missing_runtime_probe_tool_for_readonly() {
+    has_runtime_port_probe_tool && return 0
+    ui_warn "缺少 ss/netstat，无法检查 UDP 监听状态；只读路径不会自动安装依赖。"
+    ui_warn "写入型动作会按需安装 iproute2/iproute 以提供 ss。"
+}
+
+list_udp_listening_ports() {
+    if check_command_exists ss; then
+        ss -H -lunp 2>/dev/null | grep -Eo ':[0-9]+' | tr -d ':' | sort -n | uniq
+        return 0
+    fi
+    if check_command_exists netstat; then
+        netstat -lunp 2>/dev/null | grep -Eo ':[0-9]+' | tr -d ':' | sort -n | uniq
+        return 0
+    fi
+    return 2
+}
+
 is_udp_port_listening() {
     local port="$1"
-    check_command_exists ss || return 2
-    ss -H -lunp 2>/dev/null | grep -Eq "(^|[[:space:]])[^[:space:]]*:${port}([[:space:]]|$)"
+    if check_command_exists ss; then
+        ss -H -lunp 2>/dev/null | grep -Eq "(^|[[:space:]])[^[:space:]]*:${port}([[:space:]]|$)"
+        return "$?"
+    fi
+    if check_command_exists netstat; then
+        netstat -lunp 2>/dev/null | grep -Eq "(^|[[:space:]])[^[:space:]]*:${port}([[:space:]]|$)"
+        return "$?"
+    fi
+    return 2
 }
 
 check_tuic_listener() {
     ui_section "监听检查"
-    if ! check_command_exists ss; then
-        ui_warn "缺少 ss 命令，无法检查监听状态。通常可安装 iproute2。"
+    if ! has_runtime_port_probe_tool; then
+        warn_missing_runtime_probe_tool_for_readonly
         return 0
     fi
     if is_udp_port_listening "${REAL_PORT}"; then
@@ -535,9 +604,9 @@ check_tuic_listener() {
 
 check_range_listener_conflict() {
     local start_port="$1" end_port="$2"
-    check_command_exists ss || return 0
+    has_runtime_port_probe_tool || return 0
     local used_ports used_port found=0
-    used_ports="$(ss -H -lunp 2>/dev/null | grep -Eo ':[0-9]+' | tr -d ':' | sort -n | uniq || true)"
+    used_ports="$(list_udp_listening_ports || true)"
     for used_port in ${used_ports}; do
         if [ "${used_port}" -ge "${start_port}" ] && [ "${used_port}" -le "${end_port}" ]; then
             ui_warn "跳跃范围内检测到已监听 UDP 端口：${used_port}"
@@ -616,27 +685,23 @@ prompt_port_range() {
     done
 }
 
-install_nftables_if_needed() {
+ensure_nftables_dependency() {
     ui_section "nftables 检查"
     if check_command_exists nft; then
         ui_ok "nftables 已安装。"
         return 0
     fi
-    ui_warn "nftables 未安装。"
-    ui_confirm "是否现在安装 nftables" n || return "$?"
-    export DEBIAN_FRONTEND=noninteractive
-    if check_command_exists apt-get; then
-        apt-get update && apt-get install -y nftables
-    elif check_command_exists dnf; then
-        dnf install -y nftables
-    elif check_command_exists yum; then
-        yum install -y nftables
-    else
-        ui_error "未识别到 apt-get / dnf / yum，请手动安装 nftables。"
+    ui_warn "未检测到 nftables，正在安装实例所需依赖。"
+    install_packages nftables || {
+        ui_error "nftables 安装失败。"
         return 1
-    fi
+    }
     check_command_exists nft || { ui_error "nftables 安装失败。"; return 1; }
     ui_ok "nftables 安装完成。"
+}
+
+install_nftables_if_needed() {
+    ensure_nftables_dependency
 }
 
 test_nft_nat_support() {
@@ -828,6 +893,7 @@ create_or_update_instance() {
             1|"${UI_RETURN_TO_MENU}") return 0 ;;
         esac
     fi
+    ensure_runtime_validation_dependencies || { pause_screen; return 1; }
     check_tuic_listener
     case "$?" in
         0) ;;
@@ -839,7 +905,7 @@ create_or_update_instance() {
         pause_screen
         return 1
     }
-    install_nftables_if_needed
+    ensure_nftables_dependency
     case "$?" in
         0) ;;
         1|"${UI_RETURN_TO_MENU}") return 0 ;;
@@ -929,15 +995,28 @@ show_instance_status() {
 }
 
 validate_instance() {
-    page_title
-    select_instance || {
-        [ "$?" -eq "${UI_RETURN_TO_MENU}" ] && return 0
-        pause_screen
-        return 0
-    }
-    load_instance_config "${SELECTED_PORT}" || { pause_screen; return 1; }
-    local service failed=0
+    local requested_port="${1:-}" validation_mode="${2:-readonly}" interactive=1
+    if [ -n "${requested_port}" ]; then
+        interactive=0
+        SELECTED_PORT="${requested_port}"
+    fi
+
+    [ "${interactive}" -eq 1 ] && page_title
+    if [ "${interactive}" -eq 1 ]; then
+        select_instance || {
+            [ "$?" -eq "${UI_RETURN_TO_MENU}" ] && return 0
+            pause_screen
+            return 0
+        }
+    fi
+    if ! load_instance_config "${SELECTED_PORT}"; then
+        [ "${interactive}" -eq 1 ] && pause_screen
+        return 1
+    fi
+
+    local service cfg failed=0 can_probe=0 nft_output ufw_output ufw_first_line
     service="$(get_service_name "${REAL_PORT}")"
+    cfg="$(get_config_file "${REAL_PORT}")"
 
     ui_section "验证实例：${REAL_PORT}"
     ui_kv "真实端口" "${REAL_PORT}/udp"
@@ -946,25 +1025,58 @@ validate_instance() {
     ui_kv "systemd 服务" "${service}"
     ui_blank
 
-    if check_command_exists ss && is_udp_port_listening "${REAL_PORT}"; then
-        ui_ok "真实端口 ${REAL_PORT}/udp 正在监听。"
+    if [ -f "${cfg}" ]; then
+        ui_ok "实例 env 文件存在：${cfg}"
     else
+        ui_warn "实例 env 文件缺失：${cfg}"
+        failed=1
+    fi
+
+    if [ -n "${NFT_RULE_FILE:-}" ] && [ -f "${NFT_RULE_FILE}" ]; then
+        ui_ok "实例 nft 文件存在：${NFT_RULE_FILE}"
+    else
+        ui_warn "实例 nft 文件缺失：${NFT_RULE_FILE:-未知}"
+        failed=1
+    fi
+
+    if has_runtime_port_probe_tool; then
+        can_probe=1
+    else
+        warn_missing_runtime_probe_tool_for_readonly
+    fi
+
+    if [ "${can_probe}" -eq 1 ] && is_udp_port_listening "${REAL_PORT}"; then
+        ui_ok "真实端口 ${REAL_PORT}/udp 正在监听。"
+    elif [ "${can_probe}" -eq 1 ]; then
         ui_warn "未检测到真实端口 ${REAL_PORT}/udp 监听。"
         failed=1
+    else
+        ui_warn "跳过真实端口监听验证：缺少 ss/netstat。"
     fi
 
-    if check_command_exists nft && nft list table inet "${NFT_TABLE_NAME}" >/dev/null 2>&1; then
-        ui_ok "nftables 表存在：inet ${NFT_TABLE_NAME}"
-    else
-        ui_warn "nftables 表不存在。"
-        failed=1
+    if ! check_command_exists nft; then
+        if [ "${validation_mode}" = "write" ]; then
+            ensure_nftables_dependency || failed=1
+        else
+            ui_warn "缺少 nft 命令，无法验证 nftables 运行时规则；只读验证不会自动安装依赖。"
+        fi
     fi
 
-    if check_command_exists nft && nft list table inet "${NFT_TABLE_NAME}" 2>/dev/null | grep -q "${RANGE_START}-${RANGE_END}"; then
-        ui_ok "检测到跳跃范围重定向规则：${RANGE_START}-${RANGE_END} → ${REAL_PORT}。"
+    if check_command_exists nft; then
+        if nft_output="$(nft list table inet "${NFT_TABLE_NAME}" 2>/dev/null)"; then
+            ui_ok "nftables 表存在：inet ${NFT_TABLE_NAME}"
+            if echo "${nft_output}" | grep -q "${RANGE_START}-${RANGE_END}" && echo "${nft_output}" | grep -q ":${REAL_PORT}"; then
+                ui_ok "检测到跳跃范围重定向规则：${RANGE_START}-${RANGE_END} → ${REAL_PORT}。"
+            else
+                ui_warn "未检测到预期重定向规则。"
+                failed=1
+            fi
+        else
+            ui_warn "nftables 表不存在。"
+            failed=1
+        fi
     else
-        ui_warn "未检测到预期重定向规则。"
-        failed=1
+        ui_warn "跳过 nftables 运行时规则验证：缺少 nft。"
     fi
 
     if systemctl is-enabled --quiet "${service}" 2>/dev/null; then
@@ -985,10 +1097,24 @@ validate_instance() {
     fi
 
     if check_command_exists ufw; then
-        local ufw_output
         ufw_output="$(ufw status 2>/dev/null || true)"
-        echo "${ufw_output}" | grep -Eq "${REAL_PORT}/udp|${REAL_PORT}[[:space:]]+.*UDP" && ui_ok "UFW 检测到真实端口规则。" || ui_warn "UFW 未检测到真实端口规则。"
-        echo "${ufw_output}" | grep -Eq "${RANGE_START}:${RANGE_END}/udp|${RANGE_START}:${RANGE_END}" && ui_ok "UFW 检测到跳跃范围规则。" || ui_warn "UFW 未检测到跳跃范围规则。"
+        ufw_first_line="$(printf '%s\n' "${ufw_output}" | head -n 1)"
+        if [ "${ufw_first_line}" = "Status: active" ]; then
+            if echo "${ufw_output}" | grep -Eq "${REAL_PORT}/udp|${REAL_PORT}[[:space:]]+.*UDP"; then
+                ui_ok "UFW 检测到真实端口规则。"
+            else
+                ui_warn "UFW active，但未检测到真实端口规则。"
+                failed=1
+            fi
+            if echo "${ufw_output}" | grep -Eq "${RANGE_START}:${RANGE_END}/udp|${RANGE_START}:${RANGE_END}"; then
+                ui_ok "UFW 检测到跳跃范围规则。"
+            else
+                ui_warn "UFW active，但未检测到跳跃范围规则。"
+                failed=1
+            fi
+        else
+            ui_warn "UFW 未启用或状态未知，跳过 UFW 规则强校验。"
+        fi
         ui_blank
         ui_info "原始 ufw status verbose 输出："
         ufw status verbose 2>/dev/null || true
@@ -1001,7 +1127,8 @@ validate_instance() {
         ui_warn "存在需要人工确认的项目。请检查 sing-box、nftables、systemd、UFW 与商家安全组。"
     fi
     show_security_group_hint "${REAL_PORT}" "${RANGE_START}" "${RANGE_END}"
-    pause_screen
+    [ "${interactive}" -eq 1 ] && pause_screen
+    return "${failed}"
 }
 
 show_client_hint() {
@@ -1066,7 +1193,7 @@ reapply_instance() {
     ui_kv "跳跃范围" "${RANGE_START}-${RANGE_END}/udp"
     ui_kv "nftables 表" "inet ${NFT_TABLE_NAME}"
     ui_kv "systemd 服务" "$(get_service_name "${REAL_PORT}")"
-    install_nftables_if_needed
+    ensure_nftables_dependency
     case "$?" in
         0) ;;
         1|"${UI_RETURN_TO_MENU}") return 0 ;;
