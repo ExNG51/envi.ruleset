@@ -797,6 +797,25 @@ cleanup_failed_fresh_snell_installation() {
     ui_warn "如需重新安装，请再次运行安装菜单。"
 }
 
+handle_snell_install_failure() {
+    local reason="$1" is_overwrite_install="$2" binary_backup="$3" config_backup="$4" version_backup="$5" service_backup="$6"
+
+    ui_error "${reason}"
+
+    if [ "${is_overwrite_install}" = "true" ]; then
+        rollback_snell_installation_change \
+            "${binary_backup}" \
+            "${config_backup}" \
+            "${version_backup}" \
+            "${service_backup}" || true
+    else
+        cleanup_failed_fresh_snell_installation
+    fi
+
+    pause_screen
+    return 1
+}
+
 restore_snell_config_after_failed_change() {
     local config_backup="$1"
 
@@ -1419,7 +1438,8 @@ enable_and_restart_service() {
 install_or_reinstall_snell() {
     ui_render_title
     ui_section "安装 / 覆盖安装 Snell Server"
-    local confirm_rc
+    local confirm_rc is_overwrite_install=false
+    local binary_backup="" config_backup="" version_backup="" service_backup=""
     if has_legacy_layout; then
         ui_warn '检测到旧 Snell 布局。已有旧 VPS 建议优先使用菜单中的 "检测 / 接管旧 Snell 服务与配置"。'
         ui_blank
@@ -1436,9 +1456,9 @@ install_or_reinstall_snell() {
     fi
     ensure_dependencies || return 1
 
-    if [ -f "${SNELL_CONFIG_FILE}" ]; then
+    if has_current_snell_installation; then
         ui_blank
-        confirm_yes_no "检测到已有配置，是否覆盖安装？" "n"
+        confirm_yes_no "检测到已有 Snell 安装对象，是否覆盖安装？" "n"
         confirm_rc=$?
         if [ "${confirm_rc}" -eq "${RETURN_TO_MENU}" ]; then
             return "${RETURN_TO_MENU}"
@@ -1473,9 +1493,45 @@ install_or_reinstall_snell() {
         return
     fi
 
-    download_and_install_snell_binary "${version}" || return 1
-    write_snell_config "${port}" "${psk}" "${ipv6}" "${dns}" "${obfs}" "${obfs_host}" "${tfo}" "${protocol_version}" || return 1
-    write_systemd_service || return 1
+    if has_current_snell_installation; then
+        is_overwrite_install=true
+        backup_snell_installation_for_rollback binary_backup config_backup version_backup service_backup || {
+            ui_error "旧 Snell 状态备份失败，已停止安装。"
+            pause_screen
+            return 1
+        }
+    fi
+
+    download_and_install_snell_binary "${version}" || {
+        handle_snell_install_failure \
+            "Snell 二进制下载或安装失败。" \
+            "${is_overwrite_install}" \
+            "${binary_backup}" \
+            "${config_backup}" \
+            "${version_backup}" \
+            "${service_backup}"
+        return 1
+    }
+    write_snell_config "${port}" "${psk}" "${ipv6}" "${dns}" "${obfs}" "${obfs_host}" "${tfo}" "${protocol_version}" || {
+        handle_snell_install_failure \
+            "Snell 配置写入失败。" \
+            "${is_overwrite_install}" \
+            "${binary_backup}" \
+            "${config_backup}" \
+            "${version_backup}" \
+            "${service_backup}"
+        return 1
+    }
+    write_systemd_service || {
+        handle_snell_install_failure \
+            "systemd 服务写入失败。" \
+            "${is_overwrite_install}" \
+            "${binary_backup}" \
+            "${config_backup}" \
+            "${version_backup}" \
+            "${service_backup}"
+        return 1
+    }
     if [ "${tfo}" = "true" ]; then
         if write_network_tuning; then
             ui_ok "已同步应用 TFO 与基础网络优化参数。"
@@ -1483,7 +1539,26 @@ install_or_reinstall_snell() {
             ui_warn "Snell 将继续安装，但 TFO / 网络优化未确认生效，请稍后通过菜单 8 单独修复。"
         fi
     fi
-    enable_and_restart_service || return 1
+    enable_and_restart_service || {
+        handle_snell_install_failure \
+            "Snell 服务启用或重启失败。" \
+            "${is_overwrite_install}" \
+            "${binary_backup}" \
+            "${config_backup}" \
+            "${version_backup}" \
+            "${service_backup}"
+        return 1
+    }
+    validate_snell_runtime_core "${port}" || {
+        handle_snell_install_failure \
+            "Snell 安装后核心验证失败。" \
+            "${is_overwrite_install}" \
+            "${binary_backup}" \
+            "${config_backup}" \
+            "${version_backup}" \
+            "${service_backup}"
+        return 1
+    }
 
     ui_ok "Snell Server 已安装并启动。"
     show_client_config false
