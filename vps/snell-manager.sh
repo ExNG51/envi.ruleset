@@ -1070,28 +1070,118 @@ finalize_legacy_takeover() {
     return 0
 }
 
+validate_legacy_service_recovery() {
+    local failed=0
+
+    if systemctl is-active --quiet snell-server 2>/dev/null; then
+        ui_ok "旧 snell-server 服务 active。"
+    else
+        ui_error "旧 snell-server 服务不是 active。"
+        failed=1
+    fi
+
+    if [ -n "${LEGACY_PORT:-}" ]; then
+        if validate_port "${LEGACY_PORT}"; then
+            if check_command_exists ss; then
+                if is_tcp_port_listening "${LEGACY_PORT}"; then
+                    ui_ok "旧服务端口 TCP ${LEGACY_PORT} 已恢复监听。"
+                else
+                    ui_error "旧 snell-server active 状态异常或 TCP ${LEGACY_PORT} 未监听。"
+                    failed=1
+                fi
+            else
+                ui_warn "缺少 ss 命令，跳过旧端口监听验证：${LEGACY_PORT}"
+            fi
+        else
+            ui_warn "旧服务端口无效，跳过旧端口监听验证：${LEGACY_PORT}"
+        fi
+    else
+        ui_warn "未获取到旧服务端口，跳过旧端口监听验证。"
+    fi
+
+    [ "${failed}" -eq 0 ]
+}
+
 cleanup_failed_new_snell_takeover() {
+    local cleanup_failed=0
+
     ui_warn "正在清理失败的新 snell 接管残留。"
-    systemctl disable --now snell >/dev/null 2>&1 || true
-    rm -f "${SNELL_SERVICE_FILE}"
-    systemctl daemon-reload >/dev/null 2>&1 || true
+    ui_dim "Prepare 阶段失败，旧 snell-server 服务尚未被切换。"
+
+    if systemctl disable --now snell >/dev/null 2>&1; then
+        ui_ok "新 snell 服务已停止并取消启用。"
+    else
+        ui_warn "新 snell 服务停止 / disable 失败或不存在，请后续人工确认。"
+        cleanup_failed=1
+    fi
+
+    if [ -f "${SNELL_SERVICE_FILE}" ]; then
+        if rm -f "${SNELL_SERVICE_FILE}"; then
+            ui_ok "新 snell service 文件已移除：${SNELL_SERVICE_FILE}"
+        else
+            ui_error "新 snell service 文件移除失败：${SNELL_SERVICE_FILE}"
+            cleanup_failed=1
+        fi
+    else
+        ui_dim "未发现新 snell service 文件：${SNELL_SERVICE_FILE}"
+    fi
+
+    if systemctl daemon-reload >/dev/null 2>&1; then
+        ui_ok "systemd daemon-reload 已完成。"
+    else
+        ui_warn "systemd daemon-reload 失败，请手动执行。"
+        cleanup_failed=1
+    fi
+
+    if [ "${cleanup_failed}" -ne 0 ]; then
+        ui_warn "接管失败清理存在残留，请按需检查："
+        ui_print "systemctl status snell --no-pager"
+        ui_print "systemctl disable --now snell"
+        ui_print "rm -f '${SNELL_SERVICE_FILE}'"
+        ui_print "systemctl daemon-reload"
+    else
+        ui_ok "失败的新 snell 接管残留已清理。"
+    fi
+
+    return 0
 }
 
 rollback_legacy_takeover() {
     ui_section "接管失败，执行回滚"
     systemctl disable --now snell >/dev/null 2>&1 || true
     if [ "${LEGACY_WAS_ACTIVE}" = true ] && [ -f "${OLD_SNELL_SERVICE_FILE}" ]; then
-        systemctl daemon-reload >/dev/null 2>&1 || true
-        systemctl start snell-server >/dev/null 2>&1 || true
-        if systemctl is-active --quiet snell-server 2>/dev/null; then
+        if systemctl daemon-reload >/dev/null 2>&1; then
+            ui_ok "systemd daemon-reload 已完成。"
+        else
+            ui_warn "systemd daemon-reload 失败，请手动执行后再检查旧服务。"
+        fi
+        if systemctl start snell-server >/dev/null 2>&1; then
+            ui_ok "已尝试启动旧 snell-server 服务。"
+        else
+            ui_warn "旧 snell-server 启动命令返回失败，继续检查恢复状态。"
+        fi
+        if validate_legacy_service_recovery; then
             ui_ok "旧 snell-server 服务已恢复运行。"
         else
-            ui_error "旧 snell-server 服务未能自动恢复，请立即手动检查。"
+            ui_error "旧 snell-server 服务未能完整恢复，请立即手动检查。"
+            ui_warn "建议执行："
+            ui_print "journalctl -u snell-server -n 80 --no-pager"
+            ui_print "systemctl status snell-server --no-pager"
+            ui_print "systemctl restart snell-server"
         fi
+    elif [ "${LEGACY_WAS_ACTIVE}" = true ]; then
+        ui_error "旧 snell-server 服务文件缺失，无法自动恢复。"
+        ui_warn "建议执行："
+        ui_print "journalctl -u snell-server -n 80 --no-pager"
+        ui_print "systemctl status snell-server --no-pager"
     else
         ui_warn "旧服务原本不是 active，已停止新 snell 服务。"
     fi
+
+    ui_warn "新 snell 服务日志摘要："
     journalctl -u snell -n 40 --no-pager 2>/dev/null || true
+    ui_warn "旧 snell-server 服务日志摘要："
+    journalctl -u snell-server -n 40 --no-pager 2>/dev/null || true
 }
 
 run_legacy_takeover() {
@@ -1131,7 +1221,7 @@ run_legacy_takeover() {
     fi
 
     finalize_legacy_takeover
-    ui_ok "旧 Snell 已安全接管到 snell.service。"
+    ui_ok "旧 Snell 主服务已安全接管到 snell.service。"
     show_client_config false
     pause_screen
 }
