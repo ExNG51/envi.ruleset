@@ -1713,7 +1713,7 @@ validate_snell_service() {
     if [ "${pause_after}" = true ]; then
         pause_screen
     fi
-    return 0
+    [ "${failed}" -eq 0 ]
 }
 
 show_status_and_logs() {
