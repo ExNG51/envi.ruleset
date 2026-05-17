@@ -217,6 +217,25 @@ read_prompt() {
     printf -v "${var_name}" '%s' "${value}"
 }
 
+ui_read_menu_choice() {
+    local __target="$1"
+    while true; do
+        read_prompt "${__target}" "请输入选项编号（0 退出）： "
+        case "${!__target}" in
+            0|1|2|3|4|5|6|7|8|9) return 0 ;;
+            q|Q)
+                ui_warn "主菜单请使用 0 退出脚本。"
+                ;;
+            "")
+                ui_error "无效选项，请重新输入。"
+                ;;
+            *)
+                ui_error "无效选项，请重新输入。"
+                ;;
+        esac
+    done
+}
+
 pause_screen() {
     ui_pause
 }
@@ -279,8 +298,8 @@ read_env_value() {
 }
 
 list_instances() {
-    mkdir -p "${INSTANCE_DIR}"
     local file_path
+    [ -d "${INSTANCE_DIR}" ] || return 0
     for file_path in "${INSTANCE_DIR}"/*.env; do
         [ -e "${file_path}" ] || continue
         basename "${file_path}" .env
@@ -291,6 +310,55 @@ has_instances() {
     local first_instance
     first_instance="$(list_instances | head -n 1 || true)"
     [ -n "${first_instance}" ]
+}
+
+count_instances() {
+    local count=0 port
+    while read -r port; do
+        [ -n "${port}" ] || continue
+        count=$((count + 1))
+    done < <(list_instances)
+    printf '%s' "${count}"
+}
+
+count_active_instances() {
+    local count=0 port service
+    while read -r port; do
+        [ -n "${port}" ] || continue
+        service="$(get_service_name "${port}")"
+        if systemctl is-active --quiet "${service}" 2>/dev/null; then
+            count=$((count + 1))
+        fi
+    done < <(list_instances)
+    printf '%s' "${count}"
+}
+
+detect_nft_status() {
+    if check_command_exists nft; then
+        printf '%s' "ok"
+    else
+        printf '%s' "missing"
+    fi
+}
+
+detect_ufw_status() {
+    local ufw_output
+    if ! check_command_exists ufw; then
+        printf '%s' "missing"
+        return 0
+    fi
+
+    ufw_output="$(ufw status 2>/dev/null | head -n 1 || true)"
+    case "${ufw_output}" in
+        Status:\ active) printf '%s' "active" ;;
+        Status:\ inactive) printf '%s' "inactive" ;;
+        Status:*) printf '%s' "unknown" ;;
+        *) printf '%s' "unknown" ;;
+    esac
+}
+
+build_main_status_line() {
+    printf '%s' "Instances: $(count_instances) | Active: $(count_active_instances) | nftables: $(detect_nft_status) | UFW: $(detect_ufw_status)"
 }
 
 show_instance_table() {
@@ -889,28 +957,28 @@ remove_all_instances() {
 }
 
 show_main_menu() {
+    local choice
     while true; do
         print_title
-        echo "请选择操作："
-        echo
-        echo "  1) 创建 / 更新实例"
-        echo "  2) 查看实例列表"
-        echo "  3) 查看实例状态"
-        echo "  4) 运行实例验证"
-        echo "  5) 显示客户端配置提示"
-        echo "  6) 显示抓包排查命令"
-        echo "  7) 重新应用实例规则"
-        echo "  8) 删除单个实例"
-        echo "  9) 删除全部实例"
-        echo "  0) 退出"
-        echo
-        if has_instances; then
-            print_dim "当前已创建实例：$(list_instances | paste -sd ', ' -)"
-        else
-            print_dim "当前没有已创建实例。"
-        fi
-        echo
-        read_prompt choice "请输入选项编号： "
+        ui_info "$(build_main_status_line)"
+        ui_blank
+        ui_print "请选择操作："
+        ui_blank
+        ui_menu_item 1 "创建 / 更新实例"
+        ui_menu_item 2 "查看实例列表"
+        ui_menu_item 3 "查看实例状态"
+        ui_menu_item 4 "运行实例验证"
+        ui_menu_item 5 "显示客户端配置提示"
+        ui_menu_item 6 "显示抓包排查命令"
+        ui_menu_item 7 "重新应用实例规则"
+        ui_menu_item 8 "删除单个实例"
+        ui_menu_item 9 "删除全部实例"
+        ui_menu_item 0 "退出"
+        ui_blank
+        ui_print "主菜单：输入 0 退出脚本。"
+        ui_print "普通输入：输入 q 取消当前操作并返回上一级。"
+        ui_blank
+        ui_read_menu_choice choice
         case "${choice}" in
             1) create_or_update_instance ;;
             2) show_all_instances ;;
@@ -922,7 +990,6 @@ show_main_menu() {
             8) remove_instance ;;
             9) remove_all_instances ;;
             0) echo; print_info "已退出。"; exit 0 ;;
-            *) print_error "无效选项，请重新输入。"; sleep 1 ;;
         esac
     done
 }
