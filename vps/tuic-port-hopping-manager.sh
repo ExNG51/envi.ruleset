@@ -23,37 +23,182 @@ APPLY_SCRIPT="/usr/local/sbin/apply-tuic-port-hopping.sh"
 SYSTEMD_TEMPLATE="/etc/systemd/system/tuic-port-hopping@.service"
 NFT_TABLE_PREFIX="tuic_hopping_"
 
-COLOR_RESET="\033[0m"
-COLOR_RED="\033[31m"
-COLOR_GREEN="\033[32m"
-COLOR_YELLOW="\033[33m"
-COLOR_BLUE="\033[34m"
-COLOR_CYAN="\033[36m"
-COLOR_BOLD="\033[1m"
-COLOR_DIM="\033[2m"
+UI_TITLE_WIDTH=60
+UI_KV_LABEL_WIDTH=16
+UI_RETURN_TO_MENU=2
 
-print_title() {
-    clear
-    echo -e "${COLOR_CYAN}${COLOR_BOLD}"
-    echo "============================================================"
-    echo "        TUIC Port-Hopping 多实例管理脚本"
-    echo "        Version: ${SCRIPT_VERSION}"
-    echo "============================================================"
-    echo -e "${COLOR_RESET}"
-}
+UI_COLOR_RESET=""
+UI_COLOR_RED=""
+UI_COLOR_GREEN=""
+UI_COLOR_YELLOW=""
+UI_COLOR_BLUE=""
+UI_COLOR_CYAN=""
+UI_COLOR_BOLD=""
+UI_COLOR_DIM=""
 
-print_section() { echo; echo -e "${COLOR_BLUE}${COLOR_BOLD}>>> $1${COLOR_RESET}"; }
-print_success() { echo -e "${COLOR_GREEN}[成功]${COLOR_RESET} $1"; }
-print_warn() { echo -e "${COLOR_YELLOW}[提示]${COLOR_RESET} $1"; }
-print_error() { echo -e "${COLOR_RED}[错误]${COLOR_RESET} $1"; }
-print_info() { echo -e "${COLOR_CYAN}[信息]${COLOR_RESET} $1"; }
-print_dim() { echo -e "${COLOR_DIM}$1${COLOR_RESET}"; }
+COLOR_RESET=""
+COLOR_RED=""
+COLOR_GREEN=""
+COLOR_YELLOW=""
+COLOR_BLUE=""
+COLOR_CYAN=""
+COLOR_BOLD=""
+COLOR_DIM=""
 
 PROMPT_FD=0
 
+ui_support_color() {
+    [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-}" != "dumb" ]
+}
+
+ui_color() {
+    local code="$1"
+    printf '\033[%sm' "${code}"
+}
+
+ui_init_colors() {
+    if ui_support_color || [ "${FORCE_COLOR:-}" = "1" ]; then
+        UI_COLOR_RESET="$(ui_color 0)"
+        UI_COLOR_RED="$(ui_color 31)"
+        UI_COLOR_GREEN="$(ui_color 32)"
+        UI_COLOR_YELLOW="$(ui_color 33)"
+        UI_COLOR_BLUE="$(ui_color 34)"
+        UI_COLOR_CYAN="$(ui_color 36)"
+        UI_COLOR_BOLD="$(ui_color 1)"
+        UI_COLOR_DIM="$(ui_color 2)"
+    else
+        UI_COLOR_RESET=""
+        UI_COLOR_RED=""
+        UI_COLOR_GREEN=""
+        UI_COLOR_YELLOW=""
+        UI_COLOR_BLUE=""
+        UI_COLOR_CYAN=""
+        UI_COLOR_BOLD=""
+        UI_COLOR_DIM=""
+    fi
+
+    COLOR_RESET="${UI_COLOR_RESET}"
+    COLOR_RED="${UI_COLOR_RED}"
+    COLOR_GREEN="${UI_COLOR_GREEN}"
+    COLOR_YELLOW="${UI_COLOR_YELLOW}"
+    COLOR_BLUE="${UI_COLOR_BLUE}"
+    COLOR_CYAN="${UI_COLOR_CYAN}"
+    COLOR_BOLD="${UI_COLOR_BOLD}"
+    COLOR_DIM="${UI_COLOR_DIM}"
+}
+
+ui_clear() {
+    clear 2>/dev/null || true
+}
+
+ui_blank() {
+    printf '\n'
+}
+
+ui_text_width() {
+    local text="$1" width=0 i char byte
+    local LC_ALL=C
+
+    for ((i = 0; i < ${#text}; i++)); do
+        char="${text:i:1}"
+        printf -v byte '%d' "'${char}"
+        ((byte < 0)) && byte=$((byte + 256))
+
+        if ((byte < 128)); then
+            ((width += 1))
+        elif ((byte >= 192)); then
+            ((width += 2))
+        fi
+    done
+
+    printf '%s' "${width}"
+}
+
+ui_center_line() {
+    local text="$1" width="${2:-${UI_TITLE_WIDTH}}" text_width padding
+    text_width="$(ui_text_width "${text}")"
+    padding=$(((width - text_width) / 2))
+    ((padding < 0)) && padding=0
+    printf '%*s%s\n' "${padding}" '' "${text}"
+}
+
+ui_title() {
+    local title="$1" version="${2:-}" rule
+    ui_clear
+    printf -v rule '%*s' "${UI_TITLE_WIDTH}" ''
+    rule="${rule// /=}"
+
+    printf '%b' "${UI_COLOR_CYAN}${UI_COLOR_BOLD}"
+    printf '%s\n' "${rule}"
+    ui_center_line "${title}" "${UI_TITLE_WIDTH}"
+    if [ -n "${version}" ]; then
+        ui_center_line "Version: ${version}" "${UI_TITLE_WIDTH}"
+    fi
+    printf '%s\n' "${rule}"
+    printf '%b' "${UI_COLOR_RESET}"
+}
+
+ui_print() {
+    printf '%b\n' "$*"
+}
+
+ui_dim() {
+    printf '%b\n' "${UI_COLOR_DIM}$*${UI_COLOR_RESET}"
+}
+
+ui_info() {
+    printf '%b\n' "${UI_COLOR_CYAN}[i]${UI_COLOR_RESET} $*"
+}
+
+ui_ok() {
+    printf '%b\n' "${UI_COLOR_GREEN}[OK]${UI_COLOR_RESET} $*"
+}
+
+ui_warn() {
+    printf '%b\n' "${UI_COLOR_YELLOW}[WARN]${UI_COLOR_RESET} $*" >&2
+}
+
+ui_error() {
+    printf '%b\n' "${UI_COLOR_RED}[ERROR]${UI_COLOR_RESET} $*" >&2
+}
+
+ui_section() {
+    printf '\n%b\n' "${UI_COLOR_BLUE}${UI_COLOR_BOLD}>>> $*${UI_COLOR_RESET}"
+}
+
+ui_rule() {
+    printf '%*s\n' "${UI_TITLE_WIDTH}" '' | tr ' ' '-'
+}
+
+ui_kv() {
+    local label="$1" value="${2:-}" label_width padding
+    label_width="$(ui_text_width "${label}")"
+    padding=$((UI_KV_LABEL_WIDTH - label_width))
+    ((padding < 1)) && padding=1
+    printf '%s%*s%s\n' "${label}" "${padding}" '' "${value}"
+}
+
+ui_menu_item() {
+    local number="$1" label="$2"
+    printf ' %2s. %s\n' "${number}" "${label}"
+}
+
+ui_pause() {
+    local _
+    ui_blank
+    read_prompt _ "按回车键继续..."
+}
+
+print_title() { ui_title "TUIC Port-Hopping 多实例管理脚本" "${SCRIPT_VERSION}"; }
+print_section() { ui_section "$@"; }
+print_success() { ui_ok "$@"; }
+print_warn() { ui_warn "$@"; }
+print_error() { ui_error "$@"; }
+print_info() { ui_info "$@"; }
+print_dim() { ui_dim "$@"; }
+
 init_prompt_input() {
-    if [ -r /dev/tty ]; then
-        exec 3</dev/tty
+    if [ -r /dev/tty ] && { exec 3</dev/tty; } 2>/dev/null; then
         PROMPT_FD=3
     else
         PROMPT_FD=0
@@ -73,9 +218,7 @@ read_prompt() {
 }
 
 pause_screen() {
-    local _
-    echo
-    read_prompt _ "按回车键继续..."
+    ui_pause
 }
 
 confirm_yes_no() {
@@ -786,6 +929,7 @@ show_main_menu() {
 
 main() {
     require_root
+    ui_init_colors
     init_prompt_input
     ensure_directories
     show_main_menu
