@@ -1047,22 +1047,16 @@ verify_takeover() {
     local failed=0
     ui_section "验证新服务"
 
-    if systemctl is-active --quiet snell 2>/dev/null; then
-        ui_ok "新 snell 服务 active。"
-    else
-        ui_error "新 snell 服务未处于 active。"
-        failed=1
-    fi
-
-    if check_command_exists ss; then
-        if is_tcp_port_listening "${LEGACY_PORT}"; then
-            ui_ok "检测到 TCP ${LEGACY_PORT} 正在监听。"
+    if wait_for_snell_runtime_core "${LEGACY_PORT}"; then
+        if check_command_exists ss || check_command_exists netstat; then
+            ui_ok "新 snell 服务 active，且 TCP ${LEGACY_PORT} 正在监听。"
         else
-            ui_error "未检测到 TCP ${LEGACY_PORT} 监听。"
-            failed=1
+            ui_ok "新 snell 服务 active。"
         fi
     else
-        ui_warn "缺少 ss 命令，跳过端口监听验证。"
+        ui_error "新 snell 服务未能通过 active + TCP ${LEGACY_PORT} 监听验证。"
+        show_snell_runtime_failure_diagnostics "${LEGACY_PORT}"
+        failed=1
     fi
 
     if [ -f "${SNELL_CONFIG_FILE}" ] && [ -f "${SNELL_SERVICE_FILE}" ]; then
@@ -1694,6 +1688,25 @@ wait_for_snell_runtime_core() {
     return 1
 }
 
+show_snell_runtime_failure_diagnostics() {
+    local port="${1:-}"
+
+    ui_warn "建议检查以下命令："
+    ui_print "systemctl status snell --no-pager"
+    ui_print "journalctl -u snell -n 120 --no-pager"
+    if [ -n "${port}" ]; then
+        ui_print "ss -ltnp | grep ':${port}' || true"
+    else
+        ui_print "ss -ltnp | grep snell || true"
+    fi
+
+    if has_legacy_layout && systemctl is-active --quiet snell-server 2>/dev/null; then
+        ui_warn "检测到旧 snell-server 仍处于 active。若这是旧 VPS，优先使用“检测 / 接管旧 Snell 服务与配置”。"
+        ui_print "systemctl status snell-server --no-pager"
+        ui_print "journalctl -u snell-server -n 80 --no-pager"
+    fi
+}
+
 enable_and_restart_service() {
     systemctl enable snell >/dev/null || return 1
     restart_snell_service
@@ -1716,6 +1729,10 @@ install_or_reinstall_snell() {
             ui_warn "已取消安装。"
             pause_screen
             return
+        fi
+        if systemctl is-active --quiet snell-server 2>/dev/null; then
+            ui_warn "旧 snell-server 当前仍处于 active。直接安装新 snell.service 可能与旧服务并存。"
+            ui_warn "如需沿用旧配置，建议返回主菜单使用“检测 / 接管旧 Snell 服务与配置”。"
         fi
     fi
     ensure_dependencies || return 1
@@ -1813,7 +1830,8 @@ install_or_reinstall_snell() {
             "${service_backup}"
         return 1
     }
-    validate_snell_runtime_core "${port}" || {
+    wait_for_snell_runtime_core "${port}" || {
+        show_snell_runtime_failure_diagnostics "${port}"
         handle_snell_install_failure \
             "Snell 安装后核心验证失败。" \
             "${is_overwrite_install}" \
@@ -1949,8 +1967,9 @@ modify_snell_config() {
     fi
 
     new_port_for_validation="${port}"
-    if ! validate_snell_runtime_core "${new_port_for_validation}"; then
+    if ! wait_for_snell_runtime_core "${new_port_for_validation}"; then
         ui_error "新配置重启后核心验证失败。"
+        show_snell_runtime_failure_diagnostics "${new_port_for_validation}"
         restore_snell_config_after_failed_change "${config_backup}" || true
         pause_screen
         return 1
@@ -2004,7 +2023,7 @@ update_snell_server() {
     fi
 
     ensure_dependencies || return 1
-    local target_version binary_backup config_backup version_backup
+    local target_version binary_backup config_backup version_backup current_port
     choose_update_version target_version || return "$?"
     binary_backup="$(backup_path_for_rollback "${SNELL_BINARY_PATH}")" || return 1
     config_backup="$(backup_path_for_rollback "${SNELL_CONFIG_FILE}")" || return 1
@@ -2025,6 +2044,13 @@ update_snell_server() {
         return 1
     fi
     if ! restart_snell_service; then
+        rollback_snell_update "${binary_backup}" "${config_backup}" "${version_backup}"
+        pause_screen
+        return 1
+    fi
+    current_port="$(get_config_port 2>/dev/null || true)"
+    if ! wait_for_snell_runtime_core "${current_port}"; then
+        show_snell_runtime_failure_diagnostics "${current_port}"
         rollback_snell_update "${binary_backup}" "${config_backup}" "${version_backup}"
         pause_screen
         return 1
@@ -2132,12 +2158,16 @@ validate_snell_service() {
         failed=1
     fi
 
-    if [ -n "${port}" ] && check_command_exists ss && is_tcp_port_listening "${port}"; then
-        ui_ok "检测到 TCP ${port} 正在监听。"
-        ss -tlnp 2>/dev/null | grep -E ":${port}([[:space:]]|$)" || true
-    elif [ -n "${port}" ]; then
-        ui_warn "未检测到 TCP ${port} 监听。"
-        failed=1
+    if [ -n "${port}" ]; then
+        if ! check_command_exists ss && ! check_command_exists netstat; then
+            ui_warn "缺少 ss/netstat，无法验证 TCP ${port} 监听。"
+        elif is_tcp_port_listening "${port}"; then
+            ui_ok "检测到 TCP ${port} 正在监听。"
+            ss -tlnp 2>/dev/null | grep -E ":${port}([[:space:]]|$)" || true
+        else
+            ui_warn "未检测到 TCP ${port} 监听。"
+            failed=1
+        fi
     fi
 
     ui_blank
