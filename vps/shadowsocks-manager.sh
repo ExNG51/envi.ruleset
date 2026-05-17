@@ -1152,8 +1152,9 @@ restart_ss_service() {
 }
 
 update_ss_binary_with_rollback() {
-    local backup_path=""
+    local backup_path="" current_port=""
     backup_path="$(backup_file_for_rollback "${SS_BINARY}")" || return 1
+    current_port="$(get_ss_port || true)"
     if ! download_and_install_ss_binary; then
         print_error "Shadowsocks-Rust 下载或安装失败，正在恢复旧二进制。"
         restore_executable_backup "${backup_path}" "${SS_BINARY}" || true
@@ -1162,7 +1163,26 @@ update_ss_binary_with_rollback() {
     if ! restart_ss_service; then
         print_error "Shadowsocks-Rust 新版本重启失败，正在恢复旧二进制。"
         restore_executable_backup "${backup_path}" "${SS_BINARY}" || true
-        restart_ss_service || true
+        restart_ss_service >/dev/null 2>&1 || true
+        show_ss_runtime_failure_diagnostics "${current_port}"
+        return 1
+    fi
+
+    ensure_runtime_validation_dependencies
+    if ! wait_for_ss_runtime_core "${current_port}"; then
+        print_error "Shadowsocks-Rust 更新后未通过运行验证，正在恢复旧二进制。"
+        show_ss_runtime_failure_diagnostics "${current_port}"
+        restore_executable_backup "${backup_path}" "${SS_BINARY}" || true
+        if ! restart_ss_service >/dev/null 2>&1; then
+            print_error "旧 Shadowsocks 二进制恢复后服务重启失败。"
+            show_ss_runtime_failure_diagnostics "${current_port}"
+            return 1
+        fi
+        if ! wait_for_ss_runtime_core "${current_port}"; then
+            print_error "旧 Shadowsocks 二进制恢复后仍未通过运行验证。"
+            show_ss_runtime_failure_diagnostics "${current_port}"
+            return 1
+        fi
         return 1
     fi
     return 0
@@ -1478,6 +1498,94 @@ handle_ss_install_failure() {
     return 1
 }
 
+cleanup_failed_fresh_shadow_tls_installation() {
+    ui_warn "全新 Shadow-TLS 安装未完成，正在清理本次写入的残留。"
+    systemctl disable --now shadow-tls >/dev/null 2>&1 || true
+    remove_file_if_exists "${SYSTEMD_SHADOW_TLS_SERVICE}" || true
+    remove_file_if_exists "${SHADOW_TLS_ENV_FILE}" || true
+    remove_file_if_exists "${SHADOW_TLS_BINARY}" || true
+    systemctl daemon-reload >/dev/null 2>&1 || true
+}
+
+rollback_shadow_tls_installation_change() {
+    local binary_backup="$1" env_backup="$2" service_backup="$3" old_stls_port="${4:-}"
+    local rollback_failed=0
+
+    ui_warn "Shadow-TLS 安装 / 配置失败，正在恢复旧状态。"
+
+    if [ -n "${binary_backup}" ]; then
+        restore_path_for_rollback "${binary_backup}" "${SHADOW_TLS_BINARY}" || {
+            ui_error "旧 Shadow-TLS 二进制恢复失败：${binary_backup}"
+            rollback_failed=1
+        }
+    else
+        remove_file_if_exists "${SHADOW_TLS_BINARY}" || rollback_failed=1
+    fi
+
+    if [ -n "${env_backup}" ]; then
+        restore_path_for_rollback "${env_backup}" "${SHADOW_TLS_ENV_FILE}" || {
+            ui_error "旧 Shadow-TLS 环境文件恢复失败：${env_backup}"
+            rollback_failed=1
+        }
+    else
+        remove_file_if_exists "${SHADOW_TLS_ENV_FILE}" || rollback_failed=1
+    fi
+
+    if [ -n "${service_backup}" ]; then
+        restore_path_for_rollback "${service_backup}" "${SYSTEMD_SHADOW_TLS_SERVICE}" || {
+            ui_error "旧 Shadow-TLS 服务文件恢复失败：${service_backup}"
+            rollback_failed=1
+        }
+    else
+        systemctl disable --now shadow-tls >/dev/null 2>&1 || true
+        remove_file_if_exists "${SYSTEMD_SHADOW_TLS_SERVICE}" || rollback_failed=1
+    fi
+
+    systemctl daemon-reload >/dev/null 2>&1 || true
+
+    if [ -f "${SYSTEMD_SHADOW_TLS_SERVICE}" ]; then
+        if ! systemctl restart shadow-tls >/dev/null 2>&1; then
+            ui_error "旧 Shadow-TLS 服务重启失败。"
+            show_shadow_tls_runtime_failure_diagnostics "${old_stls_port}"
+            rollback_failed=1
+        else
+            ensure_runtime_validation_dependencies
+            if ! wait_for_shadow_tls_runtime_core "${old_stls_port}"; then
+                ui_error "旧 Shadow-TLS 服务恢复后未通过运行验证。"
+                show_shadow_tls_runtime_failure_diagnostics "${old_stls_port}"
+                rollback_failed=1
+            fi
+        fi
+    fi
+
+    if [ "${rollback_failed}" -ne 0 ]; then
+        ui_error "旧 Shadow-TLS 状态未完全恢复，请根据上方诊断命令手动处理。"
+        return 1
+    fi
+
+    print_success "旧 Shadow-TLS 状态已恢复。"
+    return 0
+}
+
+handle_shadow_tls_install_failure() {
+    local reason="$1" had_shadow_tls_installation="$2" binary_backup="$3" env_backup="$4" service_backup="$5" old_stls_port="${6:-}"
+
+    ui_error "${reason}"
+
+    if [ "${had_shadow_tls_installation}" = "true" ]; then
+        rollback_shadow_tls_installation_change \
+            "${binary_backup}" \
+            "${env_backup}" \
+            "${service_backup}" \
+            "${old_stls_port}" || true
+    else
+        cleanup_failed_fresh_shadow_tls_installation
+    fi
+
+    pause_screen
+    return 1
+}
+
 build_status_line() {
     local manager="${SERVICE_MANAGER:-unknown}" arch="${ARCH:-unknown}"
     printf 'SS: %s | Shadow-TLS: %s | Manager: %s | Arch: %s' \
@@ -1724,8 +1832,11 @@ download_and_install_shadow_tls_binary() {
 }
 
 update_shadow_tls_binary_with_rollback() {
-    local backup_path=""
+    local backup_path="" current_stls_port=""
     backup_path="$(backup_file_for_rollback "${SHADOW_TLS_BINARY}")" || return 1
+    if [ -f "${SHADOW_TLS_ENV_FILE}" ] && load_shadow_tls_env; then
+        current_stls_port="${STLS_PORT:-}"
+    fi
     if ! download_and_install_shadow_tls_binary; then
         print_error "Shadow-TLS 下载或安装失败，正在恢复旧二进制。"
         restore_executable_backup "${backup_path}" "${SHADOW_TLS_BINARY}" || true
@@ -1734,7 +1845,26 @@ update_shadow_tls_binary_with_rollback() {
     if ! systemctl restart shadow-tls; then
         print_error "Shadow-TLS 新版本重启失败，正在恢复旧二进制。"
         restore_executable_backup "${backup_path}" "${SHADOW_TLS_BINARY}" || true
-        systemctl restart shadow-tls || true
+        systemctl restart shadow-tls >/dev/null 2>&1 || true
+        show_shadow_tls_runtime_failure_diagnostics "${current_stls_port}"
+        return 1
+    fi
+
+    ensure_runtime_validation_dependencies
+    if ! wait_for_shadow_tls_runtime_core "${current_stls_port}"; then
+        print_error "Shadow-TLS 更新后未通过运行验证，正在恢复旧二进制。"
+        show_shadow_tls_runtime_failure_diagnostics "${current_stls_port}"
+        restore_executable_backup "${backup_path}" "${SHADOW_TLS_BINARY}" || true
+        if ! systemctl restart shadow-tls >/dev/null 2>&1; then
+            print_error "旧 Shadow-TLS 二进制恢复后服务重启失败。"
+            show_shadow_tls_runtime_failure_diagnostics "${current_stls_port}"
+            return 1
+        fi
+        if ! wait_for_shadow_tls_runtime_core "${current_stls_port}"; then
+            print_error "旧 Shadow-TLS 二进制恢复后仍未通过运行验证。"
+            show_shadow_tls_runtime_failure_diagnostics "${current_stls_port}"
+            return 1
+        fi
         return 1
     fi
     return 0
@@ -1756,7 +1886,7 @@ EOF
     chmod 600 "${SHADOW_TLS_ENV_FILE}"
 }
 
-write_shadow_tls_service() {
+write_shadow_tls_service_file() {
     cat > "${SYSTEMD_SHADOW_TLS_SERVICE}" <<EOF
 [Unit]
 Description=Shadow-TLS Server Service (v3)
@@ -1781,7 +1911,16 @@ RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 WantedBy=multi-user.target
 EOF
     systemctl daemon-reload
-    systemctl enable --now shadow-tls >/dev/null
+}
+
+enable_and_restart_shadow_tls_service() {
+    systemctl enable shadow-tls >/dev/null || return 1
+    systemctl restart shadow-tls
+}
+
+write_shadow_tls_service() {
+    write_shadow_tls_service_file || return 1
+    enable_and_restart_shadow_tls_service
 }
 
 install_or_configure_shadow_tls() {
@@ -1804,8 +1943,24 @@ install_or_configure_shadow_tls() {
     fetch_latest_versions_if_needed
 
     local ss_port stls_port stls_sni stls_password
+    local stls_confirm_status=0
+    local had_shadow_tls_installation=false
+    local shadow_tls_binary_backup="" shadow_tls_env_backup="" shadow_tls_service_backup=""
+    local old_stls_port=""
     ss_port="$(get_ss_port)"
     [ -n "${ss_port}" ] || { print_error "无法读取 Shadowsocks 端口。"; pause_screen; return 1; }
+
+    if has_shadow_tls_installation_state; then
+        had_shadow_tls_installation=true
+        if [ -f "${SHADOW_TLS_ENV_FILE}" ] && load_shadow_tls_env; then
+            old_stls_port="${STLS_PORT:-}"
+        fi
+        backup_shadow_tls_installation_for_rollback shadow_tls_binary_backup shadow_tls_env_backup shadow_tls_service_backup || {
+            print_error "旧 Shadow-TLS 状态备份失败，已停止安装 / 配置。"
+            pause_screen
+            return 1
+        }
+    fi
 
     ui_blank
     read_prompt stls_port "请输入 Shadow-TLS 监听端口（默认 443，回车使用默认值，q 取消）： " || { cancel_to_previous_menu; return; }
@@ -1838,7 +1993,6 @@ install_or_configure_shadow_tls() {
     fi
 
     show_shadow_tls_change_summary "确认 Shadow-TLS 参数" "${ss_port}" "${stls_port}" "${stls_sni}"
-    local stls_confirm_status=0
     ui_blank
     confirm_yes_no "确认写入配置并启动 Shadow-TLS？" "y" || stls_confirm_status=$?
     if [ "${stls_confirm_status}" -eq "${CANCEL_STATUS}" ]; then
@@ -1851,9 +2005,61 @@ install_or_configure_shadow_tls() {
         return
     fi
 
-    download_and_install_shadow_tls_binary || { pause_screen; return 1; }
-    write_shadow_tls_env "${ss_port}" "${stls_port}" "${stls_sni}" "${stls_password}" || { pause_screen; return 1; }
-    write_shadow_tls_service || { pause_screen; return 1; }
+    download_and_install_shadow_tls_binary || {
+        handle_shadow_tls_install_failure \
+            "Shadow-TLS 下载或安装失败。" \
+            "${had_shadow_tls_installation}" \
+            "${shadow_tls_binary_backup}" \
+            "${shadow_tls_env_backup}" \
+            "${shadow_tls_service_backup}" \
+            "${old_stls_port}"
+        return 1
+    }
+    write_shadow_tls_env "${ss_port}" "${stls_port}" "${stls_sni}" "${stls_password}" || {
+        handle_shadow_tls_install_failure \
+            "Shadow-TLS 环境文件写入失败。" \
+            "${had_shadow_tls_installation}" \
+            "${shadow_tls_binary_backup}" \
+            "${shadow_tls_env_backup}" \
+            "${shadow_tls_service_backup}" \
+            "${old_stls_port}"
+        return 1
+    }
+    write_shadow_tls_service_file || {
+        handle_shadow_tls_install_failure \
+            "Shadow-TLS 服务定义写入失败。" \
+            "${had_shadow_tls_installation}" \
+            "${shadow_tls_binary_backup}" \
+            "${shadow_tls_env_backup}" \
+            "${shadow_tls_service_backup}" \
+            "${old_stls_port}"
+        return 1
+    }
+    enable_and_restart_shadow_tls_service || {
+        show_shadow_tls_runtime_failure_diagnostics "${stls_port}"
+        handle_shadow_tls_install_failure \
+            "Shadow-TLS 服务启用或重启失败。" \
+            "${had_shadow_tls_installation}" \
+            "${shadow_tls_binary_backup}" \
+            "${shadow_tls_env_backup}" \
+            "${shadow_tls_service_backup}" \
+            "${old_stls_port}"
+        return 1
+    }
+
+    ensure_runtime_validation_dependencies
+    if ! wait_for_shadow_tls_runtime_core "${stls_port}"; then
+        show_shadow_tls_runtime_failure_diagnostics "${stls_port}"
+        handle_shadow_tls_install_failure \
+            "Shadow-TLS 启动后未通过运行验证。" \
+            "${had_shadow_tls_installation}" \
+            "${shadow_tls_binary_backup}" \
+            "${shadow_tls_env_backup}" \
+            "${shadow_tls_service_backup}" \
+            "${old_stls_port}"
+        return 1
+    fi
+
     print_success "Shadow-TLS 已安装并启动。"
     show_client_config false
     pause_screen
