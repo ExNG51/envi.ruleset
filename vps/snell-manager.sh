@@ -493,14 +493,60 @@ install_packages() {
     esac
 }
 
-ensure_dependencies() {
+ensure_snell_install_dependencies() {
     ui_section "检查基础依赖"
     case "${PKG_MANAGER}" in
         apk) install_packages curl openssl unzip ca-certificates iproute2 || return 1 ;;
         apt) install_packages curl openssl unzip ca-certificates iproute2 || return 1 ;;
         dnf|yum) install_packages curl openssl unzip ca-certificates iproute || return 1 ;;
+        *)
+            ui_error "未识别的包管理器：${PKG_MANAGER}"
+            return 1
+            ;;
     esac
     ui_ok "基础依赖已就绪。"
+}
+
+ensure_dependencies() {
+    ensure_snell_install_dependencies
+}
+
+has_runtime_port_probe_tool() {
+    check_command_exists ss || check_command_exists netstat
+}
+
+install_runtime_port_probe_dependency() {
+    case "${PKG_MANAGER}" in
+        apk) install_packages iproute2 || return 1 ;;
+        apt) install_packages iproute2 || return 1 ;;
+        dnf|yum) install_packages iproute || return 1 ;;
+        *) return 1 ;;
+    esac
+}
+
+ensure_snell_validation_dependencies() {
+    if has_runtime_port_probe_tool; then
+        return 0
+    fi
+
+    ui_warn "未检测到 ss/netstat，正在安装运行验证依赖。"
+
+    if install_runtime_port_probe_dependency && has_runtime_port_probe_tool; then
+        ui_ok "运行验证依赖已就绪。"
+        return 0
+    fi
+
+    ui_warn "运行验证依赖未能自动就绪，将仅进行 systemd active 验证。"
+    return 0
+}
+
+warn_missing_runtime_probe_tool_for_readonly() {
+    if ! has_runtime_port_probe_tool; then
+        ui_warn "未检测到 ss/netstat，端口监听验证将跳过；可在安装/更新/配置/接管动作中自动补齐 iproute2/iproute。"
+        return 1
+    fi
+
+    return 0
 }
 
 normalize_version() {
