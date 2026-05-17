@@ -833,6 +833,13 @@ finalize_legacy_takeover() {
     ui_ok "旧服务和旧配置已备份，新 snell 服务已接管。"
 }
 
+cleanup_failed_new_snell_takeover() {
+    ui_warn "正在清理失败的新 snell 接管残留。"
+    systemctl disable --now snell >/dev/null 2>&1 || true
+    rm -f "${SNELL_SERVICE_FILE}"
+    systemctl daemon-reload >/dev/null 2>&1 || true
+}
+
 rollback_legacy_takeover() {
     ui_section "接管失败，执行回滚"
     systemctl disable --now snell >/dev/null 2>&1 || true
@@ -864,8 +871,17 @@ run_legacy_takeover() {
     ui_blank
     ui_confirm_token "确认接管旧 Snell？" "TAKEOVER" || { ui_warn "已取消接管。"; pause_screen; return 0; }
 
-    ensure_dependencies
-    write_config_from_legacy
+    ensure_dependencies || {
+        ui_error "依赖安装失败，未执行接管。"
+        pause_screen
+        return 1
+    }
+    write_config_from_legacy || {
+        ui_error "新配置或服务文件生成失败，未切换旧服务。"
+        cleanup_failed_new_snell_takeover
+        pause_screen
+        return 1
+    }
     if ! start_new_service_for_takeover; then
         rollback_legacy_takeover
         pause_screen
@@ -1299,8 +1315,11 @@ install_or_reinstall_snell() {
     write_snell_config "${port}" "${psk}" "${ipv6}" "${dns}" "${obfs}" "${obfs_host}" "${tfo}" "${protocol_version}" || return 1
     write_systemd_service || return 1
     if [ "${tfo}" = "true" ]; then
-        write_network_tuning || return 1
-        ui_ok "已同步应用 TFO 与基础网络优化参数。"
+        if write_network_tuning; then
+            ui_ok "已同步应用 TFO 与基础网络优化参数。"
+        else
+            ui_warn "Snell 将继续安装，但 TFO / 网络优化未确认生效，请稍后通过菜单 8 单独修复。"
+        fi
     fi
     enable_and_restart_service || return 1
 
@@ -1446,7 +1465,7 @@ update_snell_server() {
     pause_screen
 }
 
-write_network_tuning() {
+write_network_tuning_file() {
     cat <<'EOF' | atomic_replace_file "${SNELL_SYSCTL_FILE}" 644 || return 1
 net.core.rmem_default = 262144
 net.core.rmem_max = 6291456
@@ -1457,10 +1476,22 @@ net.ipv4.tcp_congestion_control = bbr
 net.ipv4.tcp_ecn = 1
 net.ipv4.tcp_fastopen = 3
 EOF
+}
+
+apply_network_tuning_runtime() {
     if check_command_exists modprobe; then
         modprobe tcp_bbr >/dev/null 2>&1 || true
     fi
-    sysctl --system >/dev/null 2>&1 || true
+    if ! sysctl --system >/dev/null 2>&1; then
+        ui_error "sysctl --system 加载失败，网络调优文件已写入但未确认生效。"
+        return 1
+    fi
+    return 0
+}
+
+write_network_tuning() {
+    write_network_tuning_file || return 1
+    apply_network_tuning_runtime || return 1
 }
 
 manage_service() {
@@ -1591,8 +1622,14 @@ apply_network_tuning() {
     ui_render_title
     ui_section "应用 / 更新网络优化"
     local pause_after="${1:-false}"
-    write_network_tuning
-    ui_ok "网络优化参数已写入 ${SNELL_SYSCTL_FILE}。"
+    write_network_tuning || {
+        ui_error "网络优化参数写入或加载失败。"
+        if [ "${pause_after}" = true ]; then
+            pause_screen
+        fi
+        return 1
+    }
+    ui_ok "网络优化参数已写入并完成加载：${SNELL_SYSCTL_FILE}。"
     if [ "${pause_after}" = true ]; then
         pause_screen
     fi
@@ -1616,7 +1653,9 @@ uninstall_snell() {
     rm -f "${SNELL_SERVICE_FILE}" "${OLD_SNELL_SERVICE_FILE}" "${SNELL_BINARY_PATH}" "${SNELL_SYSCTL_FILE}"
     rm -rf "${SNELL_CONFIG_DIR}"
     systemctl daemon-reload >/dev/null 2>&1 || true
-    sysctl --system >/dev/null 2>&1 || true
+    if ! sysctl --system >/dev/null 2>&1; then
+        ui_warn "sysctl 配置重新加载失败，请手动执行 sysctl --system 检查。"
+    fi
     ui_ok "Snell Server 已卸载。"
     pause_screen
 }
