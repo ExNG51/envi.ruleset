@@ -10,7 +10,7 @@ set -Eeuo pipefail
 # ==============================================================================
 
 readonly SCRIPT_DISPLAY_NAME="VPS 初始化向导"
-readonly SCRIPT_VERSION="2026.05.16-r1"
+readonly SCRIPT_VERSION="2026.05.16-r2"
 
 UI_COLOR_RESET=''
 UI_COLOR_RED=''
