@@ -1029,39 +1029,189 @@ detect_ssh_service_name() {
     fi
 }
 
+show_ssh_port_diagnostics() {
+    local port="${1:-}"
+
+    display_status_warning "SSH 端口诊断命令："
+    ui_print "sshd -t"
+    ui_print "systemctl status ssh --no-pager || systemctl status sshd --no-pager"
+    ui_print "journalctl -u ssh -n 80 --no-pager || journalctl -u sshd -n 80 --no-pager"
+    if [ -n "${port}" ]; then
+        ui_print "ss -ltnp | grep ':${port}' || netstat -ltnp 2>/dev/null | grep '[:.]${port}' || true"
+    else
+        ui_print "ss -ltnp || netstat -ltnp 2>/dev/null || true"
+    fi
+}
+
+show_ssh_manual_restore_commands() {
+    local ssh_config_target="$1"
+    local backup_file="${2:-}"
+    local port="${3:-}"
+
+    display_status_warning "SSH 人工恢复命令："
+    if [ -n "${backup_file}" ]; then
+        ui_print "cp ${backup_file} ${ssh_config_target}"
+    else
+        ui_print "rm -f ${ssh_config_target}"
+    fi
+    ui_print "sshd -t"
+    ui_print "systemctl restart ssh || systemctl restart sshd"
+    if [ -n "${port}" ]; then
+        ui_print "ss -ltnp | grep ':${port}' || netstat -ltnp 2>/dev/null | grep '[:.]${port}' || true"
+    fi
+}
+
+restore_ssh_config() {
+    local ssh_config_target="$1"
+    local backup_file="${2:-}"
+    local port="${3:-}"
+
+    if restore_file_from_backup "${ssh_config_target}" "${backup_file}"; then
+        display_status_success "已恢复 SSH 配置: ${ssh_config_target}"
+        return 0
+    fi
+
+    display_status_error "SSH 配置恢复失败: ${ssh_config_target}"
+    show_ssh_manual_restore_commands "${ssh_config_target}" "${backup_file}" "${port}"
+    return 1
+}
+
+reload_or_restart_ssh_service() {
+    local ssh_service_name="$1"
+
+    if command -v systemctl >/dev/null 2>&1; then
+        run_logged systemctl reload "${ssh_service_name}" || run_logged systemctl restart "${ssh_service_name}"
+        return "$?"
+    fi
+
+    run_logged service "${ssh_service_name}" reload || run_logged service "${ssh_service_name}" restart
+}
+
+restart_ssh_service() {
+    local ssh_service_name="$1"
+
+    if command -v systemctl >/dev/null 2>&1; then
+        run_logged systemctl restart "${ssh_service_name}"
+        return "$?"
+    fi
+
+    run_logged service "${ssh_service_name}" restart
+}
+
+is_ssh_service_active() {
+    local ssh_service_name="$1"
+
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl is-active --quiet "${ssh_service_name}"
+        return "$?"
+    fi
+
+    return 2
+}
+
+handle_ssh_failure_with_restore() {
+    local message="$1"
+    local ssh_config_target="$2"
+    local backup_file="$3"
+    local sshd_binary="$4"
+    local ssh_service_name="$5"
+    local port="$6"
+
+    display_status_error "${message}"
+    show_ssh_port_diagnostics "${port}"
+
+    if ! restore_ssh_config "${ssh_config_target}" "${backup_file}" "${port}"; then
+        exit 1
+    fi
+
+    if ! "${sshd_binary}" -t; then
+        display_status_error "恢复后 SSH 配置语法检查失败，请按人工恢复命令处理。"
+        show_ssh_port_diagnostics "${port}"
+        show_ssh_manual_restore_commands "${ssh_config_target}" "${backup_file}" "${port}"
+        exit 1
+    fi
+
+    if ! restart_ssh_service "${ssh_service_name}"; then
+        display_status_error "恢复后 SSH 服务重启失败，请按人工恢复命令处理。"
+        show_ssh_port_diagnostics "${port}"
+        show_ssh_manual_restore_commands "${ssh_config_target}" "${backup_file}" "${port}"
+        exit 1
+    fi
+
+    display_status_success "恢复后的 SSH 配置已通过语法检查并完成服务重启。"
+    exit 1
+}
+
 reload_ssh_service_or_restore() {
     local ssh_config_target="$1"
     local backup_file="$2"
     local sshd_binary="$3"
+    local port="$4"
     local ssh_service_name
-
-    if ! "${sshd_binary}" -t; then
-        restore_file_from_backup "${ssh_config_target}" "${backup_file}"
-        display_status_error "SSH 配置语法检查失败，已恢复备份。"
-        exit 1
-    fi
 
     ssh_service_name="$(detect_ssh_service_name)"
 
-    if command -v systemctl >/dev/null 2>&1; then
-        if run_logged systemctl reload "${ssh_service_name}" || run_logged systemctl restart "${ssh_service_name}"; then
-            return
+    if ! "${sshd_binary}" -t; then
+        handle_ssh_failure_with_restore "SSH 配置语法检查失败，准备恢复备份。" "${ssh_config_target}" "${backup_file}" "${sshd_binary}" "${ssh_service_name}" "${port}"
+    fi
+
+    if ! reload_or_restart_ssh_service "${ssh_service_name}"; then
+        handle_ssh_failure_with_restore "SSH 服务重载/重启失败，准备恢复备份。" "${ssh_config_target}" "${backup_file}" "${sshd_binary}" "${ssh_service_name}" "${port}"
+    fi
+}
+
+validate_new_ssh_port() {
+    local port="$1"
+    local ssh_service_name="${2:-}"
+    local probe_status
+
+    if ! validate_port_number "${port}"; then
+        display_status_error "SSH 端口不合法，无法验证监听状态: ${port}"
+        return 1
+    fi
+
+    if is_tcp_port_listening "${port}"; then
+        probe_status=0
+    else
+        probe_status=$?
+    fi
+    case "${probe_status}" in
+        0)
+            display_status_success "SSH 新端口 ${port} 已处于监听状态。"
+            return 0
+            ;;
+        2)
+            if [ -z "${ssh_service_name}" ]; then
+                ssh_service_name="$(detect_ssh_service_name)"
+            fi
+            if is_ssh_service_active "${ssh_service_name}"; then
+                display_status_warning "缺少 ss/netstat，无法验证 SSH ${port} 端口监听；仅确认 ${ssh_service_name} 服务处于 active。"
+            else
+                display_status_warning "缺少 ss/netstat，无法验证 SSH ${port} 端口监听；SSH 服务状态需手动确认。"
+            fi
+            return 0
+            ;;
+        *)
+            display_status_error "SSH 新端口 ${port} 未检测到监听。"
+            show_ssh_port_diagnostics "${port}"
+            return 1
+            ;;
+    esac
+}
+
+apply_ssh_port_change() {
+    local ssh_config_file="$1"
+    local ssh_port_config_file="$2"
+    local port="$3"
+
+    {
+        echo
+        printf '# Added by vps_setup.sh on %s. Existing SSH ports are intentionally preserved.\n' "$(date '+%F %T')"
+        if ! active_ssh_port_directives_exist "${ssh_config_file}"; then
+            printf 'Port 22\n'
         fi
-
-        restore_file_from_backup "${ssh_config_target}" "${backup_file}"
-        run_logged systemctl restart "${ssh_service_name}" || true
-        display_status_error "SSH 服务重载/重启失败，已尝试恢复备份。"
-        exit 1
-    fi
-
-    if run_logged service "${ssh_service_name}" reload || run_logged service "${ssh_service_name}" restart; then
-        return
-    fi
-
-    restore_file_from_backup "${ssh_config_target}" "${backup_file}"
-    run_logged service "${ssh_service_name}" restart || true
-    display_status_error "SSH 服务重载/重启失败，已尝试恢复备份。"
-    exit 1
+        printf 'Port %s\n' "${port}"
+    } >> "${ssh_port_config_file}"
 }
 
 configure_ssh_port() {
@@ -1112,17 +1262,21 @@ configure_ssh_port() {
         backup_file="$(backup_existing_file "${ssh_port_config_file}")"
     fi
 
-    {
-        echo
-        printf '# Added by vps_setup.sh on %s. Existing SSH ports are intentionally preserved.\n' "$(date '+%F %T')"
-        if ! active_ssh_port_directives_exist "${ssh_config_file}"; then
-            printf 'Port 22\n'
+    if ! apply_ssh_port_change "${ssh_config_file}" "${ssh_port_config_file}" "${GLOBAL_SSH_PORT}"; then
+        display_status_error "写入 SSH 配置失败: ${ssh_port_config_file}"
+        show_ssh_port_diagnostics "${GLOBAL_SSH_PORT}"
+        if ! restore_ssh_config "${ssh_port_config_file}" "${backup_file}" "${GLOBAL_SSH_PORT}"; then
+            exit 1
         fi
-        printf 'Port %s\n' "${GLOBAL_SSH_PORT}"
-    } >> "${ssh_port_config_file}"
+        exit 1
+    fi
 
     apply_firewall_ssh_port "${GLOBAL_SSH_PORT}"
-    reload_ssh_service_or_restore "${ssh_port_config_file}" "${backup_file}" "${sshd_binary}"
+    reload_ssh_service_or_restore "${ssh_port_config_file}" "${backup_file}" "${sshd_binary}" "${GLOBAL_SSH_PORT}"
+
+    if ! validate_new_ssh_port "${GLOBAL_SSH_PORT}"; then
+        handle_ssh_failure_with_restore "SSH 新端口 ${GLOBAL_SSH_PORT} 验证失败，准备恢复备份。" "${ssh_port_config_file}" "${backup_file}" "${sshd_binary}" "$(detect_ssh_service_name)" "${GLOBAL_SSH_PORT}"
+    fi
 
     display_status_success "SSH 已新增监听端口 ${GLOBAL_SSH_PORT}。请保持当前会话，确认新端口可登录后再手动收紧旧端口。"
 }
