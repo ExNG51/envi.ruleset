@@ -869,6 +869,400 @@ remove_ufw_rules() {
     ufw reload >/dev/null 2>&1 || true
 }
 
+show_systemd_manual_cleanup_commands() {
+    local port="$1" service
+    service="$(get_service_name "${port}")"
+    ui_warn "systemd 人工处理命令："
+    ui_print "  systemctl disable --now ${service}"
+    ui_print "  systemctl daemon-reload"
+    ui_print "  systemctl reset-failed ${service}"
+}
+
+show_nft_manual_cleanup_commands() {
+    local table="$1"
+    ui_warn "nftables 人工处理命令："
+    ui_print "  nft list table inet ${table}"
+    ui_print "  nft delete table inet ${table}"
+}
+
+show_ufw_manual_cleanup_commands() {
+    local real_port="$1" start_port="$2" end_port="$3"
+    ui_warn "UFW 人工处理命令："
+    ui_print "  ufw --force delete allow ${real_port}/udp"
+    ui_print "  ufw --force delete allow ${start_port}:${end_port}/udp"
+    ui_print "  ufw reload"
+}
+
+show_file_manual_cleanup_commands() {
+    local cfg="$1" nft_file="$2"
+    ui_warn "文件人工处理命令："
+    ui_print "  rm -f ${cfg} ${nft_file}"
+}
+
+show_nft_diagnostics() {
+    local table="$1"
+    ui_warn "nftables 诊断命令："
+    ui_print "  nft list ruleset | grep -n ${table}"
+    ui_print "  nft list table inet ${table}"
+}
+
+show_systemd_diagnostics() {
+    local port="$1" service
+    service="$(get_service_name "${port}")"
+    ui_warn "systemd 诊断命令："
+    ui_print "  systemctl status ${service} --no-pager"
+    ui_print "  journalctl -u ${service} -n 80 --no-pager"
+}
+
+show_ufw_diagnostics() {
+    ui_warn "UFW 诊断命令："
+    ui_print "  ufw status verbose"
+    ui_print "  ufw status numbered"
+}
+
+prepare_instance_rollback_dir() {
+    local port="$1"
+    local timestamp
+    timestamp="$(date +%Y%m%d%H%M%S)"
+    INSTANCE_ROLLBACK_DIR="${BASE_DIR}/backups/rollback.${port}.${timestamp}"
+    mkdir -p "${INSTANCE_ROLLBACK_DIR}" || return 1
+    chmod 700 "${BASE_DIR}/backups" "${INSTANCE_ROLLBACK_DIR}" 2>/dev/null || true
+    ui_info "回滚备份目录：${INSTANCE_ROLLBACK_DIR}"
+}
+
+backup_file_if_exists() {
+    local source_path="$1" backup_path="$2"
+    if [ -f "${source_path}" ]; then
+        cp -a "${source_path}" "${backup_path}" || return 1
+        chmod 600 "${backup_path}" 2>/dev/null || true
+    else
+        : > "${backup_path}.missing" || return 1
+        chmod 600 "${backup_path}.missing" 2>/dev/null || true
+    fi
+}
+
+capture_instance_rollback_state() {
+    local port="$1" rollback_dir="$2"
+    local cfg nft_file service metadata
+    cfg="$(get_config_file "${port}")"
+    nft_file="$(get_nft_rule_file "${port}")"
+    service="$(get_service_name "${port}")"
+    metadata="${rollback_dir}/metadata.env"
+
+    backup_file_if_exists "${cfg}" "${rollback_dir}/instance.env" || return 1
+    backup_file_if_exists "${nft_file}" "${rollback_dir}/instance.nft" || return 1
+
+    {
+        printf 'ROLLBACK_PORT="%s"\n' "${port}"
+        printf 'ROLLBACK_CFG="%s"\n' "${cfg}"
+        printf 'ROLLBACK_NFT_FILE="%s"\n' "${nft_file}"
+        if [ -f "${cfg}" ]; then
+            printf 'ROLLBACK_REAL_PORT="%s"\n' "$(read_env_value "${cfg}" "REAL_PORT" || true)"
+            printf 'ROLLBACK_RANGE_START="%s"\n' "$(read_env_value "${cfg}" "RANGE_START" || true)"
+            printf 'ROLLBACK_RANGE_END="%s"\n' "$(read_env_value "${cfg}" "RANGE_END" || true)"
+            printf 'ROLLBACK_NFT_TABLE_NAME="%s"\n' "$(read_env_value "${cfg}" "NFT_TABLE_NAME" || true)"
+            printf 'ROLLBACK_NFT_RULE_FILE="%s"\n' "$(read_env_value "${cfg}" "NFT_RULE_FILE" || true)"
+        fi
+        if systemctl is-active --quiet "${service}" 2>/dev/null; then
+            printf 'ROLLBACK_SERVICE_ACTIVE="true"\n'
+        else
+            printf 'ROLLBACK_SERVICE_ACTIVE="false"\n'
+        fi
+        if systemctl is-enabled --quiet "${service}" 2>/dev/null; then
+            printf 'ROLLBACK_SERVICE_ENABLED="true"\n'
+        else
+            printf 'ROLLBACK_SERVICE_ENABLED="false"\n'
+        fi
+        if check_command_exists ufw; then
+            printf 'ROLLBACK_UFW_STATUS_FILE="%s"\n' "${rollback_dir}/ufw.status"
+        fi
+    } > "${metadata}" || return 1
+    chmod 600 "${metadata}" 2>/dev/null || true
+
+    if check_command_exists ufw; then
+        ufw status verbose > "${rollback_dir}/ufw.status" 2>/dev/null || true
+        chmod 600 "${rollback_dir}/ufw.status" 2>/dev/null || true
+    fi
+
+    ui_ok "已保存实例 ${port} 的回滚状态。"
+}
+
+restore_file_from_rollback() {
+    local backup_path="$1" missing_marker="$2" target_path="$3"
+    if [ -f "${backup_path}" ]; then
+        cp -a "${backup_path}" "${target_path}" || return 1
+        chmod 600 "${target_path}" 2>/dev/null || true
+        return 0
+    fi
+    if [ -f "${missing_marker}" ]; then
+        rm -f "${target_path}" || return 1
+        return 0
+    fi
+    return 1
+}
+
+remove_instance_nft_runtime() {
+    local table="$1"
+    [ -n "${table}" ] || return 0
+    if ! check_command_exists nft; then
+        ui_warn "缺少 nft，无法删除运行时表：inet ${table}"
+        show_nft_manual_cleanup_commands "${table}"
+        return 1
+    fi
+    if nft list table inet "${table}" >/dev/null 2>&1; then
+        if nft delete table inet "${table}" >/dev/null 2>&1; then
+            ui_ok "已删除 nftables 运行时表：inet ${table}"
+            return 0
+        fi
+        ui_warn "nftables 运行时表删除失败：inet ${table}"
+        show_nft_manual_cleanup_commands "${table}"
+        return 1
+    fi
+    ui_ok "nftables 运行时表不存在：inet ${table}"
+}
+
+cleanup_failed_new_instance() {
+    local port="$1" start_port="$2" end_port="$3" table="$4" nft_file="$5"
+    local service cfg failed=0
+    service="$(get_service_name "${port}")"
+    cfg="$(get_config_file "${port}")"
+
+    ui_warn "新实例创建失败，正在清理本次写入对象。"
+    if systemctl disable --now "${service}" >/dev/null 2>&1; then
+        ui_ok "已停止并禁用 ${service}"
+    else
+        ui_warn "停止或禁用 ${service} 失败。"
+        show_systemd_manual_cleanup_commands "${port}"
+        failed=1
+    fi
+
+    remove_instance_nft_runtime "${table}" || failed=1
+    remove_ufw_rules "${port}" "${start_port}" "${end_port}" || failed=1
+
+    if rm -f "${nft_file}" "${cfg}"; then
+        ui_ok "已删除实例 env/nft 文件。"
+    else
+        ui_warn "实例 env/nft 文件删除失败。"
+        show_file_manual_cleanup_commands "${cfg}" "${nft_file}"
+        failed=1
+    fi
+
+    systemctl daemon-reload >/dev/null 2>&1 || {
+        ui_warn "systemd daemon-reload 失败。"
+        show_systemd_diagnostics "${port}"
+        failed=1
+    }
+    return "${failed}"
+}
+
+rollback_existing_instance() {
+    local port="$1" rollback_dir="$2"
+    local metadata cfg nft_file old_real old_start old_end old_table old_service_active old_service_enabled failed=0
+    metadata="${rollback_dir}/metadata.env"
+    cfg="$(get_config_file "${port}")"
+    nft_file="$(get_nft_rule_file "${port}")"
+
+    ui_warn "更新实例失败，正在恢复旧实例状态。"
+    if [ ! -f "${metadata}" ]; then
+        ui_error "缺少回滚元数据：${metadata}"
+        return 1
+    fi
+
+    # shellcheck disable=SC1090
+    . "${metadata}"
+    old_real="${ROLLBACK_REAL_PORT:-${port}}"
+    old_start="${ROLLBACK_RANGE_START:-}"
+    old_end="${ROLLBACK_RANGE_END:-}"
+    old_table="${ROLLBACK_NFT_TABLE_NAME:-$(get_nft_table_name "${port}")}"
+    old_service_active="${ROLLBACK_SERVICE_ACTIVE:-false}"
+    old_service_enabled="${ROLLBACK_SERVICE_ENABLED:-false}"
+
+    restore_file_from_rollback "${rollback_dir}/instance.env" "${rollback_dir}/instance.env.missing" "${cfg}" || failed=1
+    restore_file_from_rollback "${rollback_dir}/instance.nft" "${rollback_dir}/instance.nft.missing" "${nft_file}" || failed=1
+    [ "${failed}" -eq 0 ] && ui_ok "已恢复旧 env/nft 文件。" || ui_warn "恢复旧 env/nft 文件失败。"
+
+    write_apply_script || failed=1
+    write_systemd_template || failed=1
+
+    if [ -n "${old_start}" ] && [ -n "${old_end}" ]; then
+        configure_ufw_rules "${old_real}" "${old_start}" "${old_end}" || failed=1
+    else
+        ui_warn "回滚元数据缺少旧 UFW 范围，无法重放旧 UFW 规则。"
+        failed=1
+    fi
+
+    if [ "${old_service_active}" = "true" ] || [ "${old_service_enabled}" = "true" ]; then
+        apply_instance_rules "${port}" || failed=1
+    else
+        systemctl disable --now "$(get_service_name "${port}")" >/dev/null 2>&1 || true
+        remove_instance_nft_runtime "${old_table}" || true
+    fi
+
+    validate_instance "${port}" "write" || {
+        ui_warn "旧实例回滚后验证仍存在异常。"
+        failed=1
+    }
+
+    [ "${failed}" -eq 0 ] && ui_ok "旧实例状态已恢复。" || ui_warn "旧实例状态未完全恢复，请按上方诊断命令人工处理。"
+    [ "${failed}" -ne 0 ] && {
+        show_systemd_diagnostics "${port}"
+        show_nft_diagnostics "${old_table}"
+        [ -n "${old_start}" ] && [ -n "${old_end}" ] && show_ufw_manual_cleanup_commands "${old_real}" "${old_start}" "${old_end}"
+    }
+    return "${failed}"
+}
+
+disable_instance_service_with_report() {
+    local port="$1" service
+    service="$(get_service_name "${port}")"
+    if systemctl disable --now "${service}" >/dev/null 2>&1; then
+        ui_ok "已停止并禁用 ${service}"
+        return 0
+    fi
+    ui_warn "停止或禁用 ${service} 失败，继续执行后续清理。"
+    show_systemd_manual_cleanup_commands "${port}"
+    return 1
+}
+
+report_residual_line() {
+    local label="$1" status="$2"
+    printf '%-18s %s\n' "${label}" "${status}"
+}
+
+check_instance_systemd_residual() {
+    local port="$1" service residual=0
+    service="$(get_service_name "${port}")"
+    systemctl is-active --quiet "${service}" 2>/dev/null && residual=1
+    systemctl is-enabled --quiet "${service}" 2>/dev/null && residual=1
+    systemctl list-unit-files "${service}" --no-legend 2>/dev/null | grep -q "${service}" && residual=1
+    [ "${residual}" -eq 0 ]
+}
+
+check_instance_nft_residual() {
+    local table="$1"
+    [ -n "${table}" ] || return 0
+    check_command_exists nft || return 1
+    ! nft list table inet "${table}" >/dev/null 2>&1
+}
+
+check_instance_ufw_residual() {
+    local real_port="$1" start_port="$2" end_port="$3" ufw_output ufw_first_line
+    check_command_exists ufw || return 0
+    ufw_output="$(ufw status 2>/dev/null || true)"
+    ufw_first_line="$(printf '%s\n' "${ufw_output}" | head -n 1)"
+    [ "${ufw_first_line}" = "Status: active" ] || return 0
+    ! echo "${ufw_output}" | grep -Eq "${real_port}/udp|${real_port}[[:space:]]+.*UDP|${start_port}:${end_port}/udp|${start_port}:${end_port}"
+}
+
+check_instance_listener_residual() {
+    local real_port="$1"
+    has_runtime_port_probe_tool || return 1
+    ! is_udp_port_listening "${real_port}"
+}
+
+report_instance_deletion_residuals() {
+    local port="$1" real_port="$2" start_port="$3" end_port="$4" table="$5" nft_file="$6" cfg="$7"
+    local failed=0
+
+    ui_section "删除残留检查：${port}"
+    if check_instance_systemd_residual "${port}"; then
+        report_residual_line "systemd 实例" "clear"
+    else
+        report_residual_line "systemd 实例" "residual"
+        show_systemd_manual_cleanup_commands "${port}"
+        failed=1
+    fi
+
+    if [ -e "${cfg}" ]; then
+        report_residual_line "env 文件" "residual"
+        failed=1
+    else
+        report_residual_line "env 文件" "removed"
+    fi
+
+    report_residual_line "config 文件" "not-managed"
+
+    if [ -n "${nft_file}" ] && [ -e "${nft_file}" ]; then
+        report_residual_line "nft 文件" "residual"
+        failed=1
+    else
+        report_residual_line "nft 文件" "removed"
+    fi
+
+    if check_instance_nft_residual "${table}"; then
+        report_residual_line "nft runtime" "clear"
+    else
+        report_residual_line "nft runtime" "residual-or-unverified"
+        show_nft_manual_cleanup_commands "${table}"
+        failed=1
+    fi
+
+    if check_instance_ufw_residual "${real_port}" "${start_port}" "${end_port}"; then
+        report_residual_line "UFW 规则" "clear"
+    else
+        report_residual_line "UFW 规则" "residual"
+        show_ufw_manual_cleanup_commands "${real_port}" "${start_port}" "${end_port}"
+        failed=1
+    fi
+
+    if check_instance_listener_residual "${real_port}"; then
+        report_residual_line "端口监听" "clear"
+    else
+        report_residual_line "端口监听" "residual-or-unverified"
+        ui_warn "请检查真实 TUIC 进程是否仍监听 UDP ${real_port}：ss -lunp | grep :${real_port}"
+        failed=1
+    fi
+
+    return "${failed}"
+}
+
+cleanup_common_objects_with_report() {
+    local failed=0
+    ui_section "公共对象清理"
+    if rm -f "${APPLY_SCRIPT}" "${SYSTEMD_TEMPLATE}"; then
+        ui_ok "已删除通用 apply 脚本与 systemd 模板。"
+    else
+        ui_warn "通用 apply 脚本或 systemd 模板删除失败。"
+        failed=1
+    fi
+    systemctl daemon-reload >/dev/null 2>&1 || {
+        ui_warn "systemd daemon-reload 失败。"
+        failed=1
+    }
+    rmdir "${INSTANCE_DIR}" "${BASE_DIR}" >/dev/null 2>&1 || true
+    return "${failed}"
+}
+
+report_common_deletion_residuals() {
+    local failed=0
+    ui_section "公共对象残留检查"
+    if [ -e "${APPLY_SCRIPT}" ]; then
+        report_residual_line "apply 脚本" "residual"
+        failed=1
+    else
+        report_residual_line "apply 脚本" "removed"
+    fi
+    if [ -e "${SYSTEMD_TEMPLATE}" ]; then
+        report_residual_line "systemd 模板" "residual"
+        failed=1
+    else
+        report_residual_line "systemd 模板" "removed"
+    fi
+    if [ -d "${INSTANCE_DIR}" ] && has_instances; then
+        report_residual_line "实例目录" "residual"
+        failed=1
+    else
+        report_residual_line "实例目录" "clear"
+    fi
+    [ "${failed}" -ne 0 ] && {
+        ui_warn "公共对象人工处理命令："
+        ui_print "  rm -f ${APPLY_SCRIPT} ${SYSTEMD_TEMPLATE}"
+        ui_print "  systemctl daemon-reload"
+        ui_print "  rmdir ${INSTANCE_DIR} ${BASE_DIR}"
+    }
+    return "${failed}"
+}
+
 show_security_group_hint() {
     local real_port="$1" start_port="$2" end_port="$3"
     ui_blank
