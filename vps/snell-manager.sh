@@ -671,6 +671,21 @@ backup_file() {
     ui_ok "已备份：${backup_path}"
 }
 
+backup_path_for_rollback() {
+    local file_path="$1"
+    [ -e "${file_path}" ] || return 0
+    local backup_path
+    backup_path="${file_path}.rollback.$(date +%Y%m%d_%H%M%S)"
+    cp -a "${file_path}" "${backup_path}" || return 1
+    printf '%s\n' "${backup_path}"
+}
+
+restore_path_for_rollback() {
+    local backup_path="$1" target_path="$2"
+    [ -n "${backup_path}" ] && [ -e "${backup_path}" ] || return 1
+    cp -a "${backup_path}" "${target_path}"
+}
+
 atomic_replace_file() {
     local target="$1" mode="$2" owner_group="${3:-}" tmp_file target_dir
     target_dir="$(dirname "${target}")"
@@ -1444,6 +1459,25 @@ update_config_protocol_version() {
     write_snell_config "${port}" "${psk}" "${ipv6:-false}" "${dns:-${SNELL_DNS_DEFAULT}}" "${obfs:-off}" "${obfs_host:-}" "${tfo:-false}" "${protocol_version}"
 }
 
+rollback_snell_update() {
+    local binary_backup="$1"
+    local config_backup="$2"
+    local version_backup="$3"
+    ui_warn "Snell 更新失败，正在恢复旧状态。"
+    restore_path_for_rollback "${binary_backup}" "${SNELL_BINARY_PATH}" || true
+    restore_path_for_rollback "${config_backup}" "${SNELL_CONFIG_FILE}" || true
+    restore_path_for_rollback "${version_backup}" "${SNELL_VERSION_FILE}" || true
+    # 回滚后重写服务定义并尝试恢复旧服务，避免留下新旧状态混杂。
+    write_systemd_service || true
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl restart snell >/dev/null 2>&1 || true
+    if systemctl is-active --quiet snell 2>/dev/null; then
+        ui_ok "旧 Snell 服务已恢复运行。"
+    else
+        ui_error "旧 Snell 服务未能自动恢复，请立即手动检查。"
+    fi
+}
+
 update_snell_server() {
     ui_render_title
     ui_section "更新 Snell Server"
@@ -1454,12 +1488,31 @@ update_snell_server() {
     fi
 
     ensure_dependencies || return 1
-    local target_version
+    local target_version binary_backup config_backup version_backup
     choose_update_version target_version || return "$?"
-    download_and_install_snell_binary "${target_version}" || return 1
-    update_config_protocol_version "${target_version}" || return 1
-    write_systemd_service || return 1
-    restart_snell_service || return 1
+    binary_backup="$(backup_path_for_rollback "${SNELL_BINARY_PATH}")" || return 1
+    config_backup="$(backup_path_for_rollback "${SNELL_CONFIG_FILE}")" || return 1
+    version_backup="$(backup_path_for_rollback "${SNELL_VERSION_FILE}")" || return 1
+    if ! download_and_install_snell_binary "${target_version}"; then
+        rollback_snell_update "${binary_backup}" "${config_backup}" "${version_backup}"
+        pause_screen
+        return 1
+    fi
+    if ! update_config_protocol_version "${target_version}"; then
+        rollback_snell_update "${binary_backup}" "${config_backup}" "${version_backup}"
+        pause_screen
+        return 1
+    fi
+    if ! write_systemd_service; then
+        rollback_snell_update "${binary_backup}" "${config_backup}" "${version_backup}"
+        pause_screen
+        return 1
+    fi
+    if ! restart_snell_service; then
+        rollback_snell_update "${binary_backup}" "${config_backup}" "${version_backup}"
+        pause_screen
+        return 1
+    fi
     ui_ok "Snell Server 已更新并重启。"
     show_client_config false
     pause_screen

@@ -394,6 +394,21 @@ print_file_sha256() {
     fi
 }
 
+backup_file_for_rollback() {
+    local file_path="$1"
+    [ -e "${file_path}" ] || return 0
+    local backup_path
+    backup_path="${file_path}.bak.$(date +%Y%m%d_%H%M%S)"
+    cp -a "${file_path}" "${backup_path}" || return 1
+    printf '%s\n' "${backup_path}"
+}
+
+restore_executable_backup() {
+    local backup_path="$1" target_path="$2"
+    [ -n "${backup_path}" ] && [ -f "${backup_path}" ] || return 1
+    install -m 0755 "${backup_path}" "${target_path}"
+}
+
 detect_service_manager() {
     if check_command_exists systemctl; then
         SERVICE_MANAGER="systemd"
@@ -489,6 +504,33 @@ fetch_latest_versions_if_needed() {
     else
         print_warn "无法获取 Shadow-TLS 最新版本，使用默认 ${SHADOW_TLS_VERSION}。"
     fi
+}
+
+resolve_latest_versions_for_update() {
+    local ss_tag="" shadow_tls_tag=""
+    check_command_exists curl || {
+        print_error "curl 不可用，无法查询最新版本，已取消更新以避免误降级。"
+        return 1
+    }
+    ss_tag="$(curl -fsSL https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/latest 2>/dev/null \
+        | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' \
+        | head -n 1 \
+        | sed -E 's/.*"v?([^"]+)".*/\1/' || true)"
+    shadow_tls_tag="$(curl -fsSL https://api.github.com/repos/ihciah/shadow-tls/releases/latest 2>/dev/null \
+        | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' \
+        | head -n 1 \
+        | sed -E 's/.*"([^"]+)".*/\1/' || true)"
+    if [ -f "${SS_BINARY}" ] && [ -z "${ss_tag}" ]; then
+        print_error "无法获取 Shadowsocks-Rust 最新版本，已取消更新以避免误降级。"
+        return 1
+    fi
+    if [ -f "${SYSTEMD_SHADOW_TLS_SERVICE}" ] && [ -z "${shadow_tls_tag}" ]; then
+        print_error "无法获取 Shadow-TLS 最新版本，已取消更新以避免误降级。"
+        return 1
+    fi
+    [ -n "${ss_tag}" ] && SS_VERSION="${ss_tag}"
+    [ -n "${shadow_tls_tag}" ] && SHADOW_TLS_VERSION="${shadow_tls_tag}"
+    print_success "更新目标版本已解析：Shadowsocks-Rust v${SS_VERSION}，Shadow-TLS ${SHADOW_TLS_VERSION}"
 }
 
 validate_port() {
@@ -786,6 +828,23 @@ restart_ss_service() {
     fi
 }
 
+update_ss_binary_with_rollback() {
+    local backup_path=""
+    backup_path="$(backup_file_for_rollback "${SS_BINARY}")" || return 1
+    if ! download_and_install_ss_binary; then
+        print_error "Shadowsocks-Rust 下载或安装失败，正在恢复旧二进制。"
+        restore_executable_backup "${backup_path}" "${SS_BINARY}" || true
+        return 1
+    fi
+    if ! restart_ss_service; then
+        print_error "Shadowsocks-Rust 新版本重启失败，正在恢复旧二进制。"
+        restore_executable_backup "${backup_path}" "${SS_BINARY}" || true
+        restart_ss_service || true
+        return 1
+    fi
+    return 0
+}
+
 start_ss_service() {
     if [ "${SERVICE_MANAGER}" = "systemd" ]; then
         systemctl start ss-rust
@@ -919,6 +978,23 @@ download_and_install_shadow_tls_binary() {
     fi
     rm -f "${temp_file}"
     print_success "Shadow-TLS 已安装到 ${SHADOW_TLS_BINARY}。"
+}
+
+update_shadow_tls_binary_with_rollback() {
+    local backup_path=""
+    backup_path="$(backup_file_for_rollback "${SHADOW_TLS_BINARY}")" || return 1
+    if ! download_and_install_shadow_tls_binary; then
+        print_error "Shadow-TLS 下载或安装失败，正在恢复旧二进制。"
+        restore_executable_backup "${backup_path}" "${SHADOW_TLS_BINARY}" || true
+        return 1
+    fi
+    if ! systemctl restart shadow-tls; then
+        print_error "Shadow-TLS 新版本重启失败，正在恢复旧二进制。"
+        restore_executable_backup "${backup_path}" "${SHADOW_TLS_BINARY}" || true
+        systemctl restart shadow-tls || true
+        return 1
+    fi
+    return 0
 }
 
 write_shadow_tls_env() {
@@ -1226,25 +1302,36 @@ update_components() {
     print_title
     print_section "更新核心组件"
     ensure_dependencies || { pause_screen; return 1; }
-    FETCH_LATEST=true
-    fetch_latest_versions_if_needed
+    if [ ! -f "${SS_BINARY}" ] && { [ "${SERVICE_MANAGER}" != "systemd" ] || [ ! -f "${SYSTEMD_SHADOW_TLS_SERVICE}" ]; }; then
+        print_warn "未检测到可更新组件，已跳过。"
+        pause_screen
+        return 0
+    fi
+    resolve_latest_versions_for_update || { pause_screen; return 1; }
+
+    local update_failed=false
 
     if [ -f "${SS_BINARY}" ]; then
-        download_and_install_ss_binary || { pause_screen; return 1; }
-        restart_ss_service || { pause_screen; return 1; }
-        print_success "Shadowsocks-Rust 已更新并重启。"
+        if update_ss_binary_with_rollback; then
+            print_success "Shadowsocks-Rust 已更新并重启。"
+        else
+            update_failed=true
+        fi
     else
         print_warn "未检测到 Shadowsocks-Rust 安装，跳过。"
     fi
 
     if [ "${SERVICE_MANAGER}" = "systemd" ] && [ -f "${SYSTEMD_SHADOW_TLS_SERVICE}" ]; then
-        download_and_install_shadow_tls_binary || { pause_screen; return 1; }
-        systemctl restart shadow-tls || { pause_screen; return 1; }
-        print_success "Shadow-TLS 已更新并重启。"
+        if update_shadow_tls_binary_with_rollback; then
+            print_success "Shadow-TLS 已更新并重启。"
+        else
+            update_failed=true
+        fi
     else
         print_warn "未检测到 Shadow-TLS 服务，跳过。"
     fi
 
+    [ "${update_failed}" = false ] || { pause_screen; return 1; }
     pause_screen
 }
 
