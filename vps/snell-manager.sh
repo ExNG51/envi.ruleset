@@ -1353,16 +1353,14 @@ choose_snell_version() {
     ui_menu_item 2 "v${SNELL_V4_VERSION}（v4）"
     ui_menu_item 3 "手动输入版本号"
     ui_menu_item 0 "返回上一级"
-    ui_submenu_hint
     while true; do
         ui_blank
-        read_menu_choice choice "请输入选项编号（默认 1，0 返回）： " || return "$?"
+        read_menu_choice choice "请输入选项编号（默认 1，回车使用默认值，0 返回，q 取消）： " || return "$?"
         choice="${choice:-1}"
         case "${choice}" in
             1) printf -v "${var_name}" '%s' "${SNELL_VERSION_DEFAULT}"; return 0 ;;
             2) printf -v "${var_name}" '%s' "${SNELL_V4_VERSION}"; return 0 ;;
             3)
-                ui_input_hint
                 ui_blank
                 read_prompt_or_cancel selected_version "请输入版本号（例如 5.0.1，q 取消）： " || return "$?"
                 selected_version="$(normalize_version "${selected_version}")"
@@ -1390,16 +1388,14 @@ choose_update_version() {
     ui_menu_item 0 "返回上一级"
     ui_blank
     ui_dim "当前二进制版本：${current_version}；配置协议版本：${current_major:-未知}"
-    ui_submenu_hint
 
     while true; do
         ui_blank
-        read_menu_choice choice "请输入选项编号（默认 1，0 返回）： " || return "$?"
+        read_menu_choice choice "请输入选项编号（默认 1，回车使用默认值，0 返回，q 取消）： " || return "$?"
         choice="${choice:-1}"
         case "${choice}" in
             1) printf -v "${var_name}" '%s' "${SNELL_VERSION_DEFAULT}"; return 0 ;;
             2)
-                ui_input_hint
                 ui_blank
                 read_prompt_or_cancel target_input "请输入目标版本号（例如 5.0.1，q 取消）： " || return "$?"
                 target_input="$(normalize_version "${target_input}")"
@@ -1421,7 +1417,6 @@ choose_update_version() {
 
 prompt_port() {
     local var_name="$1" default_port="$2" value
-    ui_default_hint
     while true; do
         ui_blank
         read_prompt_or_cancel value "请输入 Snell 监听端口（默认 ${default_port}，回车使用默认值，q 取消）： " || return "$?"
@@ -1488,7 +1483,6 @@ prompt_boolean() {
 
 prompt_dns() {
     local var_name="$1" default_dns="$2" value
-    ui_default_hint
     ui_blank
     read_prompt_or_cancel value "请输入 DNS（默认 ${default_dns}，回车使用默认值，q 取消）： " || return "$?"
     value="${value:-${default_dns}}"
@@ -1497,17 +1491,16 @@ prompt_dns() {
 }
 
 prompt_obfs() {
-    local obfs_var="$1" host_var="$2" current_obfs="${3:-off}" current_host="${4:-}" choice host
+    local obfs_var="$1" host_var="$2" current_obfs="${3:-off}" current_host="${4:-}" choice obfs_host_value
     ui_print "请选择 obfs 设置："
     ui_blank
-    ui_menu_item 1 "off（默认）"
+    ui_menu_item 1 "off"
     ui_menu_item 2 "http"
     ui_menu_item 3 "tls"
     ui_menu_item 0 "返回上一级"
-    ui_default_hint
     while true; do
         ui_blank
-        read_menu_choice choice "请输入选项编号（当前 ${current_obfs:-off}，回车保持，0 返回）： " || return "$?"
+        read_menu_choice choice "请输入选项编号（当前 ${current_obfs:-off}，回车保持当前值，0 返回，q 取消）： " || return "$?"
         if [ -z "${choice}" ]; then
             printf -v "${obfs_var}" '%s' "${current_obfs:-off}"
             printf -v "${host_var}" '%s' "${current_host:-}"
@@ -1521,12 +1514,11 @@ prompt_obfs() {
         esac
     done
     validate_obfs_mode "${!obfs_var}" || { ui_error "obfs 只能是 off、http 或 tls。"; return 1; }
-    ui_default_hint
     ui_blank
-    read_prompt_or_cancel host "请输入 obfs-host（默认 ${current_host:-${SNELL_OBFS_HOST_DEFAULT}}，回车使用默认值，q 取消）： " || return "$?"
-    host="${host:-${current_host:-${SNELL_OBFS_HOST_DEFAULT}}}"
-    validate_obfs_host "${host}" || { ui_error "obfs-host 只能包含字母、数字、点、下划线和短横线，长度不能超过 253。"; return 1; }
-    printf -v "${host_var}" '%s' "${host}"
+    read_prompt_or_cancel obfs_host_value "请输入 obfs-host（默认 ${current_host:-${SNELL_OBFS_HOST_DEFAULT}}，回车使用默认值，q 取消）： " || return "$?"
+    obfs_host_value="${obfs_host_value:-${current_host:-${SNELL_OBFS_HOST_DEFAULT}}}"
+    validate_obfs_host "${obfs_host_value}" || { ui_error "obfs-host 只能包含字母、数字、点、下划线和短横线，长度不能超过 253。"; return 1; }
+    printf -v "${host_var}" '%s' "${obfs_host_value}"
 }
 
 show_config_change_summary() {
