@@ -1640,6 +1640,7 @@ show_main_menu() {
         ui_menu_item 9 "检测 / 接管旧 Snell 服务与配置"
         ui_menu_item 10 "卸载 Snell Server"
         ui_menu_item 0 "退出"
+        ui_blank
         ui_menu_footer
         ui_blank
         local choice
@@ -1655,7 +1656,7 @@ show_main_menu() {
             8) run_menu_action "应用 / 更新网络优化" apply_network_tuning true ;;
             9) run_menu_action "检测 / 接管旧 Snell" run_legacy_takeover ;;
             10) run_menu_action "卸载 Snell Server" uninstall_snell ;;
-            0) echo; ui_info "已退出。"; exit 0 ;;
+            0) ui_blank; ui_info "已退出。"; exit 0 ;;
             q|Q) ui_warn "主菜单请使用 0 退出脚本。"; sleep 1 ;;
             *) ui_error "无效选项，请重新输入。"; sleep 1 ;;
         esac
@@ -1664,6 +1665,13 @@ show_main_menu() {
 
 parse_arguments() {
     COMMAND="menu"
+    if [ $# -eq 0 ] && [ -z "${BASH_SOURCE[0]:-}" ]; then
+        case "${0:-}" in
+            -h|--help|install|view|config|update|service|validate|status|tune|takeover|migrate|uninstall|menu)
+                set -- "${0}"
+                ;;
+        esac
+    fi
     while [ $# -gt 0 ]; do
         case "$1" in
             -h|--help)

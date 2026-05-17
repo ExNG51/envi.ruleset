@@ -374,6 +374,13 @@ EOF
 
 parse_arguments() {
     COMMAND="menu"
+    if [[ $# -eq 0 && -z "${BASH_SOURCE[0]:-}" ]]; then
+        case "${0:-}" in
+            -h|--help)
+                set -- "${0}"
+                ;;
+        esac
+    fi
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -1215,10 +1222,11 @@ secure_ssh() {
     require_command sshd || return 1
     require_command systemctl || return 1
 
-    printf '%b\n' "${YELLOW}禁用 root 或密码登录前，请确认:${RESET}"
-    printf -- '- 当前已有一个非 root sudo/wheel 用户\n'
-    printf -- '- 该用户已成功通过 SSH 登录\n'
-    printf -- '- SSH 密钥登录已验证\n'
+    ui_warn "禁用 root 或密码登录前，请确认："
+    ui_print "- 当前已有一个非 root sudo/wheel 用户"
+    ui_print "- 该用户已成功通过 SSH 登录"
+    ui_print "- SSH 密钥登录已验证"
+    ui_blank
 
     prompt_yes_no "是否禁用 root 账户通过 SSH 登录" "N"
     answer_status=$?
@@ -1423,7 +1431,7 @@ show_main_menu_loop() {
             5) ui_run_menu_action "执行所有步骤" run_all_steps; should_pause=true ;;
             6) ui_run_menu_action "查看 UFW 状态" show_ufw_status; should_pause=true ;;
             7) ui_run_menu_action "查看 Fail2ban SSH jail 状态" show_fail2ban_status; should_pause=true ;;
-            0) info "退出脚本。"; exit 0 ;;
+            0) ui_blank; ui_info "已退出。"; exit 0 ;;
             *) err "无效选项，请输入 0 到 7。" ;;
         esac
 

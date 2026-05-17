@@ -249,7 +249,10 @@ ui_confirm() {
 
 ui_confirm_token() {
     local prompt="$1" token="$2" answer
-    ui_read_raw answer "${prompt} 输入 ${token} 继续： "
+    ui_read_raw answer "${prompt} 输入 ${token} 继续，或输入 q 取消： "
+    if ui_is_cancel "${answer}"; then
+        return "${UI_RETURN_TO_MENU}"
+    fi
     [[ "${answer}" == "${token}" ]]
 }
 
@@ -1416,6 +1419,13 @@ show_main_menu() {
 
 parse_arguments() {
     COMMAND="menu"
+    if [ $# -eq 0 ] && [ -z "${BASH_SOURCE[0]:-}" ]; then
+        case "${0:-}" in
+            --latest|-h|--help|install|stls|view|update|uninstall|status|menu)
+                set -- "${0}"
+                ;;
+        esac
+    fi
     while [ $# -gt 0 ]; do
         case "$1" in
             --latest)

@@ -343,6 +343,14 @@ validate_timezone_name() {
 }
 
 parse_arguments() {
+    if [ $# -eq 0 ] && [ -z "${BASH_SOURCE[0]:-}" ]; then
+        case "${0:-}" in
+            -h|--help)
+                set -- "${0}"
+                ;;
+        esac
+    fi
+
     while [ $# -gt 0 ]; do
         case "$1" in
             --profile)
