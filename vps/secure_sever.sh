@@ -57,6 +57,7 @@ UI_COLOR_BLUE=""
 UI_COLOR_CYAN=""
 UI_COLOR_BOLD=""
 UI_COLOR_DIM=""
+UI_TITLE_WIDTH=60
 UI_KV_LABEL_WIDTH=18
 
 # Legacy color variable names kept as compatibility aliases while the script
@@ -121,6 +122,8 @@ ui_init_prompt_input() {
     PROMPT_FD="${UI_PROMPT_FD}"
 }
 
+ui_print() { printf '%b\n' "$*"; }
+ui_blank() { printf '\n'; }
 ui_info() { printf '%b\n' "${UI_COLOR_CYAN}[i]${UI_COLOR_RESET} $*"; }
 ui_ok() { printf '%b\n' "${UI_COLOR_GREEN}[OK]${UI_COLOR_RESET} $*"; }
 ui_warn() { printf '%b\n' "${UI_COLOR_YELLOW}[WARN]${UI_COLOR_RESET} $*" >&2; }
@@ -144,6 +147,15 @@ ui_text_width() {
     printf '%s' "${width}"
 }
 
+ui_center_line() {
+    local text="$1" width=0 padding=0 left=0
+    width="$(ui_text_width "$text")"
+    padding=$((UI_TITLE_WIDTH - width))
+    ((padding < 0)) && padding=0
+    left=$((padding / 2))
+    printf '%*s%s\n' "$left" "" "$text"
+}
+
 ui_kv() {
     local label="$1" value="${2:-}" width padding
     width="$(ui_text_width "${label}")"
@@ -163,12 +175,12 @@ ui_clear() {
 ui_title() {
     local title="$1" version="${2:-}"
     printf '%b' "${UI_COLOR_CYAN}${UI_COLOR_BOLD}"
-    printf '%s\n' "============================================================"
-    printf '        %s\n' "$title"
+    printf '%*s\n' "$UI_TITLE_WIDTH" '' | tr ' ' '='
+    ui_center_line "$title"
     if [[ -n "$version" ]]; then
-        printf '        Version: %s\n' "$version"
+        ui_center_line "Version: ${version}"
     fi
-    printf '%s\n' "============================================================"
+    printf '%*s\n' "$UI_TITLE_WIDTH" '' | tr ' ' '='
     printf '%b' "${UI_COLOR_RESET}"
 }
 
@@ -245,8 +257,19 @@ ui_confirm() {
 
 ui_confirm_token() {
     local prompt="$1" token="$2" answer
-    ui_read_raw answer "${prompt} 输入 ${token} 继续： "
-    [[ "$answer" == "$token" ]]
+    ui_read_raw answer "${prompt} 输入 ${token} 继续，或输入 q 取消： "
+
+    if ui_is_cancel "$answer"; then
+        ui_warn "已取消。"
+        return "$UI_RETURN_TO_MENU"
+    fi
+
+    if [[ "$answer" != "$token" ]]; then
+        ui_warn "已取消。"
+        return 1
+    fi
+
+    return 0
 }
 
 ui_pause() {
@@ -1022,10 +1045,7 @@ configure_ufw() {
     ui_kv "备份目录" "$BACKUP_DIR"
     ui_rule
 
-    if ! ui_confirm_token "确认重置 UFW 规则？" "RESET-UFW"; then
-        warn "已取消。"
-        return "$INPUT_CANCELLED"
-    fi
+    ui_confirm_token "确认重置 UFW 规则？" "RESET-UFW" || return "$?"
 
     backup_ufw_config || return 1
     run_cmd "禁用 UFW" ufw --force disable || return 1
@@ -1091,10 +1111,7 @@ configure_fail2ban() {
     ui_kv "备份目录" "$BACKUP_DIR"
     ui_rule
 
-    if ! ui_confirm_token "确认覆盖 Fail2ban 配置？" "OVERWRITE"; then
-        warn "已取消。"
-        return "$INPUT_CANCELLED"
-    fi
+    ui_confirm_token "确认覆盖 Fail2ban 配置？" "OVERWRITE" || return "$?"
 
     tmp_file="$(make_tmp_file)" || return 1
     umask 077
@@ -1216,10 +1233,7 @@ secure_ssh() {
     ui_kv "备份目录" "$BACKUP_DIR"
     ui_rule
 
-    if ! ui_confirm_token "确认覆盖 SSH 加固配置？" "OVERWRITE"; then
-        warn "已取消。"
-        return "$INPUT_CANCELLED"
-    fi
+    ui_confirm_token "确认覆盖 SSH 加固配置？" "OVERWRITE" || return "$?"
 
     tmp_hardening="$(make_tmp_file)" || return 1
     render_sshd_hardening_config "$permit_root_login" "$password_auth" > "$tmp_hardening"
