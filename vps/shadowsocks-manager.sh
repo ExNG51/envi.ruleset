@@ -409,6 +409,18 @@ restore_executable_backup() {
     install -m 0755 "${backup_path}" "${target_path}"
 }
 
+restore_path_for_rollback() {
+    local backup_path="$1" target_path="$2"
+    [ -n "${backup_path}" ] && [ -e "${backup_path}" ] || return 1
+    cp -a "${backup_path}" "${target_path}"
+}
+
+remove_file_if_exists() {
+    local target_path="$1"
+    [ -e "${target_path}" ] || return 0
+    rm -f "${target_path}"
+}
+
 detect_service_manager() {
     if check_command_exists systemctl; then
         SERVICE_MANAGER="systemd"
@@ -1071,7 +1083,7 @@ get_ss_port() { read_json_value "server_port" "${SS_CONFIG_FILE}" || true; }
 get_ss_password() { read_json_value "password" "${SS_CONFIG_FILE}" || true; }
 get_ss_method() { read_json_value "method" "${SS_CONFIG_FILE}" || true; }
 
-write_ss_service() {
+write_ss_service_file() {
     if [ "${SERVICE_MANAGER}" = "systemd" ]; then
         cat > "${SYSTEMD_SS_SERVICE}" <<EOF
 [Unit]
@@ -1095,7 +1107,6 @@ RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 WantedBy=multi-user.target
 EOF
         systemctl daemon-reload
-        systemctl enable --now ss-rust >/dev/null
     else
         cat > "${OPENRC_SS_SERVICE}" <<EOF
 #!/sbin/openrc-run
@@ -1114,9 +1125,22 @@ depend() {
 }
 EOF
         chmod +x "${OPENRC_SS_SERVICE}"
-        rc-update add ss-rust default >/dev/null
-        rc-service ss-rust restart >/dev/null
     fi
+}
+
+enable_and_restart_ss_service() {
+    if [ "${SERVICE_MANAGER}" = "systemd" ]; then
+        systemctl enable ss-rust >/dev/null || return 1
+        restart_ss_service
+    else
+        rc-update add ss-rust default >/dev/null || return 1
+        restart_ss_service >/dev/null
+    fi
+}
+
+write_ss_service() {
+    write_ss_service_file || return 1
+    enable_and_restart_ss_service
 }
 
 restart_ss_service() {
@@ -1186,6 +1210,274 @@ shadow_tls_service_state() {
     fi
 }
 
+has_current_ss_installation() {
+    if [ "${SERVICE_MANAGER}" = "systemd" ]; then
+        [ -f "${SS_BINARY}" ] || [ -f "${SS_CONFIG_FILE}" ] || [ -f "${SYSTEMD_SS_SERVICE}" ]
+    else
+        [ -f "${SS_BINARY}" ] || [ -f "${SS_CONFIG_FILE}" ] || [ -f "${OPENRC_SS_SERVICE}" ]
+    fi
+}
+
+has_shadow_tls_installation_state() {
+    [ "${SERVICE_MANAGER}" = "systemd" ] || return 1
+    [ -f "${SHADOW_TLS_BINARY}" ] || [ -f "${SHADOW_TLS_ENV_FILE}" ] || [ -f "${SYSTEMD_SHADOW_TLS_SERVICE}" ]
+}
+
+backup_ss_installation_for_rollback() {
+    local __binary_var="$1" __config_var="$2" __service_var="$3"
+    local service_path binary_backup="" config_backup="" service_backup=""
+
+    if [ "${SERVICE_MANAGER}" = "systemd" ]; then
+        service_path="${SYSTEMD_SS_SERVICE}"
+    else
+        service_path="${OPENRC_SS_SERVICE}"
+    fi
+
+    binary_backup="$(backup_file_for_rollback "${SS_BINARY}")" || return 1
+    config_backup="$(backup_file_for_rollback "${SS_CONFIG_FILE}")" || return 1
+    service_backup="$(backup_file_for_rollback "${service_path}")" || return 1
+
+    printf -v "${__binary_var}" '%s' "${binary_backup}"
+    printf -v "${__config_var}" '%s' "${config_backup}"
+    printf -v "${__service_var}" '%s' "${service_backup}"
+}
+
+backup_shadow_tls_installation_for_rollback() {
+    local __binary_var="$1" __env_var="$2" __service_var="$3"
+    local binary_backup="" env_backup="" service_backup=""
+
+    binary_backup="$(backup_file_for_rollback "${SHADOW_TLS_BINARY}")" || return 1
+    env_backup="$(backup_file_for_rollback "${SHADOW_TLS_ENV_FILE}")" || return 1
+    service_backup="$(backup_file_for_rollback "${SYSTEMD_SHADOW_TLS_SERVICE}")" || return 1
+
+    printf -v "${__binary_var}" '%s' "${binary_backup}"
+    printf -v "${__env_var}" '%s' "${env_backup}"
+    printf -v "${__service_var}" '%s' "${service_backup}"
+}
+
+cleanup_failed_fresh_ss_installation() {
+    ui_warn "全新安装未完成，正在清理本次写入的 Shadowsocks 残留。"
+
+    if [ "${SERVICE_MANAGER}" = "systemd" ]; then
+        systemctl disable --now ss-rust >/dev/null 2>&1 || true
+        remove_file_if_exists "${SYSTEMD_SS_SERVICE}" || true
+        systemctl daemon-reload >/dev/null 2>&1 || true
+    else
+        rc-service ss-rust stop >/dev/null 2>&1 || true
+        rc-update del ss-rust default >/dev/null 2>&1 || true
+        remove_file_if_exists "${OPENRC_SS_SERVICE}" || true
+    fi
+
+    remove_file_if_exists "${SS_BINARY}" || true
+    remove_file_if_exists "${SS_CONFIG_FILE}" || true
+    rmdir "${INSTALL_DIR}" >/dev/null 2>&1 || true
+}
+
+restore_shadow_tls_after_failed_change() {
+    local binary_backup="$1" env_backup="$2" service_backup="$3" old_stls_port="${4:-}"
+    local restore_failed=0
+
+    if [ "${SERVICE_MANAGER}" != "systemd" ]; then
+        return 0
+    fi
+
+    if [ -n "${binary_backup}" ]; then
+        restore_path_for_rollback "${binary_backup}" "${SHADOW_TLS_BINARY}" || {
+            ui_error "旧 Shadow-TLS 二进制恢复失败：${binary_backup}"
+            restore_failed=1
+        }
+    fi
+
+    if [ -n "${env_backup}" ]; then
+        restore_path_for_rollback "${env_backup}" "${SHADOW_TLS_ENV_FILE}" || {
+            ui_error "旧 Shadow-TLS 环境文件恢复失败：${env_backup}"
+            restore_failed=1
+        }
+    elif [ ! -f "${SYSTEMD_SHADOW_TLS_SERVICE}" ]; then
+        remove_file_if_exists "${SHADOW_TLS_ENV_FILE}" || {
+            ui_error "Shadow-TLS 环境文件清理失败：${SHADOW_TLS_ENV_FILE}"
+            restore_failed=1
+        }
+    fi
+
+    if [ -n "${service_backup}" ]; then
+        restore_path_for_rollback "${service_backup}" "${SYSTEMD_SHADOW_TLS_SERVICE}" || {
+            ui_error "旧 Shadow-TLS 服务文件恢复失败：${service_backup}"
+            restore_failed=1
+        }
+    fi
+
+    systemctl daemon-reload >/dev/null 2>&1 || true
+
+    if [ -f "${SYSTEMD_SHADOW_TLS_SERVICE}" ]; then
+        if ! systemctl restart shadow-tls >/dev/null 2>&1; then
+            ui_error "旧 Shadow-TLS 服务重启失败。"
+            show_shadow_tls_runtime_failure_diagnostics "${old_stls_port}"
+            return 1
+        fi
+
+        ensure_runtime_validation_dependencies
+        if ! wait_for_shadow_tls_runtime_core "${old_stls_port}"; then
+            ui_error "旧 Shadow-TLS 服务恢复后未通过运行验证。"
+            show_shadow_tls_runtime_failure_diagnostics "${old_stls_port}"
+            return 1
+        fi
+    fi
+
+    [ "${restore_failed}" -eq 0 ]
+}
+
+rollback_ss_installation_change() {
+    local ss_binary_backup="$1" ss_config_backup="$2" ss_service_backup="$3"
+    local shadow_tls_binary_backup="$4" shadow_tls_env_backup="$5" shadow_tls_service_backup="$6"
+    local old_ss_port="${7:-}" old_stls_port="${8:-}"
+    local rollback_failed=0
+
+    ui_warn "安装 / 覆盖安装失败，正在恢复旧 Shadowsocks 状态。"
+
+    if [ -n "${ss_binary_backup}" ]; then
+        restore_path_for_rollback "${ss_binary_backup}" "${SS_BINARY}" || {
+            ui_error "旧 Shadowsocks 二进制恢复失败：${ss_binary_backup}"
+            rollback_failed=1
+        }
+    else
+        remove_file_if_exists "${SS_BINARY}" || rollback_failed=1
+    fi
+
+    if [ -n "${ss_config_backup}" ]; then
+        restore_path_for_rollback "${ss_config_backup}" "${SS_CONFIG_FILE}" || {
+            ui_error "旧 Shadowsocks 配置恢复失败：${ss_config_backup}"
+            rollback_failed=1
+        }
+    else
+        remove_file_if_exists "${SS_CONFIG_FILE}" || rollback_failed=1
+    fi
+
+    if [ "${SERVICE_MANAGER}" = "systemd" ]; then
+        if [ -n "${ss_service_backup}" ]; then
+            restore_path_for_rollback "${ss_service_backup}" "${SYSTEMD_SS_SERVICE}" || {
+                ui_error "旧 Shadowsocks systemd 服务恢复失败：${ss_service_backup}"
+                rollback_failed=1
+            }
+        else
+            systemctl disable --now ss-rust >/dev/null 2>&1 || true
+            remove_file_if_exists "${SYSTEMD_SS_SERVICE}" || rollback_failed=1
+        fi
+        systemctl daemon-reload >/dev/null 2>&1 || true
+    else
+        if [ -n "${ss_service_backup}" ]; then
+            restore_path_for_rollback "${ss_service_backup}" "${OPENRC_SS_SERVICE}" || {
+                ui_error "旧 Shadowsocks OpenRC 服务恢复失败：${ss_service_backup}"
+                rollback_failed=1
+            }
+            chmod +x "${OPENRC_SS_SERVICE}" >/dev/null 2>&1 || true
+        else
+            rc-service ss-rust stop >/dev/null 2>&1 || true
+            rc-update del ss-rust default >/dev/null 2>&1 || true
+            remove_file_if_exists "${OPENRC_SS_SERVICE}" || rollback_failed=1
+        fi
+    fi
+
+    if ! restart_ss_service >/dev/null 2>&1; then
+        ui_error "旧 Shadowsocks 服务重启失败。"
+        show_ss_runtime_failure_diagnostics "${old_ss_port}"
+        rollback_failed=1
+    else
+        ensure_runtime_validation_dependencies
+        if ! wait_for_ss_runtime_core "${old_ss_port}"; then
+            ui_error "旧 Shadowsocks 服务恢复后未通过运行验证。"
+            show_ss_runtime_failure_diagnostics "${old_ss_port}"
+            rollback_failed=1
+        fi
+    fi
+
+    if [ -n "${shadow_tls_binary_backup}${shadow_tls_env_backup}${shadow_tls_service_backup}" ]; then
+        if ! restore_shadow_tls_after_failed_change \
+            "${shadow_tls_binary_backup}" \
+            "${shadow_tls_env_backup}" \
+            "${shadow_tls_service_backup}" \
+            "${old_stls_port}"; then
+            ui_error "旧 Shadow-TLS 状态恢复失败。"
+            rollback_failed=1
+        fi
+    fi
+
+    if [ "${rollback_failed}" -ne 0 ]; then
+        ui_error "旧状态未完全恢复，请根据上方诊断命令手动处理。"
+        return 1
+    fi
+
+    print_success "旧 Shadowsocks 状态已恢复。"
+    return 0
+}
+
+restore_ss_config_after_failed_change() {
+    local config_backup="$1" old_port="${2:-}"
+
+    ui_warn "配置修改失败，正在恢复旧 Shadowsocks 配置。"
+
+    if ! restore_path_for_rollback "${config_backup}" "${SS_CONFIG_FILE}"; then
+        ui_error "旧 Shadowsocks 配置恢复失败：${config_backup}"
+        ui_warn "请手动执行："
+        ui_print "cp -a '${config_backup}' '${SS_CONFIG_FILE}'"
+        if [ "${SERVICE_MANAGER}" = "systemd" ]; then
+            ui_print "systemctl restart ss-rust"
+        else
+            ui_print "rc-service ss-rust restart"
+        fi
+        return 1
+    fi
+
+    if ! restart_ss_service >/dev/null 2>&1; then
+        ui_error "旧 Shadowsocks 配置已恢复，但服务重启失败。"
+        show_ss_runtime_failure_diagnostics "${old_port}"
+        return 1
+    fi
+
+    ensure_runtime_validation_dependencies
+    if ! wait_for_ss_runtime_core "${old_port}"; then
+        ui_error "旧 Shadowsocks 配置已恢复，但服务未通过运行验证。"
+        show_ss_runtime_failure_diagnostics "${old_port}"
+        return 1
+    fi
+
+    print_success "旧 Shadowsocks 配置已恢复。"
+    return 0
+}
+
+handle_ss_install_failure() {
+    local reason="$1" had_ss_installation="$2"
+    local ss_binary_backup="$3" ss_config_backup="$4" ss_service_backup="$5"
+    local shadow_tls_binary_backup="$6" shadow_tls_env_backup="$7" shadow_tls_service_backup="$8"
+    local old_ss_port="${9:-}" old_stls_port="${10:-}"
+
+    ui_error "${reason}"
+
+    if [ "${had_ss_installation}" = "true" ]; then
+        rollback_ss_installation_change \
+            "${ss_binary_backup}" \
+            "${ss_config_backup}" \
+            "${ss_service_backup}" \
+            "${shadow_tls_binary_backup}" \
+            "${shadow_tls_env_backup}" \
+            "${shadow_tls_service_backup}" \
+            "${old_ss_port}" \
+            "${old_stls_port}" || true
+    else
+        cleanup_failed_fresh_ss_installation
+        if [ -n "${shadow_tls_binary_backup}${shadow_tls_env_backup}${shadow_tls_service_backup}" ]; then
+            restore_shadow_tls_after_failed_change \
+                "${shadow_tls_binary_backup}" \
+                "${shadow_tls_env_backup}" \
+                "${shadow_tls_service_backup}" \
+                "${old_stls_port}" || true
+        fi
+    fi
+
+    pause_screen
+    return 1
+}
+
 build_status_line() {
     local manager="${SERVICE_MANAGER:-unknown}" arch="${ARCH:-unknown}"
     printf 'SS: %s | Shadow-TLS: %s | Manager: %s | Arch: %s' \
@@ -1215,14 +1507,48 @@ install_or_reinstall_ss() {
     ensure_dependencies || { pause_screen; return 1; }
     fetch_latest_versions_if_needed
 
-    if [ -d "${INSTALL_DIR}" ]; then
-        local overwrite_status=0
+    local overwrite_status=0 install_confirm_status=0
+    local had_ss_installation=false had_shadow_tls_state=false
+    local ss_binary_backup="" ss_config_backup="" ss_service_backup=""
+    local shadow_tls_binary_backup="" shadow_tls_env_backup="" shadow_tls_service_backup=""
+    local old_ss_port="" old_stls_port=""
+
+    if has_current_ss_installation; then
         ui_blank
         confirm_yes_no "检测到已有安装，是否覆盖 Shadowsocks 配置？" "n" || overwrite_status=$?
-        if [ "${overwrite_status}" -ne 0 ]; then
+        if [ "${overwrite_status}" -eq "${CANCEL_STATUS}" ]; then
             cancel_to_previous_menu
             return
         fi
+        if [ "${overwrite_status}" -ne 0 ]; then
+            ui_warn "已取消安装。"
+            pause_screen
+            return
+        fi
+
+        had_ss_installation=true
+        old_ss_port="$(get_ss_port || true)"
+        backup_ss_installation_for_rollback ss_binary_backup ss_config_backup ss_service_backup || {
+            print_error "旧 Shadowsocks 状态备份失败，已停止安装。"
+            pause_screen
+            return 1
+        }
+    fi
+
+    if [ "${SERVICE_MANAGER}" = "systemd" ] && [ -f "${SHADOW_TLS_ENV_FILE}" ]; then
+        if ! load_shadow_tls_env; then
+            print_error "检测到现有 Shadow-TLS 环境文件，但其内容无效，无法安全同步后端端口。"
+            pause_screen
+            return 1
+        fi
+
+        had_shadow_tls_state=true
+        old_stls_port="${STLS_PORT:-}"
+        backup_shadow_tls_installation_for_rollback shadow_tls_binary_backup shadow_tls_env_backup shadow_tls_service_backup || {
+            print_error "现有 Shadow-TLS 状态备份失败，已停止安装。"
+            pause_screen
+            return 1
+        }
     fi
 
     local port method password
@@ -1231,7 +1557,6 @@ install_or_reinstall_ss() {
     prompt_password password "${method}" || { cancel_to_previous_menu; return; }
 
     show_ss_config_change_summary "确认安装参数" "${port}" "${method}" "安装核心、写入配置并启动 ss-rust 服务"
-    local install_confirm_status=0
     ui_blank
     confirm_yes_no "确认写入配置并启动服务？" "y" || install_confirm_status=$?
     if [ "${install_confirm_status}" -eq "${CANCEL_STATUS}" ]; then
@@ -1244,9 +1569,128 @@ install_or_reinstall_ss() {
         return
     fi
 
-    download_and_install_ss_binary || { pause_screen; return 1; }
-    write_ss_config "${port}" "${password}" "${method}" || { pause_screen; return 1; }
-    write_ss_service || { pause_screen; return 1; }
+    download_and_install_ss_binary || {
+        handle_ss_install_failure \
+            "Shadowsocks-Rust 下载或安装失败。" \
+            "${had_ss_installation}" \
+            "${ss_binary_backup}" \
+            "${ss_config_backup}" \
+            "${ss_service_backup}" \
+            "${shadow_tls_binary_backup}" \
+            "${shadow_tls_env_backup}" \
+            "${shadow_tls_service_backup}" \
+            "${old_ss_port}" \
+            "${old_stls_port}"
+        return 1
+    }
+    write_ss_config "${port}" "${password}" "${method}" || {
+        handle_ss_install_failure \
+            "Shadowsocks 配置写入失败。" \
+            "${had_ss_installation}" \
+            "${ss_binary_backup}" \
+            "${ss_config_backup}" \
+            "${ss_service_backup}" \
+            "${shadow_tls_binary_backup}" \
+            "${shadow_tls_env_backup}" \
+            "${shadow_tls_service_backup}" \
+            "${old_ss_port}" \
+            "${old_stls_port}"
+        return 1
+    }
+    write_ss_service_file || {
+        handle_ss_install_failure \
+            "Shadowsocks 服务定义写入失败。" \
+            "${had_ss_installation}" \
+            "${ss_binary_backup}" \
+            "${ss_config_backup}" \
+            "${ss_service_backup}" \
+            "${shadow_tls_binary_backup}" \
+            "${shadow_tls_env_backup}" \
+            "${shadow_tls_service_backup}" \
+            "${old_ss_port}" \
+            "${old_stls_port}"
+        return 1
+    }
+    enable_and_restart_ss_service || {
+        handle_ss_install_failure \
+            "Shadowsocks 服务启用或重启失败。" \
+            "${had_ss_installation}" \
+            "${ss_binary_backup}" \
+            "${ss_config_backup}" \
+            "${ss_service_backup}" \
+            "${shadow_tls_binary_backup}" \
+            "${shadow_tls_env_backup}" \
+            "${shadow_tls_service_backup}" \
+            "${old_ss_port}" \
+            "${old_stls_port}"
+        return 1
+    }
+
+    ensure_runtime_validation_dependencies
+    if ! wait_for_ss_runtime_core "${port}"; then
+        show_ss_runtime_failure_diagnostics "${port}"
+        handle_ss_install_failure \
+            "Shadowsocks 安装后未通过运行验证。" \
+            "${had_ss_installation}" \
+            "${ss_binary_backup}" \
+            "${ss_config_backup}" \
+            "${ss_service_backup}" \
+            "${shadow_tls_binary_backup}" \
+            "${shadow_tls_env_backup}" \
+            "${shadow_tls_service_backup}" \
+            "${old_ss_port}" \
+            "${old_stls_port}"
+        return 1
+    fi
+
+    if [ "${had_shadow_tls_state}" = "true" ]; then
+        write_shadow_tls_env "${port}" "${STLS_PORT}" "${STLS_SNI}" "${STLS_PASSWORD}" || {
+            handle_ss_install_failure \
+                "Shadow-TLS 后端端口同步失败。" \
+                "${had_ss_installation}" \
+                "${ss_binary_backup}" \
+                "${ss_config_backup}" \
+                "${ss_service_backup}" \
+                "${shadow_tls_binary_backup}" \
+                "${shadow_tls_env_backup}" \
+                "${shadow_tls_service_backup}" \
+                "${old_ss_port}" \
+                "${old_stls_port}"
+            return 1
+        }
+        if ! systemctl restart shadow-tls >/dev/null 2>&1; then
+            show_shadow_tls_runtime_failure_diagnostics "${STLS_PORT}"
+            handle_ss_install_failure \
+                "Shadow-TLS 重启失败，已停止安装以避免后端端口不一致。" \
+                "${had_ss_installation}" \
+                "${ss_binary_backup}" \
+                "${ss_config_backup}" \
+                "${ss_service_backup}" \
+                "${shadow_tls_binary_backup}" \
+                "${shadow_tls_env_backup}" \
+                "${shadow_tls_service_backup}" \
+                "${old_ss_port}" \
+                "${old_stls_port}"
+            return 1
+        fi
+
+        ensure_runtime_validation_dependencies
+        if ! wait_for_shadow_tls_runtime_core "${STLS_PORT}"; then
+            show_shadow_tls_runtime_failure_diagnostics "${STLS_PORT}"
+            handle_ss_install_failure \
+                "Shadow-TLS 端口同步后未通过运行验证。" \
+                "${had_ss_installation}" \
+                "${ss_binary_backup}" \
+                "${ss_config_backup}" \
+                "${ss_service_backup}" \
+                "${shadow_tls_binary_backup}" \
+                "${shadow_tls_env_backup}" \
+                "${shadow_tls_service_backup}" \
+                "${old_ss_port}" \
+                "${old_stls_port}"
+            return 1
+        fi
+    fi
 
     print_success "Shadowsocks-Rust 已安装并启动。"
     show_client_config false
@@ -1503,6 +1947,7 @@ show_client_config() {
 modify_ss_config() {
     print_title
     print_section "修改 Shadowsocks 配置"
+    ensure_dependencies || { pause_screen; return 1; }
 
     if [ ! -f "${SS_CONFIG_FILE}" ]; then
         print_error "尚未安装 Shadowsocks-Rust。"
@@ -1511,9 +1956,25 @@ modify_ss_config() {
     fi
 
     local current_port current_method current_password new_port new_method new_password
+    local current_stls_port="" current_stls_sni="" current_stls_password=""
+    local has_shadow_tls_state=false
+    local config_backup="" shadow_tls_env_backup=""
+    local modify_confirm_status=0 method_confirm_status=0 password_confirm_status=0
     current_port="$(get_ss_port)"
     current_method="$(get_ss_method)"
     current_password="$(get_ss_password)"
+
+    if [ "${SERVICE_MANAGER}" = "systemd" ] && [ -f "${SHADOW_TLS_ENV_FILE}" ]; then
+        if ! load_shadow_tls_env; then
+            print_error "检测到现有 Shadow-TLS 环境文件，但其内容无效，无法安全同步后端端口。"
+            pause_screen
+            return 1
+        fi
+        has_shadow_tls_state=true
+        current_stls_port="${STLS_PORT:-}"
+        current_stls_sni="${STLS_SNI:-}"
+        current_stls_password="${STLS_PASSWORD:-}"
+    fi
 
     print_info "当前端口：${current_port}"
     ui_blank
@@ -1530,7 +1991,6 @@ modify_ss_config() {
         return 1
     fi
 
-    local method_confirm_status=0 password_confirm_status=0
     ui_blank
     if confirm_yes_no "是否修改加密方法？" "n"; then
         choose_method new_method || { cancel_to_previous_menu; return; }
@@ -1557,7 +2017,6 @@ modify_ss_config() {
     fi
 
     show_ss_config_change_summary "确认修改参数" "${new_port}" "${new_method}"
-    local modify_confirm_status=0
     ui_blank
     confirm_yes_no "确认写入配置并重启服务？" "y" || modify_confirm_status=$?
     if [ "${modify_confirm_status}" -eq "${CANCEL_STATUS}" ]; then
@@ -1570,15 +2029,78 @@ modify_ss_config() {
         return
     fi
 
-    write_ss_config "${new_port}" "${new_password}" "${new_method}" || { pause_screen; return 1; }
-    restart_ss_service || { pause_screen; return 1; }
-
-    if [ -f "${SHADOW_TLS_ENV_FILE}" ] && load_shadow_tls_env; then
-        write_shadow_tls_env "${new_port}" "${STLS_PORT}" "${STLS_SNI}" "${STLS_PASSWORD}" || { pause_screen; return 1; }
-        systemctl restart shadow-tls >/dev/null 2>&1 || true
+    config_backup="$(backup_file_for_rollback "${SS_CONFIG_FILE}")" || {
+        print_error "旧 Shadowsocks 配置备份失败，已停止修改。"
+        pause_screen
+        return 1
+    }
+    if [ -z "${config_backup}" ]; then
+        print_error "旧 Shadowsocks 配置备份失败，未生成回滚文件。"
+        pause_screen
+        return 1
     fi
 
-    print_success "配置已更新并重启服务。"
+    if [ "${has_shadow_tls_state}" = "true" ]; then
+        shadow_tls_env_backup="$(backup_file_for_rollback "${SHADOW_TLS_ENV_FILE}")" || {
+            print_error "旧 Shadow-TLS 环境文件备份失败，已停止修改。"
+            pause_screen
+            return 1
+        }
+    fi
+
+    if ! write_ss_config "${new_port}" "${new_password}" "${new_method}"; then
+        print_error "新 Shadowsocks 配置写入失败。"
+        restore_ss_config_after_failed_change "${config_backup}" "${current_port}" || true
+        pause_screen
+        return 1
+    fi
+
+    if ! restart_ss_service; then
+        print_error "新 Shadowsocks 配置写入后服务重启失败。"
+        restore_ss_config_after_failed_change "${config_backup}" "${current_port}" || true
+        pause_screen
+        return 1
+    fi
+
+    ensure_runtime_validation_dependencies
+    if ! wait_for_ss_runtime_core "${new_port}"; then
+        print_error "新 Shadowsocks 配置重启后未通过运行验证。"
+        show_ss_runtime_failure_diagnostics "${new_port}"
+        restore_ss_config_after_failed_change "${config_backup}" "${current_port}" || true
+        pause_screen
+        return 1
+    fi
+
+    if [ "${has_shadow_tls_state}" = "true" ]; then
+        if ! write_shadow_tls_env "${new_port}" "${current_stls_port}" "${current_stls_sni}" "${current_stls_password}"; then
+            print_error "Shadow-TLS 后端端口同步失败。"
+            restore_ss_config_after_failed_change "${config_backup}" "${current_port}" || true
+            restore_shadow_tls_after_failed_change "" "${shadow_tls_env_backup}" "" "${current_stls_port}" || true
+            pause_screen
+            return 1
+        fi
+
+        if ! systemctl restart shadow-tls >/dev/null 2>&1; then
+            print_error "Shadow-TLS 重启失败，正在恢复旧配置。"
+            show_shadow_tls_runtime_failure_diagnostics "${current_stls_port}"
+            restore_ss_config_after_failed_change "${config_backup}" "${current_port}" || true
+            restore_shadow_tls_after_failed_change "" "${shadow_tls_env_backup}" "" "${current_stls_port}" || true
+            pause_screen
+            return 1
+        fi
+
+        ensure_runtime_validation_dependencies
+        if ! wait_for_shadow_tls_runtime_core "${current_stls_port}"; then
+            print_error "Shadow-TLS 重启后未通过运行验证，正在恢复旧配置。"
+            show_shadow_tls_runtime_failure_diagnostics "${current_stls_port}"
+            restore_ss_config_after_failed_change "${config_backup}" "${current_port}" || true
+            restore_shadow_tls_after_failed_change "" "${shadow_tls_env_backup}" "" "${current_stls_port}" || true
+            pause_screen
+            return 1
+        fi
+    fi
+
+    print_success "配置已更新、服务已重启并通过运行验证。"
     show_client_config false
     pause_screen
 }
