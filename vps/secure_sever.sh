@@ -298,10 +298,7 @@ ui_run_menu_action() {
     "$@" || rc=$?
     case "$rc" in
         0) return 0 ;;
-        "$UI_RETURN_TO_MENU")
-            ui_warn "${action_name} 已取消，已返回上一级菜单。"
-            return 0
-            ;;
+        "$UI_RETURN_TO_MENU") return 0 ;;
         *)
             ui_error "${action_name} 执行失败，退出码：${rc}。"
             ui_warn "脚本将保留在菜单中，请根据上方错误信息处理后重试。"
@@ -402,12 +399,12 @@ make_tmp_file() {
 
 run_cmd() {
     local description="$1"
+    local command_text=""
     shift
 
     if [[ "${SECURE_SERVER_DRY_RUN}" == "1" ]]; then
-        printf '[DRY-RUN] %s:' "$description"
-        printf ' %q' "$@"
-        printf '\n'
+        printf -v command_text '%q ' "$@"
+        ui_info "DRY-RUN: ${description}: ${command_text% }"
         return 0
     fi
 
@@ -1007,7 +1004,7 @@ backup_ufw_config() {
     create_backup_dir >/dev/null || return 1
     backup_path="${BACKUP_DIR}/ufw-$(date +%Y%m%d_%H%M%S).tar.gz"
     if [[ "${SECURE_SERVER_DRY_RUN}" == "1" ]]; then
-        printf '[DRY-RUN] backup /etc/ufw -> %s\n' "$backup_path"
+        ui_info "DRY-RUN: backup /etc/ufw -> ${backup_path}"
         return 0
     fi
     [[ -d /etc/ufw ]] || return 0
@@ -1046,24 +1043,24 @@ configure_ufw() {
     unique_udp_ports="$(normalize_port_list "$DETECTED_UDP_PORTS")"
     unique_udp_ports="${unique_udp_ports% }"
 
-    ui_section "UFW 影响范围"
-    ui_warn "确认后将重置现有 UFW 规则并启用新的默认策略。"
-    ui_rule
-    ui_kv "操作" "重置并启用 UFW"
-    ui_kv "默认入站" "deny"
-    ui_kv "默认出站" "allow"
-    ui_kv "SSH" "${DETECTED_SSH_PORT}/tcp"
-    ui_kv "TCP" "${unique_tcp_ports:-无}"
-    ui_kv "UDP" "${unique_udp_ports:-无}"
+    ui_section "高风险操作确认"
+    ui_warn "此操作将重置并重写 UFW 规则："
+    ui_kv "影响对象" "/etc/ufw"
+    ui_kv "默认入站策略" "deny incoming"
+    ui_kv "默认出站策略" "allow outgoing"
+    ui_kv "SSH 端口" "${DETECTED_SSH_PORT:-unknown}/tcp"
+    ui_kv "代理 TCP 端口" "${unique_tcp_ports:-无}"
+    ui_kv "代理 UDP 端口" "${unique_udp_ports:-无}"
     if [[ "$ssh_source_mode" == "restricted" ]]; then
         ui_kv "SSH 来源限制" "$CURRENT_IP"
     else
         ui_kv "SSH 来源限制" "全部来源"
     fi
     ui_kv "备份目录" "$BACKUP_DIR"
-    ui_rule
+    ui_kv "Dry-run" "$(get_dry_run_status_text)"
+    ui_blank
 
-    ui_confirm_token "确认重置 UFW 规则？" "RESET-UFW" || return "$?"
+    ui_confirm_token "确认重置 UFW 规则？" "RESET-UFW" || return "$INPUT_CANCELLED"
 
     backup_ufw_config || return 1
     run_cmd "禁用 UFW" ufw --force disable || return 1
@@ -1119,17 +1116,19 @@ configure_fail2ban() {
         logpath="$SSH_LOG_PATH"
     fi
 
-    ui_section "Fail2ban 影响范围"
-    ui_warn "确认后将写入 Fail2ban SSH jail 配置并重启 fail2ban。"
-    ui_rule
-    ui_kv "目标文件" "$FAIL2BAN_SSHD_LOCAL"
-    ui_kv "SSH 端口" "${DETECTED_SSH_PORT:-ssh}"
+    ui_section "高风险操作确认"
+    ui_warn "此操作将写入或覆盖 Fail2ban 配置："
+    ui_kv "影响对象" "$FAIL2BAN_SSHD_LOCAL"
+    ui_kv "保护服务" "sshd"
+    ui_kv "SSH 端口" "${DETECTED_SSH_PORT:-unknown}/tcp"
     ui_kv "后端" "$FAIL2BAN_BACKEND"
     ui_kv "日志路径" "${logpath:-默认/systemd}"
+    ui_kv "服务重启" "fail2ban"
     ui_kv "备份目录" "$BACKUP_DIR"
-    ui_rule
+    ui_kv "Dry-run" "$(get_dry_run_status_text)"
+    ui_blank
 
-    ui_confirm_token "确认覆盖 Fail2ban 配置？" "OVERWRITE" || return "$?"
+    ui_confirm_token "确认覆盖 Fail2ban 配置？" "OVERWRITE-F2B" || return "$INPUT_CANCELLED"
 
     tmp_file="$(make_tmp_file)" || return 1
     umask 077
@@ -1142,7 +1141,7 @@ configure_fail2ban() {
     fi
 
     if [[ "${SECURE_SERVER_DRY_RUN}" == "1" ]]; then
-        printf '[DRY-RUN] install %s -> %s\n' "$tmp_file" "$FAIL2BAN_SSHD_LOCAL"
+        ui_info "DRY-RUN: install ${tmp_file} -> ${FAIL2BAN_SSHD_LOCAL}"
         ok "Fail2ban dry-run 完成。"
         return 0
     fi
@@ -1241,17 +1240,19 @@ secure_ssh() {
         "$INPUT_CANCELLED") info "已取消当前操作，返回上一级。"; return "$INPUT_CANCELLED" ;;
     esac
 
-    ui_section "SSH 影响范围"
-    ui_warn "确认后将写入 SSH 加固配置并重启 SSH 服务。请保持当前 SSH 会话并准备备用登录窗口。"
-    ui_rule
-    ui_kv "主配置" "$SSH_CONFIG_FILE"
+    ui_section "高风险操作确认"
+    ui_warn "此操作将修改 SSH 服务配置。请保持当前 SSH 会话并准备备用登录窗口："
+    ui_kv "影响对象" "$SSH_CONFIG_FILE"
     ui_kv "加固配置" "$SSHD_HARDENING_FILE"
+    ui_kv "SSH 端口" "${DETECTED_SSH_PORT:-unknown}/tcp"
     ui_kv "PermitRootLogin" "$permit_root_login"
     ui_kv "PasswordAuthentication" "$password_auth"
+    ui_kv "服务重载" "sshd / ssh"
     ui_kv "备份目录" "$BACKUP_DIR"
-    ui_rule
+    ui_kv "Dry-run" "$(get_dry_run_status_text)"
+    ui_blank
 
-    ui_confirm_token "确认覆盖 SSH 加固配置？" "OVERWRITE" || return "$?"
+    ui_confirm_token "确认执行 SSH 加固？" "HARDEN-SSH" || return "$INPUT_CANCELLED"
 
     tmp_hardening="$(make_tmp_file)" || return 1
     render_sshd_hardening_config "$permit_root_login" "$password_auth" > "$tmp_hardening"
@@ -1262,7 +1263,7 @@ secure_ssh() {
     fi
 
     if [[ "${SECURE_SERVER_DRY_RUN}" == "1" ]]; then
-        printf '[DRY-RUN] install hardening config -> %s\n' "$SSHD_HARDENING_FILE"
+        ui_info "DRY-RUN: install hardening config -> ${SSHD_HARDENING_FILE}"
         ok "SSH dry-run 完成。"
         return 0
     fi
@@ -1301,6 +1302,14 @@ secure_ssh() {
 
 run_all_steps() {
     section "执行所有步骤"
+    ui_section "高风险操作确认"
+    ui_warn "此操作将连续执行多项系统安全修改："
+    ui_kv "包含动作" "安装依赖 / UFW / Fail2ban / SSH 加固"
+    ui_kv "可能影响" "远程登录、防火墙访问、封禁策略"
+    ui_kv "Dry-run" "$(get_dry_run_status_text)"
+    ui_blank
+    ui_confirm_token "确认执行全套加固？" "APPLY-HARDENING" || return "$INPUT_CANCELLED"
+
     install_packages &&
         configure_ufw &&
         configure_fail2ban &&
