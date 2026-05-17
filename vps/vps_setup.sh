@@ -9,7 +9,7 @@
 # ==============================================================================
 
 readonly SCRIPT_DISPLAY_NAME="VPS 初始化向导"
-readonly SCRIPT_VERSION="2026.05.16-r2"
+readonly SCRIPT_VERSION="2026.05.17-r1"
 
 UI_COLOR_RESET=''
 UI_COLOR_RED=''
