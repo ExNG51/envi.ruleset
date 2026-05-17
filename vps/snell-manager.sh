@@ -566,6 +566,17 @@ validate_obfs_host() {
     [[ "${host}" =~ ^[A-Za-z0-9._-]+$ ]]
 }
 
+append_report_item() {
+    local __var_name="$1" item="$2"
+    local current_value="${!__var_name:-}"
+
+    if [ -n "${current_value}" ]; then
+        printf -v "${__var_name}" '%s\n%s' "${current_value}" "${item}"
+    else
+        printf -v "${__var_name}" '%s' "${item}"
+    fi
+}
+
 validate_protocol_version() {
     case "$1" in
         4|5) return 0 ;;
@@ -990,16 +1001,73 @@ verify_takeover() {
 }
 
 finalize_legacy_takeover() {
-    local backup_suffix
+    local backup_suffix failed_items backup_path
     backup_suffix="$(date +%Y%m%d_%H%M%S)"
+    failed_items=""
     ui_section "收敛旧服务"
 
-    systemctl disable snell-server >/dev/null 2>&1 || true
-    [ -f "${OLD_SNELL_SERVICE_FILE}" ] && mv "${OLD_SNELL_SERVICE_FILE}" "${OLD_SNELL_SERVICE_FILE}.bak.${backup_suffix}"
-    [ -f "${OLD_SNELL_CONFIG_FILE}" ] && mv "${OLD_SNELL_CONFIG_FILE}" "${OLD_SNELL_CONFIG_FILE}.bak.${backup_suffix}"
-    [ -f "${OLD_SNELL_VERSION_FILE}" ] && mv "${OLD_SNELL_VERSION_FILE}" "${OLD_SNELL_VERSION_FILE}.bak.${backup_suffix}"
-    systemctl daemon-reload >/dev/null 2>&1 || true
-    ui_ok "旧服务和旧配置已备份，新 snell 服务已接管。"
+    if systemctl disable snell-server >/dev/null 2>&1; then
+        ui_ok "旧 snell-server 已设为 disabled。"
+    else
+        ui_warn "旧 snell-server disable 失败或服务不存在，请后续人工确认。"
+        append_report_item failed_items "systemctl disable snell-server"
+    fi
+
+    if [ -f "${OLD_SNELL_SERVICE_FILE}" ]; then
+        backup_path="${OLD_SNELL_SERVICE_FILE}.bak.${backup_suffix}"
+        if mv "${OLD_SNELL_SERVICE_FILE}" "${backup_path}"; then
+            ui_ok "旧服务文件已备份：${backup_path}"
+        else
+            ui_warn "旧服务文件备份失败：${OLD_SNELL_SERVICE_FILE}"
+            append_report_item failed_items "mv '${OLD_SNELL_SERVICE_FILE}' '${backup_path}'"
+        fi
+    else
+        ui_dim "未发现旧服务文件：${OLD_SNELL_SERVICE_FILE}"
+    fi
+
+    if [ -f "${OLD_SNELL_CONFIG_FILE}" ]; then
+        backup_path="${OLD_SNELL_CONFIG_FILE}.bak.${backup_suffix}"
+        if mv "${OLD_SNELL_CONFIG_FILE}" "${backup_path}"; then
+            ui_ok "旧配置文件已备份：${backup_path}"
+        else
+            ui_warn "旧配置文件备份失败：${OLD_SNELL_CONFIG_FILE}"
+            append_report_item failed_items "mv '${OLD_SNELL_CONFIG_FILE}' '${backup_path}'"
+        fi
+    else
+        ui_dim "未发现旧配置文件：${OLD_SNELL_CONFIG_FILE}"
+    fi
+
+    if [ -f "${OLD_SNELL_VERSION_FILE}" ]; then
+        backup_path="${OLD_SNELL_VERSION_FILE}.bak.${backup_suffix}"
+        if mv "${OLD_SNELL_VERSION_FILE}" "${backup_path}"; then
+            ui_ok "旧版本文件已备份：${backup_path}"
+        else
+            ui_warn "旧版本文件备份失败：${OLD_SNELL_VERSION_FILE}"
+            append_report_item failed_items "mv '${OLD_SNELL_VERSION_FILE}' '${backup_path}'"
+        fi
+    else
+        ui_dim "未发现旧版本文件：${OLD_SNELL_VERSION_FILE}"
+    fi
+
+    if systemctl daemon-reload >/dev/null 2>&1; then
+        ui_ok "systemd daemon-reload 已完成。"
+    else
+        ui_warn "systemd daemon-reload 失败，请手动执行。"
+        append_report_item failed_items "systemctl daemon-reload"
+    fi
+
+    ui_blank
+    if [ -n "${failed_items}" ]; then
+        ui_warn "新 snell 服务已接管并通过验证，但旧对象收敛存在残留。"
+        ui_warn "请按需手动处理以下命令："
+        while IFS= read -r item; do
+            [ -n "${item}" ] && ui_print "${item}"
+        done <<< "${failed_items}"
+    else
+        ui_ok "旧服务和旧配置已完成备份收敛，新 snell 服务已接管。"
+    fi
+
+    return 0
 }
 
 cleanup_failed_new_snell_takeover() {
