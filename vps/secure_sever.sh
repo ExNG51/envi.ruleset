@@ -240,8 +240,7 @@ ui_read_submenu_choice() {
             return "${UI_RETURN_TO_MENU}"
         fi
         if ui_is_cancel "${!__target}"; then
-            ui_warn "子菜单请使用 0 返回上一级。"
-            continue
+            return "${UI_RETURN_TO_MENU}"
         fi
         return 0
     done
@@ -426,37 +425,39 @@ run_cmd() {
 # - Inputs with defaults must display: "回车使用默认值，q 取消".
 build_free_input_prompt() {
     local prompt="$1"
-    printf '%s (q 取消): ' "$prompt"
+    printf '%s（q 取消）： ' "$prompt"
 }
 
 build_default_prompt() {
     local prompt="$1"
     local default="$2"
-    printf '%s [默认: %s] (回车使用默认值，q 取消): ' "$prompt" "$default"
+    printf '%s（默认 %s，回车使用默认值，q 取消）： ' "$prompt" "$default"
 }
 
 prompt_required() {
-    local prompt="$1"
+    local __result_var="$1"
+    local prompt="$2"
     local answer=""
 
     while true; do
         ui_read_or_cancel answer "$(build_free_input_prompt "$prompt")" || return "$?"
         case "$answer" in
             "") warn "输入不能为空；请输入有效值，或输入 q 取消。" ;;
-            *) printf '%s\n' "$answer"; return 0 ;;
+            *) printf -v "${__result_var}" '%s' "$answer"; return 0 ;;
         esac
     done
 }
 
 prompt_with_default() {
-    local prompt="$1"
-    local default="$2"
+    local __result_var="$1"
+    local prompt="$2"
+    local default="$3"
     local answer=""
 
     ui_read_or_cancel answer "$(build_default_prompt "$prompt" "$default")" || return "$?"
     case "$answer" in
-        "") printf '%s\n' "$default" ;;
-        *) printf '%s\n' "$answer" ;;
+        "") printf -v "${__result_var}" '%s' "$default" ;;
+        *) printf -v "${__result_var}" '%s' "$answer" ;;
     esac
 }
 
@@ -464,21 +465,6 @@ prompt_yes_no() {
     local prompt="$1"
     local default="${2:-N}"
     ui_confirm "$prompt" "$default"
-}
-
-# Deprecated:
-# High-risk actions must use ui_confirm_token with action-specific tokens.
-# Do not use prompt_exact_yes for new flows.
-prompt_exact_yes() {
-    local prompt="$1"
-    local answer=""
-
-    ui_read_raw answer "${prompt} 输入 yes 继续，或输入 q 取消： "
-    case "$answer" in
-        q|Q) return "$INPUT_CANCELLED" ;;
-        yes) return 0 ;;
-        *) return 1 ;;
-    esac
 }
 
 pause_before_menu() {
@@ -704,7 +690,7 @@ get_current_ip() {
     fi
 
     warn "无法自动获取当前 IP。"
-    current_ip_input="$(prompt_required "请输入当前外部 IPv4/CIDR")" || return "$INPUT_CANCELLED"
+    prompt_required current_ip_input "请输入当前外部 IPv4/CIDR" || return "$?"
     if ! is_ipv4_or_cidr "$current_ip_input"; then
         err "IP/CIDR 格式无效: $current_ip_input"
         return 1
@@ -738,7 +724,7 @@ prompt_fail2ban_ignore_ip() {
                 return 0
                 ;;
             2)
-                manual_ip="$(prompt_required "请输入要加入 ignoreip 的 IPv4/CIDR")" || return "$?"
+                prompt_required manual_ip "请输入要加入 ignoreip 的 IPv4/CIDR" || return "$?"
                 if ! is_ipv4_or_cidr "${manual_ip}"; then
                     ui_error "IP/CIDR 格式无效：${manual_ip}"
                     continue
@@ -811,7 +797,7 @@ detect_ssh_port() {
 
     if [[ -z "$port_found" ]]; then
         warn "无法可靠检测 SSH 端口。"
-        port_found="$(prompt_with_default "请输入当前 SSH 端口" "22")" || return "$INPUT_CANCELLED"
+        prompt_with_default port_found "请输入当前 SSH 端口" "22" || return "$?"
         port_found="$(normalize_port_list "$port_found" | awk '{ print $1 }')"
         if [[ -z "$port_found" ]]; then
             err "SSH 端口无效。"
