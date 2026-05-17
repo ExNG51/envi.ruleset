@@ -10,7 +10,7 @@ set -Eeuo pipefail
 # ==============================================================================
 
 readonly SCRIPT_DISPLAY_NAME="VPS 初始化向导"
-readonly SCRIPT_VERSION="2026.05.15-r1"
+readonly SCRIPT_VERSION="2026.05.16-r1"
 
 UI_COLOR_RESET=''
 UI_COLOR_RED=''
@@ -21,6 +21,8 @@ UI_COLOR_CYAN=''
 UI_COLOR_BOLD=''
 UI_COLOR_DIM=''
 UI_PROMPT_FD=0
+UI_TITLE_WIDTH=60
+UI_KV_LABEL_WIDTH=18
 UI_RETURN_TO_MENU=130
 
 ui_init_colors() {
@@ -61,19 +63,66 @@ ui_ok() { printf '%b\n' "${UI_COLOR_GREEN}[OK]${UI_COLOR_RESET} $*"; }
 ui_warn() { printf '%b\n' "${UI_COLOR_YELLOW}[WARN]${UI_COLOR_RESET} $*" >&2; }
 ui_error() { printf '%b\n' "${UI_COLOR_RED}[ERROR]${UI_COLOR_RESET} $*" >&2; }
 ui_dim() { printf '%b\n' "${UI_COLOR_DIM}$*${UI_COLOR_RESET}"; }
+ui_print() { printf '%b\n' "$*"; }
+ui_blank() { printf '\n'; }
+ui_rule() { printf '%s\n' "------------------------------------------------------------"; }
 ui_section() { printf '\n%b\n' "${UI_COLOR_BLUE}${UI_COLOR_BOLD}>>> $*${UI_COLOR_RESET}"; }
 
-ui_title() {
-    local title="$1" version="${2:-}"
+ui_text_width() {
+    local text="$1" width=0 i char byte
+    local LC_ALL=C
 
+    for ((i = 0; i < ${#text}; i++)); do
+        char="${text:i:1}"
+        printf -v byte '%d' "'${char}"
+        ((byte < 0)) && byte=$((byte + 256))
+
+        if ((byte < 128)); then
+            ((width += 1))
+        elif ((byte >= 192)); then
+            ((width += 2))
+        fi
+    done
+
+    printf '%s' "${width}"
+}
+
+ui_center_line() {
+    local text="$1" width="${2:-${UI_TITLE_WIDTH}}" text_width padding
+    text_width="$(ui_text_width "${text}")"
+    padding=$(((width - text_width) / 2))
+    ((padding < 0)) && padding=0
+    printf '%*s%s\n' "${padding}" '' "${text}"
+}
+
+ui_kv() {
+    local label="$1" value="${2:-}" label_width padding
+
+    label_width="$(ui_text_width "${label}")"
+    padding=$((UI_KV_LABEL_WIDTH - label_width))
+    ((padding < 1)) && padding=1
+
+    printf '%s%*s%s\n' "${label}" "${padding}" '' "${value}"
+}
+
+ui_menu_item() {
+    local number="$1" label="$2"
+    printf ' %2s. %s\n' "${number}" "${label}"
+}
+
+ui_title() {
+    local title="$1" version="${2:-}" rule
+
+    printf -v rule '%*s' "${UI_TITLE_WIDTH}" ''
+    rule="${rule// /=}"
+
+    printf '%b\n' "${UI_COLOR_CYAN}${UI_COLOR_BOLD}${rule}${UI_COLOR_RESET}"
     printf '%b' "${UI_COLOR_CYAN}${UI_COLOR_BOLD}"
-    printf '%s\n' "============================================================"
-    printf '        %s\n' "${title}"
+    ui_center_line "${title}" "${UI_TITLE_WIDTH}"
     if [[ -n "${version}" ]]; then
-        printf '        Version: %s\n' "${version}"
+        ui_center_line "Version: ${version}" "${UI_TITLE_WIDTH}"
     fi
-    printf '%s\n' "============================================================"
-    printf '%b' "${UI_COLOR_RESET}"
+    printf '%b\n' "${UI_COLOR_RESET}${UI_COLOR_CYAN}${UI_COLOR_BOLD}${rule}${UI_COLOR_RESET}"
 }
 
 ui_init_prompt_input() {
@@ -357,37 +406,40 @@ validate_static_configuration() {
 }
 
 validate_root_privilege() {
-    display_status_info "正在校验 root 权限..."
+    ui_info "正在校验 root 权限..."
     if [[ ${EUID} -ne 0 ]]; then
-        display_status_error "权限不足：请以 root 身份或使用 sudo 执行此脚本。"
+        ui_error "权限不足：请以 root 身份或使用 sudo 执行此脚本。"
         exit 1
     fi
-    display_status_success "root 权限校验通过。"
+    ui_ok "root 权限校验通过。"
 }
 
 select_vps_profile() {
     local selected_profile
 
     while [ -z "${GLOBAL_PROFILE}" ]; do
-        echo "请选择 VPS 类型:"
-        echo "  1. public - 独立公网 IP VPS"
-        echo "  2. nat    - NAT VPS / 共享公网出口"
+        ui_blank
+        ui_print "请选择 VPS 类型："
+        ui_blank
+        ui_menu_item "1" "public - 独立公网 IP VPS"
+        ui_menu_item "2" "nat - NAT VPS / 共享公网出口"
+        ui_blank
         read_prompt selected_profile "请输入 VPS 类型编号（1-2，q 取消）： "
         case "${selected_profile}" in
             1) GLOBAL_PROFILE="public" ;;
             2) GLOBAL_PROFILE="nat" ;;
             q|Q) cancel_script ;;
-            0) display_status_warning "一次性向导请使用 q 取消。" ;;
-            *) display_status_warning "无效选项，请输入 1、2 或 q。" ;;
+            0) ui_warn "一次性向导请使用 q 取消。" ;;
+            *) ui_warn "无效选项，请输入 1、2 或 q。" ;;
         esac
     done
 
     if ! validate_profile_name "${GLOBAL_PROFILE}"; then
-        display_status_error "不支持的 profile: ${GLOBAL_PROFILE}。仅支持 public 或 nat。"
+        ui_error "不支持的 profile: ${GLOBAL_PROFILE}。仅支持 public 或 nat。"
         exit 2
     fi
 
-    display_status_success "已选择 profile: ${GLOBAL_PROFILE}"
+    ui_ok "已选择 profile: ${GLOBAL_PROFILE}"
 }
 
 format_bool_cn() {
@@ -412,34 +464,43 @@ show_startup_context() {
 
 show_execution_summary() {
     ui_section "执行摘要"
-    printf '  - VPS 类型: %s\n' "${GLOBAL_PROFILE}"
-    printf '  - 运行模式: %s\n' "$(get_run_mode)"
-    printf '  - 系统时区: %s\n' "${GLOBAL_TIMEZONE}"
-    printf '  - 安装 Docker: %s\n' "$(format_bool_cn "${GLOBAL_INSTALL_DOCKER}")"
-    printf '  - 安装 Node.js/npm: %s\n' "$(format_bool_cn "${GLOBAL_INSTALL_NODEJS}")"
-    printf '  - 安装 Debian Cloud Kernel: %s\n' "$(format_bool_cn "${GLOBAL_INSTALL_CLOUD_KERNEL}")"
+    ui_kv "VPS 类型" "${GLOBAL_PROFILE}"
+    ui_kv "运行模式" "$(get_run_mode)"
+    ui_kv "系统时区" "${GLOBAL_TIMEZONE}"
+    ui_kv "安装 Docker" "$(format_bool_cn "${GLOBAL_INSTALL_DOCKER}")"
+    ui_kv "安装 Node.js/npm" "$(format_bool_cn "${GLOBAL_INSTALL_NODEJS}")"
+    ui_kv "安装 Debian Kernel" "$(format_bool_cn "${GLOBAL_INSTALL_CLOUD_KERNEL}")"
     if [ -n "${GLOBAL_SSH_PORT}" ]; then
-        printf '  - SSH 端口: 新增监听 %s，并保留已有端口\n' "${GLOBAL_SSH_PORT}"
+        ui_kv "SSH 端口" "新增监听 ${GLOBAL_SSH_PORT}，并保留已有端口"
     else
-        printf '  - SSH 端口: 不修改\n'
+        ui_kv "SSH 端口" "不修改"
     fi
-    printf '  - Swap / 时区 / 基础工具 / 网络调优 / 清理: 将按 profile 自动执行\n'
+    ui_kv "自动任务" "Swap / 时区 / 基础工具 / 网络调优 / 清理"
 }
 
 confirm_execution_plan() {
-    local status
+    local confirm_status
 
-    if ui_confirm_or_yes "确认继续执行以上任务？" "n" "${GLOBAL_ASSUME_YES}"; then
+    if [ "${GLOBAL_ASSUME_YES}" = true ]; then
         return 0
     fi
 
-    status=$?
-    if [ "${status}" -eq "${UI_RETURN_TO_MENU}" ]; then
-        cancel_script
-    fi
+    ui_blank
+    ui_confirm_or_yes "确认继续执行以上任务？" "n" "${GLOBAL_ASSUME_YES}"
+    confirm_status=$?
 
-    display_status_warning "用户未确认执行，脚本已退出。"
-    exit 0
+    case "${confirm_status}" in
+        0)
+            return 0
+            ;;
+        "${UI_RETURN_TO_MENU}")
+            cancel_script
+            ;;
+        *)
+            ui_warn "用户未确认执行，脚本已退出。"
+            exit 0
+            ;;
+    esac
 }
 
 detect_operating_system_environment() {
@@ -687,6 +748,9 @@ set_optional_flag_from_prompt() {
         return
     fi
 
+    if [ "${GLOBAL_ASSUME_YES}" != true ]; then
+        ui_blank
+    fi
     if ui_confirm_or_default "${prompt_text}" "n" "${GLOBAL_ASSUME_YES}"; then
         printf -v "${flag_var}" '%s' "true"
         return
@@ -701,6 +765,15 @@ set_optional_flag_from_prompt() {
 configure_public_optional_features() {
     if [[ "${GLOBAL_PROFILE}" != "public" ]]; then
         return
+    fi
+
+    if [ "${GLOBAL_ASSUME_YES}" != true ] && {
+        [ "${GLOBAL_INSTALL_DOCKER}" = false ] ||
+        [ "${GLOBAL_INSTALL_NODEJS}" = false ] ||
+        [ "${GLOBAL_INSTALL_CLOUD_KERNEL}" = false ]
+    }; then
+        ui_section "可选组件"
+        ui_print "以下组件默认不安装，可按需启用。"
     fi
 
     set_optional_flag_from_prompt GLOBAL_INSTALL_DOCKER "是否安装 Docker 运行时？"
@@ -973,9 +1046,11 @@ remove_orphaned_packages() {
 confirm_reboot() {
     local status
 
-    echo
-    if ui_confirm_or_default "是否立即重启系统以全面应用内核变更？" "n" "${GLOBAL_ASSUME_YES}"; then
-        display_status_info "系统将在 5 秒后执行重启指令..."
+    ui_section "重启确认"
+    ui_warn "部分系统配置可能需要重启后完全生效。"
+    ui_blank
+    if ui_confirm_or_default "是否立即重启系统？" "n" "${GLOBAL_ASSUME_YES}"; then
+        ui_info "系统将在 5 秒后执行重启指令..."
         sleep 5
         run_logged reboot
         return
@@ -983,17 +1058,17 @@ confirm_reboot() {
 
     status=$?
     if [ "${status}" -eq "${UI_RETURN_TO_MENU}" ]; then
-        display_status_warning "已取消立即重启。请在合适的维护窗口手动重启系统。"
+        ui_warn "已取消立即重启。请在合适的维护窗口手动重启系统。"
         return
     fi
 
-    display_status_warning "请在合适的维护窗口手动重启系统。"
+    ui_warn "请在合适的维护窗口手动重启系统。"
 }
 
 execute_main_lifecycle() {
     ui_title "${SCRIPT_DISPLAY_NAME}" "${SCRIPT_VERSION}"
     show_startup_context
-    printf '\n'
+    ui_blank
 
     validate_root_privilege
     select_vps_profile
