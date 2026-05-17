@@ -15,7 +15,7 @@
 
 set -u
 
-SCRIPT_VERSION="2026.05.16-r2"
+SCRIPT_VERSION="2026.05.16-r3"
 BASE_DIR="/etc/tuic-port-hopping"
 INSTANCE_DIR="${BASE_DIR}/instances"
 NFT_RULE_DIR="/etc/nftables.d"
