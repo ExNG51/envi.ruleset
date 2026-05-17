@@ -1437,7 +1437,7 @@ prompt_port() {
 }
 
 prompt_psk() {
-    local var_name="$1" current_value="${2:-}" value confirm_rc
+    local var_name="$1" current_value="${2:-}" psk_value confirm_rc
     if [ -n "${current_value}" ]; then
         ui_blank
         confirm_yes_no "是否修改 PSK？" "n"
@@ -1451,22 +1451,25 @@ prompt_psk() {
     fi
 
     ui_blank
-    confirm_yes_no "是否手动指定 PSK？" "n"
+    confirm_yes_no "是否自动生成 PSK？" "y"
     confirm_rc=$?
-    if [ "${confirm_rc}" -eq 0 ]; then
+    case "${confirm_rc}" in
+        0)
+            psk_value="$(openssl rand -base64 18)"
+            ui_ok "已自动生成随机 PSK。"
+            ;;
+        1)
         while true; do
             ui_blank
-            read_secret_or_cancel value "请输入 Snell PSK（q 取消）： " || return "$?"
-            validate_psk "${value}" && break
+            read_secret_or_cancel psk_value "请输入 Snell PSK（q 取消）： " || return "$?"
+            validate_psk "${psk_value}" && break
             ui_error "PSK 不能为空、不能包含换行，且长度不能超过 256 个字符。"
         done
-    elif [ "${confirm_rc}" -eq 1 ]; then
-        value="$(openssl rand -base64 18)"
-        ui_ok "已生成随机 PSK。"
-    else
-        return "${confirm_rc}"
-    fi
-    printf -v "${var_name}" '%s' "${value}"
+            ;;
+        "${RETURN_TO_MENU}") return "${RETURN_TO_MENU}" ;;
+        *) return "${confirm_rc}" ;;
+    esac
+    printf -v "${var_name}" '%s' "${psk_value}"
 }
 
 prompt_boolean() {
