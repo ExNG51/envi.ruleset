@@ -785,12 +785,11 @@ write_config_from_legacy() {
         "${LEGACY_OBFS:-off}" \
         "${LEGACY_OBFS_HOST:-}" \
         "${LEGACY_TFO:-false}" \
-        "${LEGACY_PROTOCOL_VERSION:-5}"
+        "${LEGACY_PROTOCOL_VERSION:-5}" || return 1
     if [ -n "${LEGACY_BINARY_VERSION}" ] && [ "${LEGACY_BINARY_VERSION}" != "unknown" ]; then
-        echo "${LEGACY_BINARY_VERSION}" > "${SNELL_VERSION_FILE}"
-        chmod 644 "${SNELL_VERSION_FILE}"
+        printf '%s\n' "${LEGACY_BINARY_VERSION}" | atomic_replace_file "${SNELL_VERSION_FILE}" 644 || return 1
     fi
-    write_systemd_service
+    write_systemd_service || return 1
 }
 
 start_new_service_for_takeover() {
