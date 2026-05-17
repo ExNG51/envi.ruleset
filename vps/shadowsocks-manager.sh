@@ -588,6 +588,251 @@ is_port_in_use() {
     fi
 }
 
+is_tcp_port_listening() {
+    local port="$1"
+
+    validate_port "${port}" || return 1
+
+    if check_command_exists ss; then
+        ss -H -ltn 2>/dev/null | awk -v expected_port="${port}" '
+            function extract_port(listen_addr, parts, n) {
+                n = split(listen_addr, parts, ":")
+                if (n > 1 && parts[n] ~ /^[0-9]+$/) return parts[n]
+                n = split(listen_addr, parts, ".")
+                if (n > 1 && parts[n] ~ /^[0-9]+$/) return parts[n]
+                return ""
+            }
+            {
+                if (extract_port($4) == expected_port) {
+                    found = 1
+                }
+            }
+            END { exit found ? 0 : 1 }
+        '
+        return "$?"
+    fi
+
+    if check_command_exists netstat; then
+        netstat -ltn 2>/dev/null | awk -v expected_port="${port}" '
+            function extract_port(listen_addr, parts, n) {
+                n = split(listen_addr, parts, ":")
+                if (n > 1 && parts[n] ~ /^[0-9]+$/) return parts[n]
+                n = split(listen_addr, parts, ".")
+                if (n > 1 && parts[n] ~ /^[0-9]+$/) return parts[n]
+                return ""
+            }
+            NR > 2 {
+                if ($1 ~ /^tcp/ && extract_port($4) == expected_port) {
+                    found = 1
+                }
+            }
+            END { exit found ? 0 : 1 }
+        ' && return 0
+
+        netstat -an -p tcp 2>/dev/null | awk -v expected_port="${port}" '
+            function extract_port(listen_addr, parts, n) {
+                n = split(listen_addr, parts, ":")
+                if (n > 1 && parts[n] ~ /^[0-9]+$/) return parts[n]
+                n = split(listen_addr, parts, ".")
+                if (n > 1 && parts[n] ~ /^[0-9]+$/) return parts[n]
+                return ""
+            }
+            NR > 2 {
+                if ($1 ~ /^tcp/ && $0 ~ /LISTEN/ && extract_port($4) == expected_port) {
+                    found = 1
+                }
+            }
+            END { exit found ? 0 : 1 }
+        '
+        return "$?"
+    fi
+
+    return 2
+}
+
+ensure_runtime_validation_dependencies() {
+    if has_runtime_port_probe_tool; then
+        return 0
+    fi
+
+    ui_warn "未检测到 ss/netstat，正在安装运行验证依赖。"
+
+    if install_runtime_port_probe_dependency && has_runtime_port_probe_tool; then
+        print_success "运行验证依赖已就绪。"
+        return 0
+    fi
+
+    ui_warn "运行验证依赖未能自动就绪，将仅进行服务 active 验证。"
+    return 0
+}
+
+warn_missing_runtime_probe_tool_for_readonly() {
+    if has_runtime_port_probe_tool; then
+        return 0
+    fi
+
+    ui_warn "未检测到 ss/netstat，端口监听验证将跳过；安装/更新/修改等写入操作中可自动补齐 iproute2/iproute。"
+    return 1
+}
+
+ss_service_is_active() {
+    if [ "${SERVICE_MANAGER}" = "systemd" ]; then
+        systemctl is-active --quiet ss-rust 2>/dev/null
+    else
+        rc-service ss-rust status >/dev/null 2>&1
+    fi
+}
+
+shadow_tls_service_is_active() {
+    [ "${SERVICE_MANAGER}" = "systemd" ] || return 1
+    systemctl is-active --quiet shadow-tls 2>/dev/null
+}
+
+validate_ss_runtime_core() {
+    local port="${1:-}"
+    local probe_rc=0
+
+    ss_service_is_active || return 1
+
+    if [ -z "${port}" ] || ! validate_port "${port}"; then
+        ui_warn "未提供有效的 Shadowsocks 端口，运行验证将仅确认 ss-rust 服务 active。"
+        return 0
+    fi
+
+    if ! has_runtime_port_probe_tool; then
+        ui_warn "缺少 ss/netstat，无法验证 Shadowsocks TCP ${port} 监听，仅确认 ss-rust 服务 active。"
+        return 0
+    fi
+
+    is_tcp_port_listening "${port}"
+    probe_rc=$?
+    if [ "${probe_rc}" -eq 2 ]; then
+        ui_warn "端口探测工具不可用，无法验证 Shadowsocks TCP ${port} 监听，仅确认 ss-rust 服务 active。"
+        return 0
+    fi
+
+    return "${probe_rc}"
+}
+
+wait_for_ss_runtime_core() {
+    local port="${1:-}"
+    local max_attempts="${2:-10}"
+    local sleep_seconds="${3:-1}"
+    local attempt=1
+
+    while [ "${attempt}" -le "${max_attempts}" ]; do
+        if ss_service_is_active; then
+            if [ -z "${port}" ] || ! validate_port "${port}"; then
+                ui_warn "未提供有效的 Shadowsocks 端口，运行验证将仅确认 ss-rust 服务 active。"
+                return 0
+            fi
+
+            if ! has_runtime_port_probe_tool; then
+                ui_warn "缺少 ss/netstat，无法验证 Shadowsocks TCP ${port} 监听，仅确认 ss-rust 服务 active。"
+                return 0
+            fi
+
+            if is_tcp_port_listening "${port}"; then
+                return 0
+            fi
+        fi
+
+        sleep "${sleep_seconds}"
+        attempt=$((attempt + 1))
+    done
+
+    return 1
+}
+
+validate_shadow_tls_runtime_core() {
+    local port="${1:-}"
+    local probe_rc=0
+
+    shadow_tls_service_is_active || return 1
+
+    if [ -z "${port}" ] || ! validate_port "${port}"; then
+        ui_warn "未提供有效的 Shadow-TLS 端口，运行验证将仅确认 shadow-tls 服务 active。"
+        return 0
+    fi
+
+    if ! has_runtime_port_probe_tool; then
+        ui_warn "缺少 ss/netstat，无法验证 Shadow-TLS TCP ${port} 监听，仅确认 shadow-tls 服务 active。"
+        return 0
+    fi
+
+    is_tcp_port_listening "${port}"
+    probe_rc=$?
+    if [ "${probe_rc}" -eq 2 ]; then
+        ui_warn "端口探测工具不可用，无法验证 Shadow-TLS TCP ${port} 监听，仅确认 shadow-tls 服务 active。"
+        return 0
+    fi
+
+    return "${probe_rc}"
+}
+
+wait_for_shadow_tls_runtime_core() {
+    local port="${1:-}"
+    local max_attempts="${2:-10}"
+    local sleep_seconds="${3:-1}"
+    local attempt=1
+
+    while [ "${attempt}" -le "${max_attempts}" ]; do
+        if shadow_tls_service_is_active; then
+            if [ -z "${port}" ] || ! validate_port "${port}"; then
+                ui_warn "未提供有效的 Shadow-TLS 端口，运行验证将仅确认 shadow-tls 服务 active。"
+                return 0
+            fi
+
+            if ! has_runtime_port_probe_tool; then
+                ui_warn "缺少 ss/netstat，无法验证 Shadow-TLS TCP ${port} 监听，仅确认 shadow-tls 服务 active。"
+                return 0
+            fi
+
+            if is_tcp_port_listening "${port}"; then
+                return 0
+            fi
+        fi
+
+        sleep "${sleep_seconds}"
+        attempt=$((attempt + 1))
+    done
+
+    return 1
+}
+
+show_ss_runtime_failure_diagnostics() {
+    local port="${1:-}"
+
+    ui_warn "建议检查以下命令："
+    if [ "${SERVICE_MANAGER}" = "systemd" ]; then
+        ui_print "systemctl status ss-rust --no-pager"
+        ui_print "journalctl -u ss-rust -n 120 --no-pager"
+    else
+        ui_print "rc-service ss-rust status"
+        ui_print "tail -n 120 /var/log/ss-rust.log"
+        ui_print "tail -n 120 /var/log/ss-rust-error.log"
+    fi
+
+    if [ -n "${port}" ]; then
+        ui_print "ss -ltnp | grep ':${port}' || true"
+    else
+        ui_print "ss -ltnp | grep ss-rust || true"
+    fi
+}
+
+show_shadow_tls_runtime_failure_diagnostics() {
+    local port="${1:-}"
+
+    ui_warn "建议检查以下命令："
+    ui_print "systemctl status shadow-tls --no-pager"
+    ui_print "journalctl -u shadow-tls -n 120 --no-pager"
+    if [ -n "${port}" ]; then
+        ui_print "ss -ltnp | grep ':${port}' || true"
+    else
+        ui_print "ss -ltnp | grep shadow-tls || true"
+    fi
+}
+
 prompt_port() {
     local var_name="$1" prompt_text="$2" allow_random="${3:-false}" value=""
     ui_blank
