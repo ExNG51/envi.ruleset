@@ -1093,8 +1093,10 @@ verify_takeover() {
     local failed=0
     ui_section "验证新服务"
 
+    ensure_snell_validation_dependencies
+
     if wait_for_snell_runtime_core "${LEGACY_PORT}"; then
-        if check_command_exists ss || check_command_exists netstat; then
+        if has_runtime_port_probe_tool; then
             ui_ok "新 snell 服务 active，且 TCP ${LEGACY_PORT} 正在监听。"
         else
             ui_ok "新 snell 服务 active。"
@@ -1311,7 +1313,7 @@ run_legacy_takeover() {
     ui_blank
     ui_confirm_token "确认接管旧 Snell？" "TAKEOVER" || { ui_warn "已取消接管。"; pause_screen; return 0; }
 
-    ensure_dependencies || {
+    ensure_snell_install_dependencies || {
         ui_error "依赖安装失败，未执行接管。"
         pause_screen
         return 1
@@ -1695,7 +1697,7 @@ validate_snell_runtime_core() {
     systemctl is-active --quiet snell 2>/dev/null || return 1
 
     if [ -n "${port}" ]; then
-        if ! check_command_exists ss && ! check_command_exists netstat; then
+        if ! has_runtime_port_probe_tool; then
             ui_warn "缺少 ss/netstat，无法验证端口监听，仅确认 snell 服务 active。"
             return 0
         fi
@@ -1717,7 +1719,7 @@ wait_for_snell_runtime_core() {
                 return 0
             fi
 
-            if ! check_command_exists ss && ! check_command_exists netstat; then
+            if ! has_runtime_port_probe_tool; then
                 ui_warn "缺少 ss/netstat，无法验证端口监听，仅确认 snell 服务 active。"
                 return 0
             fi
@@ -1781,7 +1783,7 @@ install_or_reinstall_snell() {
             ui_warn "如需沿用旧配置，建议返回主菜单使用“检测 / 接管旧 Snell 服务与配置”。"
         fi
     fi
-    ensure_dependencies || return 1
+    ensure_snell_install_dependencies || return 1
 
     if has_current_snell_installation; then
         ui_blank
@@ -1876,6 +1878,7 @@ install_or_reinstall_snell() {
             "${service_backup}"
         return 1
     }
+    ensure_snell_validation_dependencies
     wait_for_snell_runtime_core "${port}" || {
         show_snell_runtime_failure_diagnostics "${port}"
         handle_snell_install_failure \
@@ -2013,6 +2016,7 @@ modify_snell_config() {
     fi
 
     new_port_for_validation="${port}"
+    ensure_snell_validation_dependencies
     if ! wait_for_snell_runtime_core "${new_port_for_validation}"; then
         ui_error "新配置重启后核心验证失败。"
         show_snell_runtime_failure_diagnostics "${new_port_for_validation}"
@@ -2068,7 +2072,7 @@ update_snell_server() {
         return
     fi
 
-    ensure_dependencies || return 1
+    ensure_snell_install_dependencies || return 1
     local target_version binary_backup config_backup version_backup current_port
     choose_update_version target_version || return "$?"
     binary_backup="$(backup_path_for_rollback "${SNELL_BINARY_PATH}")" || return 1
@@ -2095,6 +2099,7 @@ update_snell_server() {
         return 1
     fi
     current_port="$(get_config_port 2>/dev/null || true)"
+    ensure_snell_validation_dependencies
     if ! wait_for_snell_runtime_core "${current_port}"; then
         show_snell_runtime_failure_diagnostics "${current_port}"
         rollback_snell_update "${binary_backup}" "${config_backup}" "${version_backup}"
@@ -2205,8 +2210,8 @@ validate_snell_service() {
     fi
 
     if [ -n "${port}" ]; then
-        if ! check_command_exists ss && ! check_command_exists netstat; then
-            ui_warn "缺少 ss/netstat，无法验证 TCP ${port} 监听。"
+        if ! warn_missing_runtime_probe_tool_for_readonly; then
+            :
         elif is_tcp_port_listening "${port}"; then
             ui_ok "检测到 TCP ${port} 正在监听。"
             ss -tlnp 2>/dev/null | grep -E ":${port}([[:space:]]|$)" || true
