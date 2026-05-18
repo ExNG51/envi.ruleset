@@ -222,14 +222,7 @@ ui_read_or_cancel() {
 
 ui_read_main_menu_choice() {
     local __target="$1"
-    while true; do
-        ui_read_raw "${__target}" "请输入选项编号（0 退出）： "
-        if ui_is_cancel "${!__target}"; then
-            ui_warn "主菜单请使用 0 退出脚本。"
-            continue
-        fi
-        return 0
-    done
+    ui_read_raw "${__target}" "请输入选项编号（0 退出）： "
 }
 
 ui_read_submenu_choice() {
@@ -1751,7 +1744,14 @@ show_main_menu_loop() {
             6) ui_run_menu_action "查看 UFW 状态" show_ufw_status; should_pause=true ;;
             7) ui_run_menu_action "查看 Fail2ban SSH jail 状态" show_fail2ban_status; should_pause=true ;;
             0) ui_blank; ui_info "已退出。"; exit 0 ;;
-            *) err "无效选项，请输入 0 到 7。" ;;
+            q|Q)
+                ui_warn "主菜单请使用 0 退出脚本。"
+                sleep 1
+                ;;
+            *)
+                err "无效选项，请输入 0 到 7。"
+                sleep 1
+                ;;
         esac
 
         $should_pause && pause_before_menu

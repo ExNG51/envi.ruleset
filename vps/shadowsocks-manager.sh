@@ -2507,11 +2507,11 @@ show_main_menu() {
             0) ui_blank; print_info "已退出。"; exit 0 ;;
             q|Q)
                 print_warn "主菜单请使用 0 退出脚本。"
-                ui_pause
+                sleep 1
                 ;;
             *)
                 print_error "无效选项，请重新输入。"
-                ui_pause
+                sleep 1
                 ;;
         esac
     done

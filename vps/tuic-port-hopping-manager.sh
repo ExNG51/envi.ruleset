@@ -125,7 +125,6 @@ ui_center_line() {
 
 ui_title() {
     local title="$1" version="${2:-}" rule
-    ui_clear
     printf -v rule '%*s' "${UI_TITLE_WIDTH}" ''
     rule="${rule// /=}"
 
@@ -196,6 +195,7 @@ ui_pause() {
 }
 
 page_title() {
+    ui_clear
     ui_title "TUIC Port-Hopping 多实例管理脚本" "${SCRIPT_VERSION}"
 }
 
@@ -255,21 +255,7 @@ ui_read_or_cancel() {
 
 ui_read_menu_choice() {
     local __target="$1"
-    while true; do
-        ui_read_raw "${__target}" "请输入选项编号（0 退出）： "
-        case "${!__target}" in
-            0|1|2|3|4|5|6|7|8|9) return 0 ;;
-            q|Q)
-                ui_warn "主菜单请使用 0 退出脚本。"
-                ;;
-            "")
-                ui_error "无效选项，请重新输入。"
-                ;;
-            *)
-                ui_error "无效选项，请重新输入。"
-                ;;
-        esac
-    done
+    ui_read_raw "${__target}" "请输入选项编号（0 退出）： "
 }
 
 pause_screen() {
@@ -300,7 +286,7 @@ ui_confirm() {
 
 ui_confirm_token() {
     local prompt_text="$1" token="$2" answer=""
-    ui_read_or_cancel answer "${prompt_text}" || return "$?"
+    ui_read_or_cancel answer "${prompt_text} 输入 ${token} 继续，或输入 q 取消： " || return "$?"
     if [ "${answer}" = "${token}" ]; then
         return 0
     fi
@@ -1702,22 +1688,14 @@ remove_instance() {
     cfg="$(get_config_file "${REAL_PORT}")"
 
     ui_section "高风险操作确认"
-    ui_blank
-    ui_warn "此操作将删除当前 TUIC Port-Hopping 实例，并移除对应 nftables / systemd / UFW 配置。"
-    ui_blank
-    ui_print "影响范围："
+    ui_warn "此操作将删除当前 TUIC Port-Hopping 实例，并移除以下对象："
     ui_kv "配置文件" "${cfg}"
     ui_kv "nftables 表" "inet ${NFT_TABLE_NAME}"
     ui_kv "nftables 文件" "${NFT_RULE_FILE}"
     ui_kv "systemd 服务" "${service}"
     ui_kv "UFW 规则" "${REAL_PORT}/udp 与 ${RANGE_START}:${RANGE_END}/udp"
     ui_blank
-    ui_confirm_token "确认删除当前 TUIC 实例？ 输入 DELETE 继续，或输入 q 取消： " "DELETE"
-    case "$?" in
-        0) ;;
-        "${UI_RETURN_TO_MENU}") return 0 ;;
-        *) ui_warn "已取消删除。"; pause_screen; return 0 ;;
-    esac
+    ui_confirm_token "确认删除当前 TUIC 实例？" "DELETE" || { ui_warn "已取消删除。"; pause_screen; return 0; }
 
     local cleanup_failed=0 residual_failed=0
     ensure_nftables_dependency || cleanup_failed=1
@@ -1755,22 +1733,14 @@ remove_all_instances() {
     page_title
     show_instance_table || { pause_screen; return 0; }
     ui_section "高风险操作确认"
-    ui_blank
-    ui_warn "此操作将删除全部 TUIC Port-Hopping 实例，并移除通用 apply 脚本与 systemd 模板。"
-    ui_blank
-    ui_print "影响范围："
+    ui_warn "此操作将删除全部 TUIC Port-Hopping 实例，并移除以下对象："
     ui_kv "实例目录" "${INSTANCE_DIR}"
     ui_kv "通用脚本" "${APPLY_SCRIPT}"
     ui_kv "systemd 模板" "${SYSTEMD_TEMPLATE}"
     ui_kv "nftables 文件" "${NFT_RULE_DIR}/tuic-port-hopping-*.nft"
     ui_kv "UFW 规则" "所有实例对应 UDP 规则"
     ui_blank
-    ui_confirm_token "确认删除全部 TUIC 实例？ 输入 DELETE-ALL 继续，或输入 q 取消： " "DELETE-ALL"
-    case "$?" in
-        0) ;;
-        "${UI_RETURN_TO_MENU}") return 0 ;;
-        *) ui_warn "已取消删除。"; pause_screen; return 0 ;;
-    esac
+    ui_confirm_token "确认删除全部 TUIC 实例？" "DELETE-ALL" || { ui_warn "已取消删除。"; pause_screen; return 0; }
 
     local port cfg real start end table nft_file cleanup_failed=0 residual_failed=0
     local total_count=0 clear_count=0 residual_count=0 common_failed=0
@@ -1874,6 +1844,14 @@ show_main_menu() {
             8) remove_instance ;;
             9) remove_all_instances ;;
             0) ui_blank; ui_info "已退出。"; exit 0 ;;
+            q|Q)
+                ui_warn "主菜单请使用 0 退出脚本。"
+                sleep 1
+                ;;
+            *)
+                ui_error "无效选项，请重新输入。"
+                sleep 1
+                ;;
         esac
     done
 }
