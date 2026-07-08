@@ -1,115 +1,73 @@
-# > 流媒体emby-nexitally服务器
-DOMAIN,emby.nexitally.com
-
-# > 流媒体IMM服务器
-DOMAIN,emby.immtel.com
-
-# > 流媒体emby-flowercloud服务器
+# > Single Host Domains
 DOMAIN,emby.flowercloud.yt
-
-# > 流媒体emby-ytoo服务器
-DOMAIN,emby.ytoo.li
-
-# > 流媒体emby-maying服务器
+DOMAIN,emby.immtel.com
 DOMAIN,emby.maying.club
-
-# > 流媒体emby-mdss服务器
 DOMAIN,emby.mdss.cloud
-
-# > 流媒体emby-prpr服务器
+DOMAIN,emby.nexitally.com
+DOMAIN,emby.nyancat.net
 DOMAIN,emby.prprcloud.com
-
-# > 流媒体Exflux服务器
+DOMAIN,emby.run
+DOMAIN,emby.texon.one
+DOMAIN,emby.ytoo.li
+DOMAIN,embyserver.ga
 DOMAIN,line.emby.men
 
-# > 流媒体SoCloud服务器
-DOMAIN,emby.run
+# > Multi Host Domains
+DOMAIN,agahk1.jmsooo.com
+DOMAIN,agajp1.jmsooo.com
+DOMAIN,agasg1.jmsooo.com
+DOMAIN,aws.jmsooo.com
+DOMAIN,cf1.jmsooo.com
+DOMAIN,hinet.jmsooo.com
+DOMAIN,ntt1.jmsooo.com
 
-# > 流媒体WaveCloud服务器
-DOMAIN,embyserver.ga
+DOMAIN,agahk.odysseyplus.site
+DOMAIN,agasg.odysseyplus.site
+DOMAIN,cf.odysseyplus.site
+DOMAIN,ru.odysseyplus.site
 
-# > 流媒体emby-w8ves服务器
-DOMAIN,embyserver.ga
+DOMAIN,emby.otakudrive.life
+DOMAIN,emby2.otakudrive.life
 
-# > 流媒体emby-nyancat服务器
-DOMAIN,emby.nyancat.net
-
-# > 流媒体Texon服务器
-DOMAIN,emby.texon.one
-
-# > 流媒体Makima服务器
-DOMAIN-SUFFIX,makima.online
-
-# > 流媒体普拉斯影业服务器
-DOMAIN,emby.plusmedia.site
-DOMAIN,emby-cf.plusmedia.site 
+DOMAIN,emby-cf.plusmedia.site
 DOMAIN,emby-sg.plusmedia.site
+DOMAIN,emby.plusmedia.site
+
 DOMAIN,emby.xeton.dev
 DOMAIN,jellyfin.xeton.dev
 DOMAIN,movie.xeton.dev
 DOMAIN,servers.xeton.dev
 
-# > 流媒体emby-Otaku体验服
-DOMAIN,emby.otakudrive.life
-DOMAIN,emby2.otakudrive.life 
-
-# > 流媒体Odyssey服务器
-DOMAIN,cf.odysseyplus.site
-DOMAIN,agahk.odysseyplus.site
-DOMAIN,agasg.odysseyplus.site
-DOMAIN,ru.odysseyplus.site
-
-# > 流媒体卷毛鼠服务器
+# > Domain Suffix Rules
+DOMAIN-SUFFIX,023168.xyz
+DOMAIN-SUFFIX,2333.123456.al
+DOMAIN-SUFFIX,bili.rip
+DOMAIN-SUFFIX,cc.semby.ink
+DOMAIN-SUFFIX,cf.bili.rip
+DOMAIN-SUFFIX,cn2gias.uk
+DOMAIN-SUFFIX,emby.as174.com
+DOMAIN-SUFFIX,emby.bid
+DOMAIN-SUFFIX,emby.cjpc.cc
+DOMAIN-SUFFIX,emby.date
+DOMAIN-SUFFIX,emby.loan
+DOMAIN-SUFFIX,emby.trade
+DOMAIN-SUFFIX,embyvip.misakaf.org
+DOMAIN-SUFFIX,film.reddust.link
+DOMAIN-SUFFIX,hxd.as174.com
+DOMAIN-SUFFIX,hxd.as174.de
 DOMAIN-SUFFIX,jmsooo.com
-DOMAIN,agahk1.jmsooo.com
-DOMAIN,agasg1.jmsooo.com
-DOMAIN,agajp1.jmsooo.com
-DOMAIN,aws.jmsooo.com
-DOMAIN,ntt1.jmsooo.com
-DOMAIN,hinet.jmsooo.com
-DOMAIN,cf1.jmsooo.com
-
-# > 流媒体pornemby服务器
+DOMAIN-SUFFIX,jp.ii00.cc
+DOMAIN-SUFFIX,magpie.bond
+DOMAIN-SUFFIX,magpie.cyou
+DOMAIN-SUFFIX,magpiecdn.tech
+DOMAIN-SUFFIX,makima.online
+DOMAIN-SUFFIX,misakaf.org
+DOMAIN-SUFFIX,oversea.alphatvapp.top
 DOMAIN-SUFFIX,pornemby.club
 DOMAIN-SUFFIX,s.ii00.cc
 DOMAIN-SUFFIX,us.ii00.cc
-DOMAIN-SUFFIX,jp.ii00.cc
-DOMAIN-SUFFIX,vip.reddust.link
-DOMAIN-SUFFIX,cc.semby.ink
-DOMAIN-SUFFIX,bili.rip
 DOMAIN-SUFFIX,uuuoo.cc
-DOMAIN-SUFFIX,emby.date
-DOMAIN-SUFFIX,emby.bid
-DOMAIN-SUFFIX,emby.loan
-DOMAIN-SUFFIX,emby.trade
+DOMAIN-SUFFIX,vip.reddust.link
 
-# > 流媒体emby-paoche服务器
-DOMAIN-SUFFIX,emby.cjpc.cc
-
-# > 流媒体JH服务器
-DOMAIN-SUFFIX,film.reddust.link
-
-# > 流媒体SNTP服务器
-DOMAIN-SUFFIX,cn2gias.uk
-
-# > 流媒体MisakaF服务器
-DOMAIN-SUFFIX,misakaf.org  
-DOMAIN-SUFFIX,embyvip.misakaf.org
-DOMAIN-SUFFIX,2333.123456.al
-
-# > 流媒体Magpie服务器
-DOMAIN-SUFFIX,023168.xyz
-DOMAIN-SUFFIX,magpiecdn.tech
-DOMAIN-SUFFIX,magpie.cyou
-DOMAIN-SUFFIX,magpie.bond
-
-# > 流媒体HXD服务器
-DOMAIN-SUFFIX,bili.rip
-DOMAIN-SUFFIX,cf.bili.rip
-DOMAIN-SUFFIX,hxd.as174.de
-DOMAIN-SUFFIX,hxd.as174.com
-DOMAIN-SUFFIX,emby.as174.com
+# > Keyword Rules
 DOMAIN-KEYWORD,as174
-
-# > 流媒体AlphaTV服务器
-DOMAIN-SUFFIX,oversea.alphatvapp.top
