@@ -1,32 +1,67 @@
+# > Security & Privacy
+DOMAIN-SUFFIX,cryptomator.org
 DOMAIN-SUFFIX,lencr.org
-DOMAIN-SUFFIX,revenuecat.com
+DOMAIN-SUFFIX,letsencrypt.org
 DOMAIN-SUFFIX,tailscale.com
 DOMAIN-SUFFIX,tailscale.io
 DOMAIN-SUFFIX,tuta.com
-DOMAIN-SUFFIX,cryptomator.org
-DOMAIN-SUFFIX,qnap.com  
+
+# > Storage & NAS
+DOMAIN-SUFFIX,ixsystems.com
 DOMAIN-SUFFIX,myqnap.org
 DOMAIN-SUFFIX,myqnapcloud.com
 DOMAIN-SUFFIX,myqnapcloud.io
-DOMAIN-SUFFIX,nssurge.com
-DOMAIN-SUFFIX,bitsum.com
-DOMAIN-SUFFIX,vnc.com
-DOMAIN-SUFFIX,realvnc.com
-DOMAIN-SUFFIX,ticktick.com
-DOMAIN-SUFFIX,4kdownload.com
-DOMAIN-SUFFIX,talkatone.com
-DOMAIN-SUFFIX,tktn.be
-DOMAIN-SUFFIX,railway.com
+DOMAIN-SUFFIX,qnap.com
+DOMAIN-SUFFIX,truenas.com
+
+# > Virtualization & Systems
+DOMAIN-SUFFIX,debian.org
+DOMAIN-SUFFIX,openwrt.org
+DOMAIN-SUFFIX,pfsense.org
+DOMAIN-SUFFIX,proxmox.com
+
+# > Containers & Reverse Proxy
+DOMAIN-SUFFIX,caddyserver.com
+DOMAIN-SUFFIX,docker.com
+DOMAIN-SUFFIX,docker.io
+DOMAIN-SUFFIX,linuxserver.io
+DOMAIN-SUFFIX,traefik.io
+
+# > Home Automation
+DOMAIN-SUFFIX,home-assistant.io
+DOMAIN-SUFFIX,nabu.casa
+
+# > Monitoring & Observability
+DOMAIN-SUFFIX,grafana.com
+DOMAIN-SUFFIX,prometheus.io
+
+# > Hosting & Infrastructure
+DOMAIN-SUFFIX,bagevm.com
+DOMAIN-SUFFIX,boil.network
+DOMAIN-SUFFIX,dmit.io
+DOMAIN-SUFFIX,mesl.cloud
+DOMAIN-SUFFIX,misaka.io
 DOMAIN-SUFFIX,netlify.com
+DOMAIN-SUFFIX,railway.com
+DOMAIN-SUFFIX,speedypage.com
+DOMAIN-SUFFIX,vps.hosting
 DOMAIN-SUFFIX,zeabur.com
-DOMAIN-SUFFIX,openrouter.ai
+
+# > AI & Model Services
 DOMAIN-SUFFIX,aihubmix.com
 DOMAIN-SUFFIX,krill-ai.com
-DOMAIN-SUFFIX,vps.hosting
-DOMAIN-SUFFIX,dmit.io
-DOMAIN-SUFFIX,misaka.io
-DOMAIN-SUFFIX,boil.network
-DOMAIN-SUFFIX,bagevm.com
-DOMAIN-SUFFIX,speedypage.com
-DOMAIN-SUFFIX,mesl.cloud
+DOMAIN-SUFFIX,openrouter.ai
+
+# > Utilities & App Services
+DOMAIN-SUFFIX,4kdownload.com
+DOMAIN-SUFFIX,bitsum.com
+DOMAIN-SUFFIX,nssurge.com
+DOMAIN-SUFFIX,realvnc.com
+DOMAIN-SUFFIX,revenuecat.com
+DOMAIN-SUFFIX,talkatone.com
+DOMAIN-SUFFIX,ticktick.com
+DOMAIN-SUFFIX,tktn.be
+DOMAIN-SUFFIX,vnc.com
+
+# > Other Services
 DOMAIN-SUFFIX,y-too.com

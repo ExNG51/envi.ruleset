@@ -1,46 +1,57 @@
 # > OANDA
 DOMAIN-SUFFIX,oanda.com
-DOMAIN-KEYWORD,oanda
-DOMAIN-KEYWORD,fxTrade
 DOMAIN-KEYWORD,fxserver
-PROCESS-NAME,OANDA
+DOMAIN-KEYWORD,fxTrade
+DOMAIN-KEYWORD,oanda
 PROCESS-NAME,fxTrade
-USER-AGENT,OANDA*
+PROCESS-NAME,OANDA
 USER-AGENT,fxTrade*
+USER-AGENT,OANDA*
+
 # > IBKR
-DOMAIN-SUFFIX,interactivebrokers.com
 DOMAIN-SUFFIX,ibkr.com
 DOMAIN-SUFFIX,ibllc.com
 DOMAIN-SUFFIX,ibllc.com.cn
-DOMAIN-SUFFIX,usfuture.nj
+DOMAIN-SUFFIX,interactivebrokers.com
 DOMAIN-SUFFIX,usfarm.nj
+DOMAIN-SUFFIX,usfuture.nj
 DOMAIN-SUFFIX,ushmds.nj
 PROCESS-NAME,IBKR*
 USER-AGENT,IBKR*
+
 # > TradingView
 DOMAIN-SUFFIX,tradingview.com
-# > Others
+
+# > Trading Platforms & Tools
 DOMAIN-SUFFIX,chasingreturns.com
 DOMAIN-SUFFIX,content.mql5.com
 DOMAIN-SUFFIX,metatrader4.com
 DOMAIN-SUFFIX,mktomma.com
-DOMAIN-SUFFIX,sentry.io
-DOMAIN-SUFFIX,ig.com
-DOMAIN-SUFFIX,cityindex.com.sg
-DOMAIN-SUFFIX,icmarkets.com
-DOMAIN-SUFFIX,fxcm.com
-DOMAIN-SUFFIX,home.saxo
-DOMAIN-SUFFIX,forex.com
-DOMAIN-SUFFIX,cmcmarkets.com
-DOMAIN-SUFFIX,robinhood.com
-DOMAIN-SUFFIX,topstep.com
-DOMAIN-SUFFIX,topstepx.com
-DOMAIN-SUFFIX,topsteptrader.com
-DOMAIN-SUFFIX,apextraderfunding.com
 DOMAIN-SUFFIX,tradovate.com
 DOMAIN-SUFFIX,tradovateapi.com
-DOMAIN-SUFFIX,refinitiv.com
-DOMAIN-SUFFIX,dowjones.io
-DOMAIN-SUFFIX,longbridge.hk
-DOMAIN-SUFFIX,bloomberg.com
+
+# > Retail Brokers
 DOMAIN-SUFFIX,capital.com
+DOMAIN-SUFFIX,cityindex.com.sg
+DOMAIN-SUFFIX,cmcmarkets.com
+DOMAIN-SUFFIX,forex.com
+DOMAIN-SUFFIX,fxcm.com
+DOMAIN-SUFFIX,home.saxo
+DOMAIN-SUFFIX,icmarkets.com
+DOMAIN-SUFFIX,ig.com
+DOMAIN-SUFFIX,longbridge.hk
+DOMAIN-SUFFIX,robinhood.com
+
+# > Prop Trading & Evaluation
+DOMAIN-SUFFIX,apextraderfunding.com
+DOMAIN-SUFFIX,topstep.com
+DOMAIN-SUFFIX,topsteptrader.com
+DOMAIN-SUFFIX,topstepx.com
+
+# > Market Data & Research
+DOMAIN-SUFFIX,bloomberg.com
+DOMAIN-SUFFIX,dowjones.io
+DOMAIN-SUFFIX,refinitiv.com
+
+# > Supporting Services
+DOMAIN-SUFFIX,sentry.io
