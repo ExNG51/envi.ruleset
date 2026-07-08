@@ -1,22 +1,25 @@
 # > Core Providers
 DOMAIN-SUFFIX,ip2location.com
+DOMAIN-SUFFIX,ipregistry.co
 DOMAIN-SUFFIX,ipapi.com
 DOMAIN-SUFFIX,ipdata.co
 DOMAIN-SUFFIX,ipinfo.io
-DOMAIN-SUFFIX,iplark.com
-DOMAIN-SUFFIX,ipregistry.co
+DOMAIN-SUFFIX,ipip.net
 
 # > Risk & Reputation
 DOMAIN-SUFFIX,abuseipdb.com
-DOMAIN-SUFFIX,ippure.com
 DOMAIN-SUFFIX,scamalytics.com
-
-# > Lookup Tools
-DOMAIN-SUFFIX,ip.fm
-DOMAIN-SUFFIX,ip.ipyard.com
-DOMAIN-SUFFIX,ip.net.coffee
-DOMAIN-SUFFIX,ip.sy
+DOMAIN-SUFFIX,iplark.com
+DOMAIN-SUFFIX,ippure.com
 DOMAIN-SUFFIX,ipinfo.cv
-DOMAIN-SUFFIX,ipjiance.com
+DOMAIN-SUFFIX,ip.net.coffee
+DOMAIN-SUFFIX,ip.skk.moe
 DOMAIN-SUFFIX,ipjiance.net
 DOMAIN-SUFFIX,ping0.cc
+
+# > Lookup Tools
+DOMAIN-SUFFIX,bgp.tools
+DOMAIN-SUFFIX,ipcheck.ing
+DOMAIN-SUFFIX,ip.ipyard.com
+DOMAIN-SUFFIX,ip.sb
+DOMAIN-SUFFIX,ip.sy
