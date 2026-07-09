@@ -1,7 +1,4 @@
-# =========================================
-# TikTok & ByteDance Ecosystem
-# =========================================
-# Core & API
+# > TikTok & ByteDance Ecosystem | Core & API
 DOMAIN-SUFFIX,musical.ly
 DOMAIN-SUFFIX,tiktok.com
 DOMAIN-SUFFIX,tiktokd.net
@@ -12,11 +9,11 @@ DOMAIN-SUFFIX,tiktokv.us
 DOMAIN-SUFFIX,tik-tokapi.com
 DOMAIN-SUFFIX,vmt.com
 
-# Livestream (Crucial for Video Stream)
+# > TikTok & ByteDance Ecosystem | Livestream
 DOMAIN-SUFFIX,tlivecdn.com
 DOMAIN-SUFFIX,ttlivecdn.com
 
-# Assets & CDN
+# > TikTok & ByteDance Ecosystem | Assets & CDN
 DOMAIN,p16-tiktokcdn-com.akamaized.net
 DOMAIN-SUFFIX,ibyteimg.com
 DOMAIN-SUFFIX,ibytedtos.com
@@ -33,7 +30,7 @@ DOMAIN-SUFFIX,byteicdn.com
 DOMAIN-SUFFIX,tiktokstatic.com
 DOMAIN-SUFFIX,ttwstatic.com
 
-# Global Infrastructure
+# > TikTok & ByteDance Ecosystem | Global Infrastructure
 DOMAIN-SUFFIX,bytedapm.com
 DOMAIN-SUFFIX,bytegecko-i18n.com
 DOMAIN-SUFFIX,byteintlapi.com
@@ -43,7 +40,7 @@ DOMAIN-SUFFIX,ttoversea.net
 DOMAIN-SUFFIX,bytepure.com
 DOMAIN-SUFFIX,bytebus.com
 
-# CapCut & AI Tools
+# > TikTok & ByteDance Ecosystem | CapCut & AI Tools
 DOMAIN-SUFFIX,capcut.com
 DOMAIN,lf16-effectcdn.byteeffecttos-g.com
 DOMAIN,lf16-pkgcdn.pitaya-clientai.com
@@ -51,21 +48,18 @@ DOMAIN-SUFFIX,trae.ai
 DOMAIN-SUFFIX,marscode.com
 DOMAIN,trae-api-sg.mchost.guru
 
-# =========================================
-# Bigo Live & JOYY Ecosystem
-# =========================================
-# Core
+# > Bigo Live & JOYY Ecosystem | Core
 DOMAIN-SUFFIX,bigo.tv
 DOMAIN-SUFFIX,bigolive.tv
 DOMAIN-SUFFIX,bigovideo.tv
 DOMAIN-SUFFIX,bigo.sg
 
-# Assets, CDN & Payment
+# > Bigo Live & JOYY Ecosystem | Assets, CDN & Payment
 DOMAIN-SUFFIX,bigoimg.com
 DOMAIN-SUFFIX,bigocdn.com
 DOMAIN-SUFFIX,bigopay.com
 
-# Shared Infrastructure
+# > Bigo Live & JOYY Ecosystem | Shared Infrastructure
 DOMAIN-SUFFIX,imo.im
 DOMAIN-SUFFIX,yy.com
 DOMAIN-SUFFIX,joyy.sg
@@ -73,27 +67,17 @@ DOMAIN-SUFFIX,joyy.com
 DOMAIN-SUFFIX,ymcdn.net
 DOMAIN-SUFFIX,yystatic.com
 
-# Self-Owned Infrastructure
+# > Bigo Live & JOYY Ecosystem | Self-Owned Infrastructure
 IP-ASN,10122
 IP-ASN,38590
 
-# =========================================
-# Advanced Matching (Process & UA)
-# =========================================
-# TikTok
+# > Advanced Matching | TikTok
 USER-AGENT,TikTok*
 PROCESS-NAME,com.zhiliaoapp.musically
 DOMAIN-KEYWORD,tiktok
 DOMAIN-KEYWORD,musical.ly
 
-# Bigo
+# > Advanced Matching | Bigo
 USER-AGENT,BigoLive*
 USER-AGENT,Bigo*
 DOMAIN-KEYWORD,bigo
-
-# Edge Network & CDNs (Aggressive Mode)
-# IP-ASN,21859
-# IP-ASN,199524
-# IP-ASN,29802
-# IP-ASN,40065
-# IP-ASN,60068
